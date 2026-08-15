@@ -19,10 +19,41 @@ const GEAR = (() => {
   return g;
 })();
 
+const PARAM_NAMES = ['min', 'normal', 'max', 'maskS', 'maskL'];
+
+// checkParams fails closed on a malformed params object. Without it a missing
+// field is silently falsy: an absent max makes the refill loop never run and the
+// whole file chunks to nothing, and an absent mask makes every position a
+// boundary because a bitwise and with undefined is zero. Both destroy the
+// manifest while the transfer still reports success, which is exactly the class
+// of failure this module has no other way to notice. Cost is one call per chunk,
+// not per byte.
+function checkParams(p) {
+  if (p === null || typeof p !== 'object') {
+    throw new Error('cdc params: expected an object with min, normal, max, maskS, maskL');
+  }
+  for (const name of PARAM_NAMES) {
+    const v = p[name];
+    if (!Number.isInteger(v) || v < 0) {
+      throw new Error(`cdc params: ${name} must be a non-negative integer, got ${String(v)}`);
+    }
+  }
+  if (p.min < 1) {
+    throw new Error(`cdc params: min must be at least 1, got ${p.min}`);
+  }
+  if (p.min > p.normal) {
+    throw new Error(`cdc params: min (${p.min}) must not exceed normal (${p.normal})`);
+  }
+  if (p.normal > p.max) {
+    throw new Error(`cdc params: normal (${p.normal}) must not exceed max (${p.max})`);
+  }
+}
+
 // cutPoint returns the length of the chunk beginning at start. It never returns
 // zero for a non-empty range, because a zero-length chunk would spin the caller
 // forever.
 export function cutPoint(buf, start, end, p) {
+  checkParams(p);
   let n = end - start;
   if (n <= p.min) return n;
   if (n > p.max) n = p.max;
@@ -44,13 +75,6 @@ export function cutPoint(buf, start, end, p) {
   return n;
 }
 
-function concat(a, b) {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a, 0);
-  out.set(b, a.length);
-  return out;
-}
-
 // chunkStream yields plaintext chunks from a ReadableStream of Uint8Array. It
 // holds at most one maximum-sized window plus the incoming slice, so a 20 GB
 // file costs the same memory as a 20 MB one.
@@ -60,22 +84,44 @@ function concat(a, b) {
 // Cutting from a short buffer would produce different boundaries on a device
 // with a different read size, and dedup between those two devices would fail.
 export async function* chunkStream(stream, p) {
+  checkParams(p);
   const reader = stream.getReader();
   let buf = new Uint8Array(0);
   let done = false;
 
   while (true) {
-    while (!done && buf.length < p.max) {
-      const r = await reader.read();
-      if (r.done) { done = true; break; }
-      buf = concat(buf, r.value);
+    if (!done && buf.length < p.max) {
+      // Collect the incoming slices and join them once. Growing the window on
+      // every read instead would copy the entire window per read, and a browser
+      // hands out reads of tens of kilobytes against a multi-megabyte window, so
+      // that is on the order of a hundred full-window copies per chunk. The
+      // bytes are identical either way, so boundaries are unaffected.
+      const parts = [buf];
+      let total = buf.length;
+      while (total < p.max) {
+        const r = await reader.read();
+        if (r.done) { done = true; break; }
+        parts.push(r.value);
+        total += r.value.length;
+      }
+      if (parts.length > 1) {
+        const joined = new Uint8Array(total);
+        let off = 0;
+        for (const part of parts) { joined.set(part, off); off += part.length; }
+        buf = joined;
+      }
     }
     if (buf.length === 0) return;
 
     const n = cutPoint(buf, 0, buf.length, p);
     yield buf.subarray(0, n);
     // slice rather than subarray: a view would keep the whole original buffer
-    // alive and defeat the streaming property.
+    // alive and defeat the streaming property. This is one copy of the remainder
+    // per chunk, not per read.
+    // ponytail: a preallocated max-plus-slice buffer with a fill offset and
+    // copyWithin after each cut removes this copy too. Not worth the index
+    // bookkeeping until profiling on a real upload says the remainder copy is
+    // the bottleneck rather than hashing or encryption.
     buf = buf.slice(n);
     if (done && buf.length === 0) return;
   }

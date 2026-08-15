@@ -54,6 +54,26 @@ test('chunking does not depend on how the stream is sliced', async () => {
   assert.deepEqual(a, b);
 });
 
+test('slices smaller than max still produce identical chunks', async () => {
+  // Every other slice size in this suite is larger than P.max, so the refill
+  // loop only ever runs once and the production path is never exercised: a
+  // browser hands out reads far smaller than the maximum chunk size, so filling
+  // the window takes many reads per cut. These sizes force that path.
+  const data = pseudoRandom(200000, 7);
+  const reference = (await chunksOf(data, 997)).map(digest);
+  for (const sliceSize of [63, 64, 100, 511]) {
+    const got = (await chunksOf(data, sliceSize)).map(digest);
+    assert.deepEqual(got, reference, `slice size ${sliceSize} changed the boundaries`);
+  }
+
+  // One byte at a time is the pathological case for the refill loop. Kept on a
+  // smaller input so the test stays fast.
+  const small = pseudoRandom(6000, 7);
+  assert.deepEqual(
+    (await chunksOf(small, 1)).map(digest),
+    (await chunksOf(small, 997)).map(digest));
+});
+
 test('chunks reassemble to the original bytes', async () => {
   const data = pseudoRandom(200000, 11);
   const chunks = await chunksOf(data);
@@ -117,4 +137,44 @@ test('cutPoint never returns zero on a non-empty buffer', async () => {
     const buf = pseudoRandom(1000, seed);
     assert.ok(cutPoint(buf, 0, buf.length, P) > 0);
   }
+});
+
+test('malformed params are rejected instead of silently chunking to nothing', async () => {
+  // Without a max the refill never runs and a whole file yields zero chunks;
+  // without a mask every position is a boundary because a bitwise and with
+  // undefined is zero. Either way the manifest is wrong and the transfer still
+  // reports success, so the failure has to be loud here.
+  const data = pseudoRandom(100000, 31);
+  const bad = [
+    [undefined, 'missing params'],
+    [null, 'null params'],
+    [{}, 'empty params'],
+    [{ ...P, max: undefined }, 'missing max'],
+    [{ ...P, maskS: undefined }, 'missing maskS'],
+    [{ ...P, maskL: undefined }, 'missing maskL'],
+    [{ ...P, min: 0 }, 'zero min'],
+    [{ ...P, min: -1 }, 'negative min'],
+    [{ ...P, min: 1.5 }, 'fractional min'],
+    [{ ...P, min: '64' }, 'string min'],
+    [{ ...P, min: P.normal + 1 }, 'min above normal'],
+    [{ ...P, normal: P.max + 1 }, 'normal above max'],
+  ];
+  for (const [params, label] of bad) {
+    await assert.rejects(
+      async () => {
+        for await (const _c of chunkStream(streamOf(data), params)) { /* drain */ }
+      },
+      /cdc params/,
+      `${label} should have thrown`);
+    assert.throws(() => cutPoint(data, 0, data.length, params), /cdc params/, label);
+  }
+});
+
+test('valid params at the boundaries are accepted', async () => {
+  // min === normal === max is degenerate but well formed, and rejecting it would
+  // be a validator that is stricter than the algorithm.
+  const flat = { min: 128, normal: 128, max: 128, maskS: P.maskS, maskL: P.maskL };
+  const out = [];
+  for await (const c of chunkStream(streamOf(pseudoRandom(1000, 37)), flat)) out.push(c);
+  assert.equal(out.reduce((n, c) => n + c.length, 0), 1000);
 });

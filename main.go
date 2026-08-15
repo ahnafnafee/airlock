@@ -35,6 +35,10 @@ var (
 	requireApproval = flag.Bool("require-approval", false, "hold new devices until an approved device admits them")
 	vapidSubject    = flag.String("vapid-subject", "mailto:airlock@invalid", "VAPID subject")
 	allowUsers      = flag.String("allow-users", "", "comma-separated tailnet logins allowed; empty means the server node's own owner")
+	tailscaleMode   = flag.String("tailscale-mode", "host",
+		`"host" to serve through the machine's running tailscaled, or "embedded" for a self-contained tsnet node`)
+	allowNodes = flag.String("allow-nodes", "",
+		"comma-separated node names allowed; empty means any node of an allowed user")
 )
 
 // cdcDefaults are the chunking parameters the server hands every client. They
@@ -220,9 +224,4 @@ func sweepLoop(transfers *Transfers, chunks *ChunkStore) {
 			log.Printf("swept %d expired transfers and %d orphaned chunks", gone, orphans)
 		}
 	}
-}
-
-// tailscaleListener is replaced with the real implementation in Task 7.
-func tailscaleListener() (net.Listener, IdentityFunc, error) {
-	return nil, nil, errors.New("tailscale mode lands in Task 7; use --auth=token for now")
 }

@@ -12,14 +12,25 @@ import (
 	"time"
 )
 
+// newTestServer builds a server with limits small enough that most tests can
+// cross them cheaply. Those defaults are too small to tell a handler that reads
+// a limit from its store apart from one that writes a number down, so a test
+// that cares about that distinction uses newTestServerWithLimits instead.
 func newTestServer(t *testing.T, allow bool) (*Server, *Devices) {
 	t.Helper()
+	return newTestServerWithLimits(t, allow, 4096, 1<<20)
+}
+
+// newTestServerWithLimits is newTestServer with the record and total byte
+// budgets under the caller's control.
+func newTestServerWithLimits(t *testing.T, allow bool, maxRecord int, maxTotal int64) (*Server, *Devices) {
+	t.Helper()
 	dir := t.TempDir()
-	chunks, err := NewChunkStore(dir, 64, 1<<20)
+	chunks, err := NewChunkStore(dir, 64, maxTotal)
 	if err != nil {
 		t.Fatal(err)
 	}
-	transfers, err := NewTransfers(dir, chunks, time.Hour, 100, 4096)
+	transfers, err := NewTransfers(dir, chunks, time.Hour, 100, maxRecord)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,16 +445,26 @@ func TestChunkUploadKeepsItsTransferAlive(t *testing.T) {
 }
 
 // The record reader's cap has to come from the store's configurable maxRecord.
-// A cap written down in the handler would become the real limit the moment the
-// two disagreed, and no test that used the default could see it.
+// A cap written down in the handler becomes the real limit the moment the two
+// disagree, and the small default hides that: the store's own limit trips
+// first, so both the derived cap and a literal answer identically. This runs
+// on a server whose maxRecord is larger than any cap a handler would plausibly
+// hardcode, and puts a record in the gap between the two. A chunklist runs to
+// megabytes on a large transfer, so the gap is a size real traffic reaches.
 func TestRecordSizeFollowsTheConfiguredMaximum(t *testing.T) {
-	s, _ := newTestServer(t, true) // maxRecord is 4096 in tests
+	const maxRecord = 2 << 20
+	s, _ := newTestServerWithLimits(t, true, maxRecord, 8<<20)
 	id, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"]}`)
 
-	if code := do(t, s, "PUT", "/api/transfer/"+id+"/chunklist", strings.Repeat("x", 4096)).Code; code != http.StatusNoContent {
+	// Over a 1 MiB literal, under the configured maximum. A handler carrying
+	// its own number answers 413 here; one reading the store's answers 204.
+	if code := do(t, s, "PUT", "/api/transfer/"+id+"/chunklist", strings.Repeat("x", 1<<20+1)).Code; code != http.StatusNoContent {
+		t.Fatalf("record above a hardcoded 1 MiB cap but below the configured maximum = %d, want 204", code)
+	}
+	if code := do(t, s, "PUT", "/api/transfer/"+id+"/chunklist", strings.Repeat("x", maxRecord)).Code; code != http.StatusNoContent {
 		t.Fatalf("record at the configured maximum = %d, want 204", code)
 	}
-	if code := do(t, s, "PUT", "/api/transfer/"+id+"/chunklist", strings.Repeat("x", 4097)).Code; code != http.StatusRequestEntityTooLarge {
+	if code := do(t, s, "PUT", "/api/transfer/"+id+"/chunklist", strings.Repeat("x", maxRecord+1)).Code; code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("record over the configured maximum = %d, want 413", code)
 	}
 }

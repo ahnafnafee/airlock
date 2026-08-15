@@ -149,6 +149,15 @@ test('a forged plaintext check blob is rejected under any key', async () => {
   assert.equal(await verifyCheck(await wrongP, forged), false);
 });
 
+test('a check blob passed as an ArrayBuffer is still accepted', async () => {
+  // This is the shape response.arrayBuffer() hands back, so the mode guard has
+  // to read the same normalized view openRecord does.
+  const record = await makeCheck(await mkP);
+  const buf = record.buffer.slice(record.byteOffset, record.byteOffset + record.byteLength);
+  assert.equal(await verifyCheck(await mkP, buf), true);
+  assert.equal(await verifyCheck(await wrongP, buf), false);
+});
+
 test('hash packing round trips', async () => {
   const hashes = [];
   for (let i = 0; i < 5; i++) hashes.push(new Uint8Array(32).fill(i));

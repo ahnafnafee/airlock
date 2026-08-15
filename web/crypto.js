@@ -165,10 +165,15 @@ export const makeCheck = (mk) =>
 // authentication tag, so anyone could forge one that decodes to the expected
 // literal under any key. Only the sealed form can be a valid check, and
 // makeCheck only ever emits that form.
+//
+// The mode byte is read from the same normalized view openRecord uses, so a
+// caller may pass anything openRecord accepts (an ArrayBuffer straight from
+// response.arrayBuffer(), for instance) and get the same verdict.
 export async function verifyCheck(mk, record) {
   try {
-    if (record.length < 1 || modeOf(record) !== MODE_SEALED) return false;
-    const got = await openRecord(mk, DOMAIN.CHECK, null, record);
+    const b = record instanceof Uint8Array ? record : new Uint8Array(record);
+    if (b.length < 1 || modeOf(b) !== MODE_SEALED) return false;
+    const got = await openRecord(mk, DOMAIN.CHECK, null, b);
     return new TextDecoder().decode(got) === CHECK_PLAINTEXT;
   } catch {
     return false;

@@ -1,0 +1,30 @@
+:root {
+  /* The ground is a desaturated green-black, the color of a pressure vessel
+     under low light. Deliberately not neutral near-black, which is where every
+     dark tool ends up by default. */
+  --hull: #0E1614;
+  --hull-raised: #16211E;
+  --seam: #24332E;
+  --bone: #E4E7E1;
+  --vapor: #8A9A93;
+
+  /* Two signal colors, each with one job it never leaves. Amber is always
+     "in transit", green is always "sealed or already held". Neither is ever
+     used for the other's meaning, which is what lets a reader learn the
+     interface once and then read state without reading words. */
+  --sodium: #F0A83C;
+  --seal: #4FD1A5;
+  --breach: #E8654F;
+
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  --label: 11px;
+  --data: 13px;
+  --body: 15px;
+  --title: 20px;
+  --wordmark: 28px;
+
+  --gap: 16px;
+  --radius: 3px;
+}

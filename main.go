@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-//go:embed web/index.html
+//go:embed web/index.html web/tokens.css web/app.css web/api.js web/app.js web/crypto.js web/cdc.js web/views
 var webFS embed.FS
 
 var (

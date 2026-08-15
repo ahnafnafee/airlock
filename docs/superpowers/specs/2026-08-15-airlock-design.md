@@ -4,7 +4,7 @@
 **Status:** revised for the full feature set, superseding the store-and-forward-only v1
 
 A self-hosted encrypted file transfer system. One Go binary, one installable web
-app, one thin Android shell. Files move between the owner's devices through an
+app, no native clients. Files move between the owner's devices through an
 inbox that only Tailscale-verified devices can reach, and that the host itself
 cannot read.
 
@@ -28,7 +28,7 @@ is why the web app can carry almost the whole product.
 2. Only devices the tailnet vouches for can send or receive, and access is revocable.
 3. The host cannot read file contents, filenames, or thumbnails.
 4. Multi-gigabyte files, resumable across drops and reloads, deduplicated, delta-synced.
-5. Behaves like an installed app: share sheet, notifications, background receive.
+5. Behaves like an installed app: share sheet, notifications, file handlers.
 
 ### Non-goals
 
@@ -126,7 +126,7 @@ per chunk if the sweep ever takes longer than the interval.`
 ## 3. Architecture
 
 ```
-  Phone (PWA + Android shell)        Server            Desktop (PWA)
+  Phone (PWA)                        Server            Desktop (PWA)
              |                    airlock                    |
              |               (tsnet node, Go)                |
              |    https://airlock.<tailnet>.ts.net           |
@@ -387,20 +387,25 @@ login, and Web Push. Push payloads are empty by design, because a payload would
 carry the filename past the encryption boundary; the worker fetches and decrypts
 the name locally.
 
-### Android shell (silent background receive)
+### No native clients
 
-A thin native app wrapping the web UI in a WebView, plus a foreground service
-that receives push and downloads, decrypts, and writes to the Downloads folder
-with the app closed. That last part is the only thing the PWA genuinely cannot
-do.
+Airlock is browser-only, deliberately.
 
-The service implements the crypto natively in Kotlin rather than driving a
-headless WebView. To keep two implementations from drifting, the JavaScript
-implementation **generates a committed test-vector file**, and the Kotlin tests
-assert against it. Generated, not mirrored: a divergence fails the build rather
-than silently producing files that will not open.
+A native Android shell was designed and then cut. It would have served exactly
+one capability the PWA cannot provide: writing a received file to the filesystem
+with the app closed. Its price was a second implementation of the crypto in
+Kotlin, and two implementations of a cipher drift. Drift here does not fail
+loudly; it produces files that download successfully and cannot be opened, which
+is the worst failure mode this design has.
 
-The passphrase lives in the Android Keystore, entered once.
+Notification-then-tap is the accepted behavior for background receive. The tap
+costs a second and buys a codebase with exactly one place where encryption
+happens.
+
+The consequence to be honest about: an upload from a phone slows down when the
+screen locks, because a backgrounded tab is throttled. Content addressing makes
+that recoverable rather than fatal, since reopening the app re-chunks
+deterministically and resumes from whatever the server already holds.
 
 ### iOS
 
@@ -427,14 +432,14 @@ iOS-specific code will be written.
 | `web/app.js` | Application shell and view routing |
 | `web/ui/*.js` | Individual views: send, inbox, history, devices |
 | `web/sw.js` | Decrypt-on-download, push, share target, background fetch |
-| `android/` | WebView shell, push service, Kotlin crypto, vector tests |
+| `web/views/*.js` | One module per view: send, inbox, history, devices |
 
 The identity gate is a seam: `func(*http.Request) (Identity, bool)`. Production
 supplies a `WhoIs` implementation, tests supply a fake, and the whole HTTP
 surface is testable without a tailnet.
 
 Dependencies: `tailscale.com` and `github.com/SherClockHolmes/webpush-go` on the
-server, zero on the web frontend, and the standard AndroidX set in the shell.
+server, and zero on the web frontend.
 
 ---
 
@@ -448,8 +453,9 @@ server, zero on the web frontend, and the standard AndroidX set in the shell.
   different plaintext never does), AAD domain separation, chunk-list tamper
   detection for reorder, truncate, and splice, and FastCDC boundary stability
   under insertion.
-- **Cross-language:** the JavaScript suite emits `testdata/vectors.json`, and the
-  Kotlin suite asserts against it. Drift fails the build.
+There is no cross-language crypto suite, because there is only one
+implementation of the crypto. That is the whole reason the native client was
+cut.
 
 The three checks whose failure looks like success, and which therefore matter
 most: tampered chunk lists must fail to decrypt; a chunk file on the server must

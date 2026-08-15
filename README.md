@@ -94,7 +94,7 @@ Because the Tailscale certificate makes the page a genuine secure context, the w
 - **Windows file handling.** Right-click a file, Open with, Airlock. Or drag it onto the window.
 - **Launch at login**, so it is simply always there.
 
-No native Android app. No native Windows app. A thin wrapper remains possible later if silent background receive ever matters, and it would reuse the protocol and the entire UI.
+No native Android app. No native Windows app. Airlock is browser-only on purpose: a native shell was designed for one capability the PWA cannot provide, writing a received file to disk with the app closed, and cut because its price was a second implementation of the crypto. Two implementations of a cipher drift, and drift there does not fail loudly, it produces files that download successfully and will not open. Notification-then-tap costs a second and buys exactly one place where encryption happens.
 
 <div align="right">
 
@@ -300,7 +300,7 @@ Built task by task from [the implementation plan](./docs/superpowers/plans/2026-
 | 11 | Upload with dedup negotiation | ⬜ Pending |
 | 12 | Service worker download and inbox | ⬜ Pending |
 
-**Phase 2** adds device pairing and the recipient picker, transfer history, thumbnails, Web Push, PWA install and share target, relays, an Android shell for silent background receive, and the throughput benchmark that settles which Tailscale mode is the default.
+**Phase 2** adds device pairing and the recipient picker, transfer history, thumbnails, Web Push, a live event stream, PWA install and share target, relays, and the throughput benchmark that settles which Tailscale mode is the default.
 
 **Deliberately not built:** accounts, sharing outside your own tailnet, public links, and any server-side view of plaintext.
 

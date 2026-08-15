@@ -1,0 +1,3261 @@
+# transfer-local Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** A self-hosted Blip replacement: one Go binary serving one installable web app, where files move between the owner's devices through an inbox that only Tailscale-verified devices can reach and that the host itself cannot read.
+
+**Architecture:** Store-and-forward. A Go process joins the tailnet as its own node via `tsnet`, which supplies a trusted `*.ts.net` TLS certificate, a name that resolves only on the tailnet, and `WhoIs()` for per-connection verified identity. Browsers encrypt every chunk with AES-256-GCM before upload, so the server only ever holds ciphertext. Because the client is a PWA on a genuinely secure origin, it gets install, push, and Android's share sheet without a native app.
+
+**Tech Stack:** Go 1.26, `tailscale.com/tsnet`, `github.com/SherClockHolmes/webpush-go`, vanilla ES modules with Web Crypto. No frontend framework, no bundler, no build step.
+
+**Spec:** `docs/superpowers/specs/2026-08-15-transfer-local-design.md`
+
+## Global Constraints
+
+- Go module name is `transfer-local`. Go 1.26.1 or later (the plan uses `net/http.ServeMux` method-and-wildcard patterns and `http.FileServerFS`).
+- **Exactly two Go dependencies are permitted:** `tailscale.com` and `github.com/SherClockHolmes/webpush-go`. Everything else is standard library. Adding a third is a plan violation.
+- **The frontend has zero dependencies and no build step.** Vanilla ES modules served as-is. No npm packages ship to the browser.
+- Chunk size default: `8 << 20` (8388608 bytes) of plaintext.
+- KDF: PBKDF2-HMAC-SHA256, **600000** iterations, 256-bit AES-GCM output, non-extractable.
+- Sealed blob format: `IV(12 random bytes) || AES-GCM ciphertext || tag(16 bytes)`.
+- AAD domains, byte-exact:
+  - chunk: `0x43 ('C') || fileId(16 bytes) || index(uint32 big-endian) || count(uint32 big-endian)` = 25 bytes
+  - manifest: `0x4d ('M') || fileId(16 bytes)` = 17 bytes
+  - check blob: `0x4b ('K')` = 1 byte
+- Blob ids are exactly 32 lowercase hex characters, generated server-side from `crypto/rand`. Client input matching `^[0-9a-f]{32}$` is the only thing that may reach a filesystem path.
+- Quota defaults: 50 GiB per blob, 200 GiB total, 24 hour TTL measured from the newest write in the blob directory.
+- Data directory permissions: `0o700` for directories, `0o600` for files.
+- Commit messages follow Conventional Commits. **Never add a `Co-Authored-By: Claude` trailer or any AI attribution line.**
+- All prose, comments, and UI copy in US English. **No em dashes or en dashes anywhere**, including code comments.
+- Deliberate simplifications get a `ponytail:` comment naming the ceiling and the upgrade path.
+
+---
+
+### Task 1: Blob store, write path
+
+**Files:**
+- Create: `go.mod`
+- Create: `store.go`
+- Test: `store_test.go`
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces:
+  - `type Meta struct { ID string; ChunkCount int; Sender string; CreatedAt time.Time }`
+  - `type Info struct { Meta; Have []int; Complete bool; EncMeta string }`
+  - `func NewStore(dir string, chunkSize, maxBlob, maxTotal int64, ttl time.Duration) (*Store, error)`
+  - `func (s *Store) Create(sender string, chunkCount int) (*Meta, error)`
+  - `func (s *Store) PutMeta(id string, r io.Reader) error`
+  - `func (s *Store) PutChunk(id string, n int, r io.Reader) error`
+  - `func (s *Store) Get(id string) (*Info, error)`
+  - `func (s *Store) OpenChunk(id string, n int) (*os.File, error)`
+  - `func atomicWrite(path string, b []byte) error`
+  - Sentinel errors `ErrNotFound`, `ErrBadIndex`, `ErrQuota`
+
+- [ ] **Step 1: Initialize the module**
+
+```bash
+cd D:/GitHub/transfer-local
+go mod init transfer-local
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+Create `store_test.go`:
+
+```go
+package main
+
+import (
+	"errors"
+	"strings"
+	"testing"
+	"time"
+)
+
+func newTestStore(t *testing.T) *Store {
+	t.Helper()
+	s, err := NewStore(t.TempDir(), 16, 1<<20, 4<<20, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+func TestCreateAssignsHexID(t *testing.T) {
+	s := newTestStore(t)
+	m, err := s.Create("pixel", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !idRe.MatchString(m.ID) {
+		t.Fatalf("id %q is not 32 lowercase hex", m.ID)
+	}
+	if m.ChunkCount != 3 || m.Sender != "pixel" {
+		t.Fatalf("unexpected meta %+v", m)
+	}
+}
+
+func TestPutChunksOutOfOrderAndComplete(t *testing.T) {
+	s := newTestStore(t)
+	m, _ := s.Create("pixel", 3)
+
+	for _, n := range []int{2, 0, 1} {
+		if err := s.PutChunk(m.ID, n, strings.NewReader("chunk")); err != nil {
+			t.Fatalf("chunk %d: %v", n, err)
+		}
+	}
+	info, err := s.Get(m.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Have; len(got) != 3 || got[0] != 0 || got[1] != 1 || got[2] != 2 {
+		t.Fatalf("Have = %v, want sorted [0 1 2]", got)
+	}
+	if info.Complete {
+		t.Fatal("blob is complete without a manifest")
+	}
+	if err := s.PutMeta(m.ID, strings.NewReader("sealed")); err != nil {
+		t.Fatal(err)
+	}
+	info, _ = s.Get(m.ID)
+	if !info.Complete {
+		t.Fatal("blob should be complete once manifest and all chunks exist")
+	}
+	if info.EncMeta == "" {
+		t.Fatal("EncMeta should be the base64 manifest")
+	}
+}
+
+func TestPutChunkIsIdempotent(t *testing.T) {
+	s := newTestStore(t)
+	m, _ := s.Create("pixel", 1)
+	for i := 0; i < 3; i++ {
+		if err := s.PutChunk(m.ID, 0, strings.NewReader("same")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, _ := s.Get(m.ID)
+	if len(info.Have) != 1 {
+		t.Fatalf("Have = %v, want one entry", info.Have)
+	}
+}
+
+func TestPutChunkRejectsIndexOutOfRange(t *testing.T) {
+	s := newTestStore(t)
+	m, _ := s.Create("pixel", 2)
+	for _, n := range []int{-1, 2, 99} {
+		if err := s.PutChunk(m.ID, n, strings.NewReader("x")); !errors.Is(err, ErrBadIndex) {
+			t.Fatalf("index %d: err = %v, want ErrBadIndex", n, err)
+		}
+	}
+}
+
+func TestMalformedIDNeverTouchesFilesystem(t *testing.T) {
+	s := newTestStore(t)
+	bad := []string{
+		"../../etc/passwd",
+		"..",
+		"",
+		"ABCDEF01234567890123456789012345", // uppercase
+		strings.Repeat("a", 31),
+		strings.Repeat("a", 33),
+		"a/b",
+	}
+	for _, id := range bad {
+		if _, err := s.Get(id); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Get(%q) = %v, want ErrNotFound", id, err)
+		}
+		if err := s.PutChunk(id, 0, strings.NewReader("x")); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("PutChunk(%q) = %v, want ErrNotFound", id, err)
+		}
+	}
+}
+
+func TestCreateRejectsOversizeBlob(t *testing.T) {
+	s := newTestStore(t) // chunkSize 16, maxBlob 1 MiB
+	if _, err := s.Create("pixel", 1<<20); !errors.Is(err, ErrQuota) {
+		t.Fatalf("err = %v, want ErrQuota", err)
+	}
+}
+
+func TestCreateRejectsWhenTotalQuotaExhausted(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir, 16, 1<<20, 64, time.Hour) // 64 byte total budget
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Create("pixel", 2); err != nil {
+		t.Fatalf("first create should fit: %v", err)
+	}
+	if _, err := s.Create("pixel", 2); err != nil {
+		t.Fatalf("second create should fit: %v", err)
+	}
+	if _, err := s.Create("pixel", 2); !errors.Is(err, ErrQuota) {
+		t.Fatalf("err = %v, want ErrQuota once the budget is spent", err)
+	}
+}
+```
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `go test ./...`
+Expected: FAIL, compile errors on undefined `NewStore`, `Store`, `idRe`, `ErrBadIndex`, `ErrQuota`, `ErrNotFound`.
+
+- [ ] **Step 4: Write `store.go`**
+
+```go
+package main
+
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"time"
+)
+
+var idRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+var (
+	ErrNotFound = errors.New("not found")
+	ErrBadIndex = errors.New("chunk index out of range")
+	ErrQuota    = errors.New("storage quota exceeded")
+)
+
+// Meta is everything the server knows about a blob. The filename, MIME type and
+// contents live inside the client-encrypted manifest, which the server stores as
+// opaque bytes and never parses.
+type Meta struct {
+	ID         string    `json:"id"`
+	ChunkCount int       `json:"chunkCount"`
+	Sender     string    `json:"sender"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
+// Info is Meta plus the state derived from what is actually on disk.
+type Info struct {
+	Meta
+	Have     []int  `json:"have"`
+	Complete bool   `json:"complete"`
+	EncMeta  string `json:"meta"` // base64 manifest, empty until uploaded
+}
+
+type Store struct {
+	dir       string
+	chunkSize int64
+	maxBlob   int64
+	maxTotal  int64
+	ttl       time.Duration
+}
+
+func NewStore(dir string, chunkSize, maxBlob, maxTotal int64, ttl time.Duration) (*Store, error) {
+	if err := os.MkdirAll(filepath.Join(dir, "blobs"), 0o700); err != nil {
+		return nil, err
+	}
+	return &Store{dir: dir, chunkSize: chunkSize, maxBlob: maxBlob, maxTotal: maxTotal, ttl: ttl}, nil
+}
+
+// blobDir is the only place a blob id becomes a path. The regex is the entire
+// defense against traversal, so nothing may join an id onto a path elsewhere.
+func (s *Store) blobDir(id string) (string, error) {
+	if !idRe.MatchString(id) {
+		return "", ErrNotFound
+	}
+	return filepath.Join(s.dir, "blobs", id), nil
+}
+
+func (s *Store) Create(sender string, chunkCount int) (*Meta, error) {
+	if chunkCount < 1 {
+		return nil, ErrBadIndex
+	}
+	// Reserve against the declared upper bound rather than metering as bytes
+	// land, so an over-quota transfer is refused before it costs anything.
+	declared := int64(chunkCount) * s.chunkSize
+	if declared > s.maxBlob {
+		return nil, ErrQuota
+	}
+	used, err := s.usedBytes()
+	if err != nil {
+		return nil, err
+	}
+	if used+declared > s.maxTotal {
+		return nil, ErrQuota
+	}
+
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return nil, err
+	}
+	m := &Meta{
+		ID:         hex.EncodeToString(raw[:]),
+		ChunkCount: chunkCount,
+		Sender:     sender,
+		CreatedAt:  time.Now().UTC(),
+	}
+	dir, err := s.blobDir(m.ID)
+	if err != nil {
+		return nil, err
+	}
+	// Mkdir rather than MkdirAll: an id collision fails loudly instead of
+	// overwriting somebody else's transfer.
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return nil, err
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	return m, atomicWrite(filepath.Join(dir, "meta.json"), b)
+}
+
+// ponytail: full walk per create. Fine at a few hundred live blobs. Cache the
+// running total in memory if the inbox ever holds thousands.
+func (s *Store) usedBytes() (int64, error) {
+	var total int64
+	err := filepath.WalkDir(filepath.Join(s.dir, "blobs"), func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return nil // raced with a sweep; skip it
+		}
+		total += fi.Size()
+		return nil
+	})
+	return total, err
+}
+
+func (s *Store) readMeta(dir string) (*Meta, error) {
+	b, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	var m Meta
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+func (s *Store) PutMeta(id string, r io.Reader) error {
+	dir, err := s.blobDir(id)
+	if err != nil {
+		return err
+	}
+	if _, err := s.readMeta(dir); err != nil {
+		return err
+	}
+	return writeStream(filepath.Join(dir, "manifest"), r)
+}
+
+func (s *Store) PutChunk(id string, n int, r io.Reader) error {
+	dir, err := s.blobDir(id)
+	if err != nil {
+		return err
+	}
+	m, err := s.readMeta(dir)
+	if err != nil {
+		return err
+	}
+	if n < 0 || n >= m.ChunkCount {
+		return ErrBadIndex
+	}
+	return writeStream(filepath.Join(dir, strconv.Itoa(n)), r)
+}
+
+// writeStream lands the body in a temp file and renames it into place, so a
+// dropped connection can never leave a truncated chunk that resume would
+// mistake for a finished one.
+func writeStream(path string, r io.Reader) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(f, r); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func atomicWrite(path string, b []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func (s *Store) Get(id string) (*Info, error) {
+	dir, err := s.blobDir(id)
+	if err != nil {
+		return nil, err
+	}
+	m, err := s.readMeta(dir)
+	if err != nil {
+		return nil, err
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	info := &Info{Meta: *m, Have: []int{}}
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		// Only names that are plain integers in range are chunks. meta.json,
+		// manifest and any .tmp leftovers are skipped by construction.
+		if n, err := strconv.Atoi(e.Name()); err == nil && n >= 0 && n < m.ChunkCount {
+			info.Have = append(info.Have, n)
+		}
+	}
+	sort.Ints(info.Have)
+	if b, err := os.ReadFile(filepath.Join(dir, "manifest")); err == nil {
+		info.EncMeta = base64.StdEncoding.EncodeToString(b)
+	}
+	info.Complete = info.EncMeta != "" && len(info.Have) == m.ChunkCount
+	return info, nil
+}
+
+func (s *Store) OpenChunk(id string, n int) (*os.File, error) {
+	dir, err := s.blobDir(id)
+	if err != nil {
+		return nil, err
+	}
+	m, err := s.readMeta(dir)
+	if err != nil {
+		return nil, err
+	}
+	if n < 0 || n >= m.ChunkCount {
+		return nil, ErrBadIndex
+	}
+	f, err := os.Open(filepath.Join(dir, strconv.Itoa(n)))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrNotFound
+	}
+	return f, err
+}
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `go test ./... -v`
+Expected: PASS, seven tests.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git init
+git add go.mod store.go store_test.go
+git commit -m "feat(store): blob creation, chunked writes and completeness"
+```
+
+---
+
+### Task 2: Blob store, read and lifecycle
+
+**Files:**
+- Modify: `store.go` (append)
+- Test: `store_test.go` (append)
+
+**Interfaces:**
+- Consumes: `Store`, `Info`, `blobDir`, `ErrNotFound` from Task 1.
+- Produces:
+  - `func (s *Store) List() ([]*Info, error)` newest first
+  - `func (s *Store) Delete(id string) error`
+  - `func (s *Store) Sweep(now time.Time) (int, error)`
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `store_test.go`:
+
+```go
+func TestListIsNewestFirst(t *testing.T) {
+	s := newTestStore(t)
+	a, _ := s.Create("pixel", 1)
+	time.Sleep(5 * time.Millisecond)
+	b, _ := s.Create("laptop", 1)
+
+	got, err := s.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d blobs, want 2", len(got))
+	}
+	if got[0].ID != b.ID || got[1].ID != a.ID {
+		t.Fatalf("order = %s,%s; want newest %s first", got[0].ID, got[1].ID, b.ID)
+	}
+}
+
+func TestDelete(t *testing.T) {
+	s := newTestStore(t)
+	m, _ := s.Create("pixel", 1)
+	if err := s.Delete(m.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get(m.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	if err := s.Delete(m.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second delete = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSweepUsesLastWriteNotCreation(t *testing.T) {
+	s := newTestStore(t) // ttl 1 hour
+	stale, _ := s.Create("pixel", 1)
+	fresh, _ := s.Create("pixel", 1)
+
+	// Backdate the stale blob's directory and every file in it.
+	old := time.Now().Add(-3 * time.Hour)
+	dir, _ := s.blobDir(stale.ID)
+	ents, _ := os.ReadDir(dir)
+	for _, e := range ents {
+		if err := os.Chtimes(filepath.Join(dir, e.Name()), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.Sweep(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("swept %d, want 1", n)
+	}
+	if _, err := s.Get(stale.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatal("stale blob survived the sweep")
+	}
+	if _, err := s.Get(fresh.ID); err != nil {
+		t.Fatalf("fresh blob was swept: %v", err)
+	}
+}
+
+func TestSweepSparesAnInFlightUpload(t *testing.T) {
+	s := newTestStore(t)
+	m, _ := s.Create("pixel", 2)
+
+	// Old meta.json, but a chunk that landed just now: this is a long upload,
+	// not an expired blob.
+	old := time.Now().Add(-3 * time.Hour)
+	dir, _ := s.blobDir(m.ID)
+	os.Chtimes(filepath.Join(dir, "meta.json"), old, old)
+	os.Chtimes(dir, old, old)
+	if err := s.PutChunk(m.ID, 0, strings.NewReader("just arrived")); err != nil {
+		t.Fatal(err)
+	}
+
+	n, _ := s.Sweep(time.Now())
+	if n != 0 {
+		t.Fatalf("swept %d, want 0", n)
+	}
+}
+```
+
+Add `"os"` and `"path/filepath"` to the test file's imports.
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `go test ./...`
+Expected: FAIL, undefined `List`, `Delete`, `Sweep`.
+
+- [ ] **Step 3: Implement**
+
+Append to `store.go`:
+
+```go
+func (s *Store) List() ([]*Info, error) {
+	ents, err := os.ReadDir(filepath.Join(s.dir, "blobs"))
+	if err != nil {
+		return nil, err
+	}
+	out := []*Info{}
+	for _, e := range ents {
+		if !e.IsDir() {
+			continue
+		}
+		info, err := s.Get(e.Name())
+		if err != nil {
+			continue // half-created or mid-sweep; skip rather than fail the listing
+		}
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (s *Store) Delete(id string) error {
+	dir, err := s.blobDir(id)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+		return ErrNotFound
+	}
+	return os.RemoveAll(dir)
+}
+
+// Sweep removes blobs whose newest write is older than the TTL. Measuring from
+// last write rather than creation means a multi-hour upload is never swept
+// mid-flight, and a finished blob expires the TTL after its final chunk landed.
+func (s *Store) Sweep(now time.Time) (int, error) {
+	ents, err := os.ReadDir(filepath.Join(s.dir, "blobs"))
+	if err != nil {
+		return 0, err
+	}
+	swept := 0
+	for _, e := range ents {
+		if !e.IsDir() {
+			continue
+		}
+		dir, err := s.blobDir(e.Name())
+		if err != nil {
+			continue
+		}
+		last, err := newestMTime(dir)
+		if err != nil {
+			continue
+		}
+		if now.Sub(last) > s.ttl {
+			if os.RemoveAll(dir) == nil {
+				swept++
+			}
+		}
+	}
+	return swept, nil
+}
+
+func newestMTime(dir string) (time.Time, error) {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return time.Time{}, err
+	}
+	newest := fi.ModTime()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return time.Time{}, err
+	}
+	for _, e := range ents {
+		ei, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if ei.ModTime().After(newest) {
+			newest = ei.ModTime()
+		}
+	}
+	return newest, nil
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `go test ./... -v`
+Expected: PASS, eleven tests.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add store.go store_test.go
+git commit -m "feat(store): listing, deletion and TTL sweep"
+```
+
+---
+
+### Task 3: HTTP core, identity gate and config
+
+**Files:**
+- Create: `server.go`
+- Create: `push.go` (stub of the interface `server.go` needs)
+- Test: `server_test.go`
+
+**Interfaces:**
+- Consumes: `Store`, `Info`, `atomicWrite`, sentinel errors from Tasks 1 and 2.
+- Produces:
+  - `type Identity struct { Node, User string }`
+  - `type IdentityFunc func(*http.Request) (Identity, bool)`
+  - `func NewServer(st *Store, pu *Pusher, ident IdentityFunc, dataDir string, chunkSize int64, ttlHours int, salt string, static fs.FS) *Server`
+  - `func (s *Server) ServeHTTP(http.ResponseWriter, *http.Request)`
+  - `func who(r *http.Request) Identity`
+  - `func (p *Pusher) PublicKey() string` and `func (p *Pusher) NotifyOthers(sender string)` (real bodies land in Task 11)
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `server_test.go`:
+
+```go
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"testing/fstest"
+	"time"
+)
+
+func newTestServer(t *testing.T, allow bool) (*Server, string) {
+	t.Helper()
+	dir := t.TempDir()
+	st, err := NewStore(dir, 16, 1<<20, 4<<20, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	static := fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte("<h1>hi</h1>")},
+	}
+	ident := func(*http.Request) (Identity, bool) {
+		return Identity{Node: "pixel", User: "owner@example.com"}, allow
+	}
+	return NewServer(st, &Pusher{}, ident, dir, 16, 24, "c2FsdHNhbHRzYWx0c2FsdA==", static), dir
+}
+
+func do(t *testing.T, s *Server, method, path string, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	var r *http.Request
+	if body == "" {
+		r = httptest.NewRequest(method, path, nil)
+	} else {
+		r = httptest.NewRequest(method, path, strings.NewReader(body))
+	}
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	return w
+}
+
+func TestGateBlocksEverythingWhenIdentityFails(t *testing.T) {
+	s, _ := newTestServer(t, false)
+	for _, p := range []string{"/", "/index.html", "/api/whoami", "/api/config", "/api/inbox"} {
+		if got := do(t, s, "GET", p, "").Code; got != http.StatusForbidden {
+			t.Fatalf("GET %s = %d, want 403", p, got)
+		}
+	}
+}
+
+func TestWhoami(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	w := do(t, s, "GET", "/api/whoami", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("code = %d", w.Code)
+	}
+	var got map[string]any
+	json.Unmarshal(w.Body.Bytes(), &got)
+	if got["node"] != "pixel" || got["user"] != "owner@example.com" || got["allowed"] != true {
+		t.Fatalf("body = %v", got)
+	}
+}
+
+func TestConfigExposesSaltAndNilCheck(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	var got map[string]any
+	json.Unmarshal(do(t, s, "GET", "/api/config", "").Body.Bytes(), &got)
+	if got["salt"] != "c2FsdHNhbHRzYWx0c2FsdA==" {
+		t.Fatalf("salt = %v", got["salt"])
+	}
+	if got["chunkSize"] != float64(16) || got["ttlHours"] != float64(24) {
+		t.Fatalf("body = %v", got)
+	}
+	if got["check"] != nil {
+		t.Fatalf("check = %v, want nil before setup", got["check"])
+	}
+}
+
+func TestCheckIsWriteOnce(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	if got := do(t, s, "POST", "/api/check", "sealed-bytes").Code; got != http.StatusNoContent {
+		t.Fatalf("first POST = %d, want 204", got)
+	}
+	if got := do(t, s, "POST", "/api/check", "other-bytes").Code; got != http.StatusConflict {
+		t.Fatalf("second POST = %d, want 409", got)
+	}
+	var got map[string]any
+	json.Unmarshal(do(t, s, "GET", "/api/config", "").Body.Bytes(), &got)
+	if got["check"] != "c2VhbGVkLWJ5dGVz" {
+		t.Fatalf("check = %v, want base64 of the first body", got["check"])
+	}
+}
+
+func TestStaticIsServedThroughTheGate(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	w := do(t, s, "GET", "/", "")
+	if w.Code != http.StatusOK || w.Body.String() != "<h1>hi</h1>" {
+		t.Fatalf("code=%d body=%q", w.Code, w.Body.String())
+	}
+	if w := do(t, s, "GET", "/open", ""); w.Body.String() != "<h1>hi</h1>" {
+		t.Fatalf("/open should serve index.html, got %q", w.Body.String())
+	}
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `go test ./...`
+Expected: FAIL, undefined `Server`, `NewServer`, `Identity`, `Pusher`.
+
+- [ ] **Step 3: Write the Pusher stub**
+
+Create `push.go`:
+
+```go
+package main
+
+// Pusher owns Web Push credentials and subscriptions. Task 11 fills these in;
+// the zero value is a working no-op so the HTTP layer can be built and tested
+// without push.
+type Pusher struct{}
+
+func (p *Pusher) PublicKey() string { return "" }
+
+func (p *Pusher) NotifyOthers(sender string) {}
+```
+
+- [ ] **Step 4: Write `server.go`**
+
+```go
+package main
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
+	"io/fs"
+	"net/http"
+	"os"
+	"path/filepath"
+)
+
+type Identity struct {
+	Node string `json:"node"`
+	User string `json:"user"`
+}
+
+// IdentityFunc resolves the verified caller behind a request. Returning false
+// means unknown or not allowlisted, and the request stops there. This is a seam:
+// production supplies a Tailscale WhoIs implementation, tests supply a fake, and
+// the entire HTTP surface is testable without a tailnet.
+type IdentityFunc func(*http.Request) (Identity, bool)
+
+type Server struct {
+	store     *Store
+	push      *Pusher
+	ident     IdentityFunc
+	dataDir   string
+	chunkSize int64
+	ttlHours  int
+	salt      string
+	static    fs.FS
+	mux       *http.ServeMux
+}
+
+func NewServer(st *Store, pu *Pusher, ident IdentityFunc, dataDir string,
+	chunkSize int64, ttlHours int, salt string, static fs.FS) *Server {
+	s := &Server{
+		store: st, push: pu, ident: ident, dataDir: dataDir,
+		chunkSize: chunkSize, ttlHours: ttlHours, salt: salt, static: static,
+		mux: http.NewServeMux(),
+	}
+	s.routes()
+	return s
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+
+func (s *Server) routes() {
+	files := http.FileServerFS(s.static)
+	s.mux.HandleFunc("GET /api/whoami", s.gate(s.whoami))
+	s.mux.HandleFunc("GET /api/config", s.gate(s.config))
+	s.mux.HandleFunc("POST /api/check", s.gate(s.postCheck))
+	// The file_handlers launch URL has to render the app, not 404.
+	s.mux.HandleFunc("GET /open", s.gate(func(w http.ResponseWriter, r *http.Request) {
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = "/"
+		files.ServeHTTP(w, r2)
+	}))
+	s.mux.HandleFunc("GET /", s.gate(files.ServeHTTP))
+}
+
+type identKey struct{}
+
+// gate runs before every handler, static assets included. There is deliberately
+// no ungated route on this mux.
+func (s *Server) gate(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := s.ident(r)
+		if !ok {
+			http.Error(w, "not authorized", http.StatusForbidden)
+			return
+		}
+		h(w, r.WithContext(context.WithValue(r.Context(), identKey{}, id)))
+	}
+}
+
+func who(r *http.Request) Identity {
+	v, _ := r.Context().Value(identKey{}).(Identity)
+	return v
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(v)
+}
+
+func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
+	id := who(r)
+	writeJSON(w, http.StatusOK, map[string]any{"node": id.Node, "user": id.User, "allowed": true})
+}
+
+func (s *Server) config(w http.ResponseWriter, r *http.Request) {
+	resp := map[string]any{
+		"salt":      s.salt,
+		"chunkSize": s.chunkSize,
+		"ttlHours":  s.ttlHours,
+		"vapidKey":  s.push.PublicKey(),
+		"check":     nil,
+	}
+	if b, err := os.ReadFile(filepath.Join(s.dataDir, "check.bin")); err == nil {
+		resp["check"] = base64.StdEncoding.EncodeToString(b)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// postCheck stores the passphrase verifier exactly once. O_EXCL makes the
+// write-once guarantee atomic rather than a read-then-write race.
+func (s *Server) postCheck(w http.ResponseWriter, r *http.Request) {
+	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
+	if err != nil || len(b) == 0 {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(s.dataDir, "check.bin"),
+		os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		http.Error(w, "check already set", http.StatusConflict)
+		return
+	}
+	if err != nil {
+		http.Error(w, "write failed", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write(b); err != nil {
+		http.Error(w, "write failed", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `go test ./... -v`
+Expected: PASS, sixteen tests.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add server.go push.go server_test.go
+git commit -m "feat(server): identity gate, config and write-once passphrase check"
+```
+
+---
+
+### Task 4: HTTP blob endpoints
+
+**Files:**
+- Modify: `server.go` (extend `routes`, append handlers)
+- Test: `server_test.go` (append)
+
+**Interfaces:**
+- Consumes: `Server`, `gate`, `who`, `writeJSON` from Task 3; the full `Store` API from Tasks 1 and 2.
+- Produces: the ten blob and inbox routes listed in the spec.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `server_test.go`:
+
+```go
+func createBlobForTest(t *testing.T, s *Server, chunkCount int) string {
+	t.Helper()
+	w := do(t, s, "POST", "/api/blob", `{"chunkCount":`+itoa(chunkCount)+`}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create = %d: %s", w.Code, w.Body.String())
+	}
+	var got struct{ ID string }
+	json.Unmarshal(w.Body.Bytes(), &got)
+	return got.ID
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }
+
+func TestBlobRoundTrip(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	id := createBlobForTest(t, s, 2)
+
+	if got := do(t, s, "PUT", "/api/blob/"+id+"/meta", "sealed-manifest").Code; got != http.StatusNoContent {
+		t.Fatalf("put meta = %d", got)
+	}
+	for i, body := range []string{"aaa", "bbb"} {
+		p := "/api/blob/" + id + "/chunk/" + itoa(i)
+		if got := do(t, s, "PUT", p, body).Code; got != http.StatusNoContent {
+			t.Fatalf("put chunk %d = %d", i, got)
+		}
+	}
+
+	var info map[string]any
+	json.Unmarshal(do(t, s, "GET", "/api/blob/"+id, "").Body.Bytes(), &info)
+	if info["complete"] != true {
+		t.Fatalf("complete = %v", info["complete"])
+	}
+	if info["sender"] != "pixel" {
+		t.Fatalf("sender = %v, want the server-asserted node name", info["sender"])
+	}
+
+	if body := do(t, s, "GET", "/api/blob/"+id+"/chunk/1", "").Body.String(); body != "bbb" {
+		t.Fatalf("chunk 1 = %q", body)
+	}
+
+	var inbox []map[string]any
+	json.Unmarshal(do(t, s, "GET", "/api/inbox", "").Body.Bytes(), &inbox)
+	if len(inbox) != 1 || inbox[0]["id"] != id {
+		t.Fatalf("inbox = %v", inbox)
+	}
+
+	if got := do(t, s, "DELETE", "/api/blob/"+id, "").Code; got != http.StatusNoContent {
+		t.Fatalf("delete = %d", got)
+	}
+	if got := do(t, s, "GET", "/api/blob/"+id, "").Code; got != http.StatusNotFound {
+		t.Fatalf("get after delete = %d, want 404", got)
+	}
+}
+
+func TestSenderIsNeverTakenFromTheClient(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	w := do(t, s, "POST", "/api/blob", `{"chunkCount":1,"sender":"someone-else"}`)
+	var got struct{ ID string }
+	json.Unmarshal(w.Body.Bytes(), &got)
+
+	var info map[string]any
+	json.Unmarshal(do(t, s, "GET", "/api/blob/"+got.ID, "").Body.Bytes(), &info)
+	if info["sender"] != "pixel" {
+		t.Fatalf("sender = %v, want pixel", info["sender"])
+	}
+}
+
+func TestChunkIndexOutOfRangeIs400(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	id := createBlobForTest(t, s, 1)
+	if got := do(t, s, "PUT", "/api/blob/"+id+"/chunk/5", "x").Code; got != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400", got)
+	}
+	if got := do(t, s, "PUT", "/api/blob/"+id+"/chunk/abc", "x").Code; got != http.StatusBadRequest {
+		t.Fatalf("non-numeric index = %d, want 400", got)
+	}
+}
+
+func TestMalformedBlobIDIs404(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	if got := do(t, s, "GET", "/api/blob/..%2F..%2Fetc/chunk/0", "").Code; got == http.StatusOK {
+		t.Fatal("traversal-shaped id was served")
+	}
+	if got := do(t, s, "GET", "/api/blob/nothex", "").Code; got != http.StatusNotFound {
+		t.Fatalf("code = %d, want 404", got)
+	}
+}
+
+func TestOversizeChunkIsRejected(t *testing.T) {
+	s, _ := newTestServer(t, true) // chunkSize is 16 in tests
+	id := createBlobForTest(t, s, 1)
+	big := strings.Repeat("x", 4096)
+	if got := do(t, s, "PUT", "/api/blob/"+id+"/chunk/0", big).Code; got != http.StatusRequestEntityTooLarge {
+		t.Fatalf("code = %d, want 413", got)
+	}
+}
+
+func TestOverQuotaCreateIs507(t *testing.T) {
+	s, _ := newTestServer(t, true) // maxBlob 1 MiB, chunkSize 16
+	w := do(t, s, "POST", "/api/blob", `{"chunkCount":1000000}`)
+	if w.Code != http.StatusInsufficientStorage {
+		t.Fatalf("code = %d, want 507", w.Code)
+	}
+}
+```
+
+Add `"strconv"` to the test imports.
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `go test ./...`
+Expected: FAIL, the new routes return 404 from the static file server.
+
+- [ ] **Step 3: Register the routes**
+
+In `server.go`, inside `routes()`, add these lines above the `GET /open` registration:
+
+```go
+	s.mux.HandleFunc("POST /api/blob", s.gate(s.createBlob))
+	s.mux.HandleFunc("PUT /api/blob/{id}/meta", s.gate(s.putMeta))
+	s.mux.HandleFunc("PUT /api/blob/{id}/chunk/{n}", s.gate(s.putChunk))
+	s.mux.HandleFunc("GET /api/blob/{id}", s.gate(s.getBlob))
+	s.mux.HandleFunc("GET /api/blob/{id}/chunk/{n}", s.gate(s.getChunk))
+	s.mux.HandleFunc("DELETE /api/blob/{id}", s.gate(s.deleteBlob))
+	s.mux.HandleFunc("GET /api/inbox", s.gate(s.inbox))
+```
+
+- [ ] **Step 4: Append the handlers**
+
+Append to `server.go`, and add `"strconv"` to its imports:
+
+```go
+// fail maps a store error onto a status code and reports whether it handled the
+// request. Keeping the mapping in one place is what stops a new endpoint from
+// leaking a 500 where a 404 belongs.
+func fail(w http.ResponseWriter, err error) bool {
+	var maxBytes *http.MaxBytesError
+	switch {
+	case err == nil:
+		return false
+	case errors.As(err, &maxBytes):
+		http.Error(w, "chunk too large", http.StatusRequestEntityTooLarge)
+	case errors.Is(err, ErrNotFound):
+		http.Error(w, "not found", http.StatusNotFound)
+	case errors.Is(err, ErrBadIndex):
+		http.Error(w, "chunk index out of range", http.StatusBadRequest)
+	case errors.Is(err, ErrQuota):
+		http.Error(w, "storage quota exceeded", http.StatusInsufficientStorage)
+	default:
+		http.Error(w, "server error", http.StatusInternalServerError)
+	}
+	return true
+}
+
+func (s *Server) createBlob(w http.ResponseWriter, r *http.Request) {
+	// Only chunkCount is read. Sender comes from the verified identity, never
+	// from the body, so a client cannot forge who a transfer came from.
+	var req struct {
+		ChunkCount int `json:"chunkCount"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	m, err := s.store.Create(who(r).Node, req.ChunkCount)
+	if fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": m.ID})
+}
+
+func (s *Server) putMeta(w http.ResponseWriter, r *http.Request) {
+	body := http.MaxBytesReader(w, r.Body, 1<<16)
+	if fail(w, s.store.PutMeta(r.PathValue("id"), body)) {
+		return
+	}
+	s.notifyIfComplete(r, r.PathValue("id"))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) putChunk(w http.ResponseWriter, r *http.Request) {
+	n, err := strconv.Atoi(r.PathValue("n"))
+	if err != nil {
+		http.Error(w, "bad index", http.StatusBadRequest)
+		return
+	}
+	// 12 byte IV plus 16 byte tag is the ciphertext overhead; 64 is slack.
+	body := http.MaxBytesReader(w, r.Body, s.chunkSize+64)
+	if fail(w, s.store.PutChunk(r.PathValue("id"), n, body)) {
+		return
+	}
+	s.notifyIfComplete(r, r.PathValue("id"))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// notifyIfComplete fires a push once the last piece of a transfer lands. The
+// manifest and the final chunk can arrive in either order, so both write paths
+// call it and whichever completes the blob wins.
+func (s *Server) notifyIfComplete(r *http.Request, id string) {
+	if info, err := s.store.Get(id); err == nil && info.Complete {
+		go s.push.NotifyOthers(who(r).Node)
+	}
+}
+
+func (s *Server) getBlob(w http.ResponseWriter, r *http.Request) {
+	info, err := s.store.Get(r.PathValue("id"))
+	if fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (s *Server) getChunk(w http.ResponseWriter, r *http.Request) {
+	n, err := strconv.Atoi(r.PathValue("n"))
+	if err != nil {
+		http.Error(w, "bad index", http.StatusBadRequest)
+		return
+	}
+	f, err := s.store.OpenChunk(r.PathValue("id"), n)
+	if fail(w, err) {
+		return
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	http.ServeContent(w, r, "", fi.ModTime(), f)
+}
+
+func (s *Server) deleteBlob(w http.ResponseWriter, r *http.Request) {
+	if fail(w, s.store.Delete(r.PathValue("id"))) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) inbox(w http.ResponseWriter, r *http.Request) {
+	list, err := s.store.List()
+	if fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `go test ./... -v`
+Expected: PASS, twenty-two tests.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add server.go server_test.go
+git commit -m "feat(server): blob create, chunk transfer, inbox and delete"
+```
+
+---
+
+### Task 5: Wiring, flags, token mode and the sweep loop
+
+**Files:**
+- Create: `main.go`
+- Create: `web/index.html` (placeholder that proves the pipeline works)
+
+**Interfaces:**
+- Consumes: `NewStore`, `NewServer`, `Pusher`, `IdentityFunc` from Tasks 1 to 4.
+- Produces:
+  - `func loadOrCreateSalt(path string) (string, error)` returning standard base64
+  - `func tokenIdentity(token string) IdentityFunc`
+  - `func loginHandler(token string) http.HandlerFunc`
+  - a `transfer-local` binary that runs with `--auth=token`
+
+- [ ] **Step 1: Write the placeholder page**
+
+Create `web/index.html`:
+
+```html
+<!doctype html>
+<meta charset="utf-8">
+<title>transfer-local</title>
+<h1>transfer-local</h1>
+<p>Server is up. The app lands in Task 8.</p>
+```
+
+- [ ] **Step 2: Write `main.go`**
+
+```go
+package main
+
+import (
+	"crypto/rand"
+	"crypto/subtle"
+	"embed"
+	"encoding/base64"
+	"errors"
+	"flag"
+	"fmt"
+	"io/fs"
+	"log"
+	"mime"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+//go:embed web/index.html
+var webFS embed.FS
+
+var (
+	authMode  = flag.String("auth", "tailscale", `authentication mode: "tailscale" or "token"`)
+	dataDir   = flag.String("data", "./data", "data directory")
+	hostname  = flag.String("hostname", "transfer-local", "tsnet node name")
+	addr      = flag.String("addr", "127.0.0.1:8080", "listen address, token mode only")
+	chunkSize = flag.Int64("chunk-size", 8<<20, "plaintext chunk size in bytes")
+	maxBlob   = flag.Int64("max-blob", 50<<30, "maximum bytes per transfer")
+	maxTotal  = flag.Int64("max-total", 200<<30, "maximum bytes stored across all transfers")
+	ttlHours  = flag.Int("ttl-hours", 24, "hours of inactivity before a transfer is swept")
+	vapidSub  = flag.String("vapid-subject", "mailto:transfer-local@invalid", "VAPID subject")
+)
+
+func main() {
+	flag.Parse()
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
+	// Go resolves MIME types from the Windows registry, which some machines have
+	// mapped to text/plain. A module script served as text/plain is refused by
+	// the browser, so pin the two types the app depends on.
+	mime.AddExtensionType(".js", "text/javascript")
+	mime.AddExtensionType(".webmanifest", "application/manifest+json")
+
+	if err := os.MkdirAll(*dataDir, 0o700); err != nil {
+		return err
+	}
+	salt, err := loadOrCreateSalt(filepath.Join(*dataDir, "salt"))
+	if err != nil {
+		return err
+	}
+	store, err := NewStore(*dataDir, *chunkSize, *maxBlob, *maxTotal,
+		time.Duration(*ttlHours)*time.Hour)
+	if err != nil {
+		return err
+	}
+	static, err := fs.Sub(webFS, "web")
+	if err != nil {
+		return err
+	}
+	pusher := &Pusher{}
+
+	var ln net.Listener
+	var ident IdentityFunc
+	root := http.NewServeMux()
+
+	switch *authMode {
+	case "tailscale":
+		ln, ident, err = tailscaleListener()
+	case "token":
+		token := os.Getenv("TL_TOKEN")
+		if token == "" {
+			// Fail closed. There is no path from a missing credential to an
+			// open listener.
+			return errors.New("--auth=token requires TL_TOKEN; refusing to start unauthenticated")
+		}
+		ln, err = net.Listen("tcp", *addr)
+		ident = tokenIdentity(token)
+		root.HandleFunc("GET /login", loginHandler(token))
+	default:
+		return fmt.Errorf("unknown --auth %q, want tailscale or token", *authMode)
+	}
+	if err != nil {
+		return err
+	}
+
+	root.Handle("/", NewServer(store, pusher, ident, *dataDir, *chunkSize, *ttlHours, salt, static))
+
+	go sweepLoop(store)
+	log.Printf("transfer-local up: auth=%s addr=%s", *authMode, ln.Addr())
+	return http.Serve(ln, root)
+}
+
+// loadOrCreateSalt returns the public PBKDF2 salt, generating it once. It is not
+// a secret; its job is to stop precomputation shared across installations.
+func loadOrCreateSalt(path string) (string, error) {
+	if b, err := os.ReadFile(path); err == nil && len(b) == 16 {
+		return base64.StdEncoding.EncodeToString(b), nil
+	}
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	if err := atomicWrite(path, b[:]); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(b[:]), nil
+}
+
+// tokenIdentity is the non-Tailscale fallback. It accepts a bearer header or the
+// cookie set by /login, because a browser cannot attach a header to a top-level
+// navigation.
+func tokenIdentity(token string) IdentityFunc {
+	want := []byte(token)
+	return func(r *http.Request) (Identity, bool) {
+		got := ""
+		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+			got = strings.TrimPrefix(h, "Bearer ")
+		} else if c, err := r.Cookie("tl_token"); err == nil {
+			got = c.Value
+		}
+		if subtle.ConstantTimeCompare([]byte(got), want) != 1 {
+			return Identity{}, false
+		}
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
+		}
+		return Identity{Node: host, User: "token"}, true
+	}
+}
+
+func loginHandler(token string) http.HandlerFunc {
+	want := []byte(token)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("t")), want) != 1 {
+			http.Error(w, "bad token", http.StatusForbidden)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name: "tl_token", Value: token, Path: "/",
+			HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 365 * 24 * 3600,
+		})
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	}
+}
+
+func sweepLoop(store *Store) {
+	t := time.NewTicker(time.Hour)
+	defer t.Stop()
+	for range t.C {
+		n, err := store.Sweep(time.Now())
+		if err != nil {
+			log.Printf("sweep: %v", err)
+		} else if n > 0 {
+			log.Printf("swept %d expired transfers", n)
+		}
+	}
+}
+
+// tailscaleListener is replaced with the real implementation in Task 6.
+func tailscaleListener() (net.Listener, IdentityFunc, error) {
+	return nil, nil, errors.New("tailscale mode lands in Task 6; use --auth=token for now")
+}
+```
+
+- [ ] **Step 3: Verify it builds and the tests still pass**
+
+Run: `go build ./... && go test ./...`
+Expected: build succeeds, all tests PASS.
+
+- [ ] **Step 4: Smoke test the running server**
+
+Run, in one shell:
+
+```bash
+TL_TOKEN=devtoken go run . --auth=token --data ./devdata
+```
+
+In another shell:
+
+```bash
+curl -s -H 'Authorization: Bearer devtoken' localhost:8080/api/whoami
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/api/whoami
+```
+
+Expected: the first prints `{"allowed":true,"node":"127.0.0.1","user":"token"}`, the second prints `403`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+printf 'devdata/\ndata/\ntransfer-local\ntransfer-local.exe\n' > .gitignore
+git add main.go web/index.html .gitignore
+git commit -m "feat(cmd): flags, token auth, static embedding and TTL sweep loop"
+```
+
+---
+
+### Task 6: Tailscale identity, TLS and the allowlist
+
+**Files:**
+- Modify: `main.go` (replace `tailscaleListener`, add flags)
+
+**Interfaces:**
+- Consumes: `IdentityFunc` from Task 3.
+- Produces: `func tailscaleListener() (net.Listener, IdentityFunc, error)` serving TLS on the tailnet with verified per-request identity.
+
+**Note on the API surface:** `tsnet.Server.LocalClient()` has moved package between Tailscale releases. Assign it with `:=` and never name its type, so the code compiles across versions.
+
+- [ ] **Step 1: Add the dependency**
+
+```bash
+go get tailscale.com@latest
+```
+
+- [ ] **Step 2: Add the allowlist flags**
+
+In `main.go`, add to the `var (...)` flag block:
+
+```go
+	allowUsers = flag.String("allow-users", "",
+		"comma-separated tailnet logins allowed; empty means the server node's own owner")
+	allowNodes = flag.String("allow-nodes", "",
+		"comma-separated node names allowed; empty means any node of an allowed user")
+```
+
+- [ ] **Step 3: Replace `tailscaleListener`**
+
+Replace the stub in `main.go` with:
+
+```go
+func tailscaleListener() (net.Listener, IdentityFunc, error) {
+	ts := &tsnet.Server{
+		Hostname: *hostname,
+		Dir:      filepath.Join(*dataDir, "tsnet"),
+		AuthKey:  os.Getenv("TS_AUTHKEY"),
+	}
+	ctx := context.Background()
+	if _, err := ts.Up(ctx); err != nil {
+		return nil, nil, fmt.Errorf("tsnet up: %w", err)
+	}
+	lc, err := ts.LocalClient()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	users, err := resolveAllowedUsers(ctx, lc)
+	if err != nil {
+		return nil, nil, err
+	}
+	nodes := splitSet(*allowNodes)
+	log.Printf("allowing users %v, nodes %v", keys(users), keys(nodes))
+
+	// ListenTLS serves the tailnet certificate for <hostname>.<tailnet>.ts.net.
+	// It requires HTTPS Certificates to be enabled in the admin console; without
+	// it the browser has no secure context and the client design does not work.
+	ln, err := ts.ListenTLS("tcp", ":443")
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen tls: %w", err)
+	}
+
+	ident := func(r *http.Request) (Identity, bool) {
+		who, err := lc.WhoIs(r.Context(), r.RemoteAddr)
+		if err != nil || who.Node == nil || who.UserProfile == nil {
+			return Identity{}, false
+		}
+		// Tagged devices have no human owner, so they can never be allowlisted
+		// by login and are refused here rather than falling through.
+		if who.Node.IsTagged() {
+			return Identity{}, false
+		}
+		node := strings.TrimSuffix(who.Node.ComputedName, ".")
+		user := who.UserProfile.LoginName
+		if !users[user] {
+			return Identity{}, false
+		}
+		if len(nodes) > 0 && !nodes[node] {
+			return Identity{}, false
+		}
+		return Identity{Node: node, User: user}, true
+	}
+	return ln, ident, nil
+}
+
+// resolveAllowedUsers defaults the allowlist to whoever owns the server's own
+// node, which is the safe answer on a shared tailnet and needs no configuration
+// on a personal one.
+func resolveAllowedUsers(ctx context.Context, lc interface {
+	Status(context.Context) (*ipnstate.Status, error)
+}) (map[string]bool, error) {
+	if set := splitSet(*allowUsers); len(set) > 0 {
+		return set, nil
+	}
+	st, err := lc.Status(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("status: %w", err)
+	}
+	if st.Self == nil {
+		return nil, errors.New("tsnet status has no self node")
+	}
+	owner, ok := st.User[st.Self.UserID]
+	if !ok || owner.LoginName == "" {
+		return nil, errors.New("cannot resolve the node owner; pass --allow-users")
+	}
+	return map[string]bool{owner.LoginName: true}, nil
+}
+
+func splitSet(csv string) map[string]bool {
+	set := map[string]bool{}
+	for _, s := range strings.Split(csv, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			set[s] = true
+		}
+	}
+	return set
+}
+
+func keys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+```
+
+Add these imports to `main.go`: `"context"`, `"sort"`, `"tailscale.com/ipn/ipnstate"`, `"tailscale.com/tsnet"`.
+
+- [ ] **Step 4: Verify it builds**
+
+Run: `go build ./... && go test ./...`
+Expected: build succeeds, all tests PASS. The tests never touch this path, because identity is injected.
+
+- [ ] **Step 5: Manual verification on the tailnet**
+
+Generate a reusable auth key in the Tailscale admin console, then on `axiom-vps`:
+
+```bash
+TS_AUTHKEY=tskey-auth-... ./transfer-local --data /var/lib/transfer-local
+```
+
+Check, in order:
+
+1. The log line names the allowed user, and `transfer-local` appears in `tailscale status` on another device.
+2. From `axiom-pc`, `https://transfer-local.<tailnet>.ts.net/api/whoami` returns your node name with no certificate warning.
+3. From a browser with Tailscale disconnected, the hostname does not resolve.
+4. Restart with `--allow-nodes=nothing-matches-this` and confirm the same request now returns 403.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add main.go go.mod go.sum
+git commit -m "feat(auth): tsnet listener with WhoIs identity and node allowlist"
+```
+
+---
+
+### Task 7: Browser crypto module
+
+**Files:**
+- Create: `web/crypto.js`
+- Create: `web/package.json`
+- Test: `web/crypto.test.mjs`
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces, all from `web/crypto.js`:
+  - `deriveKey(passphrase, saltB64) -> Promise<CryptoKey>`
+  - `encryptChunk(key, id, index, count, plainBuf) -> Promise<Uint8Array>`
+  - `decryptChunk(key, id, index, count, sealed) -> Promise<Uint8Array>`
+  - `encryptMeta(key, id, obj) -> Promise<Uint8Array>`
+  - `decryptMeta(key, id, sealed) -> Promise<object>`
+  - `makeCheck(key) -> Promise<Uint8Array>`
+  - `verifyCheck(key, sealed) -> Promise<boolean>`
+  - `saveKey(key)`, `loadKey()`, `kvPut(k, v)`, `kvGet(k)`
+  - `b64encode(bytes)`, `b64decode(str)`
+
+**Why `web/package.json` exists:** it contains only `{"type":"module"}`, which is what lets Node load `crypto.js` as an ES module in the test. It is not a dependency manifest, nothing is ever installed from it, and it is deliberately excluded from the Go embed list.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `web/crypto.test.mjs`:
+
+```js
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  deriveKey, encryptChunk, decryptChunk,
+  encryptMeta, decryptMeta, makeCheck, verifyCheck, b64encode,
+} from './crypto.js';
+
+const SALT = b64encode(new Uint8Array(16).fill(7));
+const ID = 'a'.repeat(32);
+const OTHER_ID = 'b'.repeat(32);
+
+// Derived once: 600k PBKDF2 iterations are deliberately slow.
+const keyP = deriveKey('correct horse battery staple', SALT);
+const wrongP = deriveKey('hunter2', SALT);
+
+test('chunk round trip', async () => {
+  const key = await keyP;
+  const plain = new Uint8Array([1, 2, 3, 4, 5]);
+  const sealed = await encryptChunk(key, ID, 0, 3, plain);
+  assert.notDeepEqual(sealed.slice(12), plain, 'ciphertext must not equal plaintext');
+  assert.deepEqual(await decryptChunk(key, ID, 0, 3, sealed), plain);
+});
+
+test('empty chunk round trips', async () => {
+  const key = await keyP;
+  const sealed = await encryptChunk(key, ID, 0, 1, new Uint8Array(0));
+  assert.equal((await decryptChunk(key, ID, 0, 1, sealed)).length, 0);
+});
+
+test('reordering two chunks fails authentication', async () => {
+  const key = await keyP;
+  const zero = await encryptChunk(key, ID, 0, 2, new TextEncoder().encode('first'));
+  // An attacker serves chunk 0's bytes where chunk 1 belongs.
+  await assert.rejects(() => decryptChunk(key, ID, 1, 2, zero));
+});
+
+test('truncating a file is detected', async () => {
+  const key = await keyP;
+  const sealed = await encryptChunk(key, ID, 0, 3, new TextEncoder().encode('data'));
+  // The server claims the file has 2 chunks instead of 3.
+  await assert.rejects(() => decryptChunk(key, ID, 0, 2, sealed));
+});
+
+test('a chunk spliced in from another file fails', async () => {
+  const key = await keyP;
+  const sealed = await encryptChunk(key, OTHER_ID, 0, 1, new TextEncoder().encode('other'));
+  await assert.rejects(() => decryptChunk(key, ID, 0, 1, sealed));
+});
+
+test('manifest round trip', async () => {
+  const key = await keyP;
+  const meta = { name: 'holiday photo.jpg', size: 12345, mime: 'image/jpeg' };
+  const sealed = await encryptMeta(key, ID, meta);
+  assert.deepEqual(await decryptMeta(key, ID, sealed), meta);
+});
+
+test('manifest bound to another blob id fails', async () => {
+  const key = await keyP;
+  const sealed = await encryptMeta(key, OTHER_ID, { name: 'x' });
+  await assert.rejects(() => decryptMeta(key, ID, sealed));
+});
+
+test('check blob accepts the right passphrase and rejects the wrong one', async () => {
+  const sealed = await makeCheck(await keyP);
+  assert.equal(await verifyCheck(await keyP, sealed), true);
+  assert.equal(await verifyCheck(await wrongP, sealed), false);
+});
+
+test('a corrupted sealed blob is rejected rather than returning garbage', async () => {
+  const key = await keyP;
+  const sealed = await encryptChunk(key, ID, 0, 1, new TextEncoder().encode('data'));
+  sealed[sealed.length - 1] ^= 0xff;
+  await assert.rejects(() => decryptChunk(key, ID, 0, 1, sealed));
+});
+
+test('a bad blob id is refused before any crypto happens', async () => {
+  const key = await keyP;
+  await assert.rejects(() => encryptChunk(key, '../etc/passwd', 0, 1, new Uint8Array(1)));
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `node --test web/crypto.test.mjs`
+Expected: FAIL, cannot find module `./crypto.js`.
+
+- [ ] **Step 3: Create `web/package.json`**
+
+```json
+{
+  "type": "module",
+  "private": true
+}
+```
+
+- [ ] **Step 4: Write `web/crypto.js`**
+
+```js
+// All encryption happens here, in the browser. The server holds ciphertext and
+// nothing else. Node exposes the same Web Crypto API, so this module is tested
+// directly with `node --test`.
+
+const KDF_ITERATIONS = 600000;
+const IV_LEN = 12;
+const TAG_LEN = 16;
+
+const DOMAIN_CHUNK = 0x43; // 'C'
+const DOMAIN_META = 0x4d;  // 'M'
+const DOMAIN_CHECK = 0x4b; // 'K'
+const CHECK_PLAINTEXT = 'transfer-local-v1';
+
+export function b64encode(bytes) {
+  // Built one character at a time on purpose: String.fromCharCode.apply blows
+  // the stack on large arrays.
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s);
+}
+
+export function b64decode(str) {
+  const bin = atob(str);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function idBytes(id) {
+  if (!/^[0-9a-f]{32}$/.test(id)) throw new Error('bad blob id');
+  const out = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) out[i] = parseInt(id.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+// Binding position and total count into the AAD is what makes independently
+// encrypted chunks safe to reassemble. Without it a hostile server could
+// reorder, truncate, or splice chunks between files and every individual chunk
+// would still authenticate.
+function chunkAAD(id, index, count) {
+  const a = new Uint8Array(25);
+  a[0] = DOMAIN_CHUNK;
+  a.set(idBytes(id), 1);
+  const view = new DataView(a.buffer);
+  view.setUint32(17, index, false);
+  view.setUint32(21, count, false);
+  return a;
+}
+
+function metaAAD(id) {
+  const a = new Uint8Array(17);
+  a[0] = DOMAIN_META;
+  a.set(idBytes(id), 1);
+  return a;
+}
+
+function checkAAD() {
+  return new Uint8Array([DOMAIN_CHECK]);
+}
+
+export async function deriveKey(passphrase, saltB64) {
+  const base = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: b64decode(saltB64), iterations: KDF_ITERATIONS, hash: 'SHA-256' },
+    base,
+    { name: 'AES-GCM', length: 256 },
+    false, // non-extractable: storable in IndexedDB, unexportable by script
+    ['encrypt', 'decrypt']);
+}
+
+async function seal(key, aad, plain) {
+  const iv = crypto.getRandomValues(new Uint8Array(IV_LEN));
+  const ct = new Uint8Array(
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad }, key, plain));
+  const out = new Uint8Array(IV_LEN + ct.length);
+  out.set(iv, 0);
+  out.set(ct, IV_LEN);
+  return out;
+}
+
+async function unseal(key, aad, sealed) {
+  const b = sealed instanceof Uint8Array ? sealed : new Uint8Array(sealed);
+  if (b.length < IV_LEN + TAG_LEN) throw new Error('sealed blob too short');
+  return new Uint8Array(await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: b.subarray(0, IV_LEN), additionalData: aad },
+    key, b.subarray(IV_LEN)));
+}
+
+export const encryptChunk = (key, id, index, count, plain) =>
+  seal(key, chunkAAD(id, index, count), plain);
+
+export const decryptChunk = (key, id, index, count, sealed) =>
+  unseal(key, chunkAAD(id, index, count), sealed);
+
+export const encryptMeta = (key, id, obj) =>
+  seal(key, metaAAD(id), new TextEncoder().encode(JSON.stringify(obj)));
+
+export async function decryptMeta(key, id, sealed) {
+  return JSON.parse(new TextDecoder().decode(await unseal(key, metaAAD(id), sealed)));
+}
+
+export const makeCheck = (key) =>
+  seal(key, checkAAD(), new TextEncoder().encode(CHECK_PLAINTEXT));
+
+export async function verifyCheck(key, sealed) {
+  try {
+    const got = new TextDecoder().decode(await unseal(key, checkAAD(), sealed));
+    return got === CHECK_PLAINTEXT;
+  } catch {
+    return false;
+  }
+}
+
+// Key storage. IndexedDB is reachable from both the page and the service
+// worker, which is what lets the worker decrypt downloads and notification
+// metadata on its own.
+const DB_NAME = 'transfer-local';
+const STORE_NAME = 'kv';
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE_NAME);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function kvPut(k, v) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    tx.objectStore(STORE_NAME).put(v, k);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function kvGet(k) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const req = tx.objectStore(STORE_NAME).get(k);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export const saveKey = (key) => kvPut('key', key);
+export const loadKey = () => kvGet('key');
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `node --test web/crypto.test.mjs`
+Expected: PASS, ten tests. The reorder, truncate and splice tests are the reason the AAD scheme exists; if any of them passes decryption, the format is wrong and later tasks must not proceed.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add web/crypto.js web/crypto.test.mjs web/package.json
+git commit -m "feat(web): chunk encryption with position-bound AAD"
+```
+
+---
+
+### Task 8: Setup flow and upload
+
+**Files:**
+- Modify: `web/index.html` (full replacement)
+- Create: `web/app.js`
+- Modify: `main.go` (extend the embed directive)
+
+**Interfaces:**
+- Consumes: `web/crypto.js` exports from Task 7; the HTTP API from Tasks 3 and 4.
+- Produces, from `web/app.js`:
+  - `export async function uploadFile(file, onProgress)` returning the blob id
+  - `export async function uploadText(text)`
+  - `export let key` populated after setup
+  - `export const config` holding the `/api/config` response
+
+- [ ] **Step 1: Replace `web/index.html`**
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>transfer-local</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#11141a">
+<style>
+  :root { color-scheme: dark; --bg:#11141a; --fg:#e6e9ef; --dim:#8d95a5; --line:#242a35; --accent:#5b9dff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; justify-content:space-between; align-items:baseline;
+           padding:16px; border-bottom:1px solid var(--line); }
+  h1 { font-size:18px; margin:0; letter-spacing:.02em; }
+  #who { color:var(--dim); font-size:13px; }
+  main, #setup { max-width:720px; margin:0 auto; padding:16px; }
+  #drop { border:2px dashed var(--line); border-radius:12px; padding:36px 16px;
+          text-align:center; color:var(--dim); transition:border-color .15s; }
+  #drop.over { border-color:var(--accent); color:var(--fg); }
+  label.pick { color:var(--accent); text-decoration:underline; cursor:pointer; }
+  form { display:flex; gap:8px; margin:16px 0; }
+  input[type=text], input[type=password] { flex:1; padding:10px 12px; border-radius:8px;
+          border:1px solid var(--line); background:#0c0f14; color:var(--fg); }
+  button { padding:10px 16px; border-radius:8px; border:0; background:var(--accent);
+           color:#04070d; font-weight:600; cursor:pointer; }
+  ul { list-style:none; padding:0; margin:0; }
+  li { display:flex; justify-content:space-between; align-items:center; gap:12px;
+       padding:12px 0; border-bottom:1px solid var(--line); }
+  .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sub { color:var(--dim); font-size:13px; }
+  .err { color:#ff8080; }
+  progress { width:100%; height:6px; }
+</style>
+</head>
+<body>
+<header><h1>transfer-local</h1><span id="who"></span></header>
+
+<section id="setup" hidden>
+  <p id="setup-msg">Enter the shared passphrase. It never leaves this device.</p>
+  <form id="setup-form">
+    <input type="password" id="passphrase" autocomplete="current-password" required>
+    <button type="submit">Unlock</button>
+  </form>
+  <p id="setup-err" class="err"></p>
+</section>
+
+<main id="app" hidden>
+  <div id="drop">
+    Drop files here, or <label class="pick">choose<input type="file" id="picker" multiple hidden></label>
+  </div>
+  <progress id="progress" hidden></progress>
+  <form id="text-form">
+    <input type="text" id="text" placeholder="Send text" autocomplete="off">
+    <button type="submit">Send</button>
+  </form>
+  <ul id="inbox"></ul>
+</main>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>
+```
+
+- [ ] **Step 2: Write `web/app.js`**
+
+```js
+import {
+  deriveKey, encryptChunk, encryptMeta, makeCheck, verifyCheck,
+  saveKey, loadKey, b64decode,
+} from './crypto.js';
+
+export let key = null;
+export let config = null;
+
+const $ = (id) => document.getElementById(id);
+
+async function api(path, init = {}) {
+  const res = await fetch(path, init);
+  if (!res.ok) throw new Error(`${init.method || 'GET'} ${path}: ${res.status}`);
+  return res;
+}
+
+// PUT with a bounded retry. This is the resume story for a dropped connection:
+// chunk writes are idempotent server-side, so replaying one is always safe.
+async function putBytes(path, bytes) {
+  let delay = 500;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await api(path, { method: 'PUT', body: bytes });
+    } catch (err) {
+      if (attempt >= 4) throw err;
+      await new Promise((r) => setTimeout(r, delay));
+      delay *= 2;
+    }
+  }
+}
+
+export async function uploadFile(file, onProgress = () => {}) {
+  const size = config.chunkSize;
+  const chunkCount = Math.max(1, Math.ceil(file.size / size));
+
+  const { id } = await (await api('/api/blob', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chunkCount }),
+  })).json();
+
+  // The manifest is sealed against the blob id, so it can only be written once
+  // the server has issued one.
+  await putBytes(`/api/blob/${id}/meta`, await encryptMeta(key, id, {
+    name: file.name,
+    size: file.size,
+    mime: file.type || 'application/octet-stream',
+  }));
+
+  // Skip anything already on the server, so a retried upload resumes.
+  const have = new Set((await (await api(`/api/blob/${id}`)).json()).have);
+  for (let i = 0; i < chunkCount; i++) {
+    if (!have.has(i)) {
+      const plain = await file.slice(i * size, (i + 1) * size).arrayBuffer();
+      await putBytes(`/api/blob/${id}/chunk/${i}`, await encryptChunk(key, id, i, chunkCount, plain));
+    }
+    onProgress((i + 1) / chunkCount);
+  }
+  return id;
+}
+
+export async function uploadText(text) {
+  const blob = new File([text], text.slice(0, 40).replace(/\s+/g, ' ') + '.txt',
+    { type: 'text/plain' });
+  return uploadFile(blob);
+}
+
+async function unlock(passphrase) {
+  const candidate = await deriveKey(passphrase, config.salt);
+  if (config.check === null) {
+    // First device: this passphrase becomes the one every other device must use.
+    const sealed = await makeCheck(candidate);
+    const res = await fetch('/api/check', { method: 'POST', body: sealed });
+    if (res.status === 409) {
+      // Another device set it in the meantime. Re-read and verify instead.
+      config = await (await api('/api/config')).json();
+      return unlock(passphrase);
+    }
+    if (!res.ok) throw new Error('could not store the verifier');
+  } else if (!await verifyCheck(candidate, b64decode(config.check))) {
+    return false;
+  }
+  key = candidate;
+  await saveKey(key);
+  return true;
+}
+
+async function runUploads(files) {
+  const bar = $('progress');
+  bar.hidden = false;
+  try {
+    for (const file of files) {
+      await uploadFile(file, (fraction) => { bar.value = fraction; });
+    }
+  } finally {
+    bar.hidden = true;
+    bar.value = 0;
+    await refreshInbox();
+  }
+}
+
+// Replaced with the real implementation in Task 10.
+async function refreshInbox() {}
+
+function wireUI() {
+  $('picker').addEventListener('change', (e) => runUploads([...e.target.files]));
+
+  const drop = $('drop');
+  for (const type of ['dragenter', 'dragover']) {
+    drop.addEventListener(type, (e) => { e.preventDefault(); drop.classList.add('over'); });
+  }
+  for (const type of ['dragleave', 'drop']) {
+    drop.addEventListener(type, () => drop.classList.remove('over'));
+  }
+  drop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    runUploads([...e.dataTransfer.files]);
+  });
+
+  $('text-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const value = $('text').value.trim();
+    if (!value) return;
+    $('text').value = '';
+    await uploadText(value);
+    await refreshInbox();
+  });
+}
+
+async function main() {
+  const me = await (await api('/api/whoami')).json();
+  $('who').textContent = `${me.node} (${me.user})`;
+  config = await (await api('/api/config')).json();
+
+  key = await loadKey();
+  if (key && config.check !== null && !await verifyCheck(key, b64decode(config.check))) {
+    // The server was reset with a new salt or verifier; the stored key is stale.
+    key = null;
+  }
+
+  if (!key) {
+    $('setup').hidden = false;
+    if (config.check === null) {
+      $('setup-msg').textContent =
+        'No passphrase set yet. Choose one. Every other device must enter the same phrase.';
+    }
+    $('setup-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      $('setup-err').textContent = '';
+      if (await unlock($('passphrase').value)) {
+        $('setup').hidden = true;
+        $('app').hidden = false;
+        wireUI();
+        await refreshInbox();
+      } else {
+        $('setup-err').textContent = 'Wrong passphrase.';
+      }
+    });
+    return;
+  }
+
+  $('app').hidden = false;
+  wireUI();
+  await refreshInbox();
+}
+
+main().catch((err) => {
+  document.body.insertAdjacentHTML('afterbegin',
+    `<p class="err" style="padding:16px">${err.message}</p>`);
+});
+```
+
+- [ ] **Step 3: Extend the embed directive**
+
+In `main.go`, replace the `//go:embed` line with:
+
+```go
+//go:embed web/index.html web/app.js web/crypto.js
+```
+
+Files are listed one by one rather than embedding the whole directory, so
+`package.json` and the test file never ship in the binary.
+
+- [ ] **Step 4: Verify**
+
+Run:
+
+```bash
+go build ./... && go test ./... && node --test web/crypto.test.mjs
+TL_TOKEN=devtoken go run . --auth=token --data ./devdata
+```
+
+Open `http://localhost:8080/login?t=devtoken` in Chrome. `localhost` counts as a
+secure context even over plain HTTP, so Web Crypto works during development.
+
+Check, in order:
+
+1. The setup panel offers to choose a passphrase, and the header shows your identity.
+2. Enter one. The app panel appears.
+3. Drop a small file. The progress bar runs and disappears.
+4. `ls devdata/blobs/*/` shows `meta.json`, `manifest`, and numbered chunk files.
+5. `cat` any numbered chunk. It must be binary noise, not your file's contents. If you can read the file, encryption is not wired up and the task is not done.
+6. Reload the page. It goes straight to the app panel, with no passphrase prompt.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add web/index.html web/app.js main.go
+git commit -m "feat(web): passphrase setup and encrypted chunked upload"
+```
+
+---
+
+### Task 9: Service worker download
+
+**Files:**
+- Create: `web/sw.js`
+- Modify: `web/app.js` (register the worker)
+- Modify: `main.go` (embed `sw.js`)
+
+**Interfaces:**
+- Consumes: `decryptChunk`, `decryptMeta`, `loadKey`, `b64decode` from Task 7.
+- Produces: a `GET /dl/{id}` route, handled entirely in the worker, that streams a decrypted file to the browser's own download machinery.
+
+- [ ] **Step 1: Write `web/sw.js`**
+
+```js
+import { decryptChunk, decryptMeta, loadKey, b64decode } from './crypto.js';
+
+// Registered with {type:'module'} so this import works. Chrome and Edge support
+// module workers; the app targets those.
+
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+
+self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+  if (url.origin !== self.location.origin) return;
+  if (event.request.method === 'GET' && url.pathname.startsWith('/dl/')) {
+    event.respondWith(download(url.pathname.slice(4)));
+  }
+});
+
+// The browser saves this response with its own progress UI and streams straight
+// to disk, so a multi-gigabyte file never sits in memory. This is the whole
+// reason downloads live in the worker rather than the page.
+async function download(id) {
+  const key = await loadKey();
+  if (!key) return new Response('locked: open the app and unlock first', { status: 403 });
+
+  const info = await (await fetch(`/api/blob/${id}`)).json();
+  const meta = await decryptMeta(key, id, b64decode(info.meta));
+
+  let next = 0;
+  const body = new ReadableStream({
+    async pull(controller) {
+      if (next >= info.chunkCount) {
+        controller.close();
+        return;
+      }
+      const res = await fetch(`/api/blob/${id}/chunk/${next}`);
+      if (!res.ok) {
+        controller.error(new Error(`chunk ${next}: ${res.status}`));
+        return;
+      }
+      const sealed = new Uint8Array(await res.arrayBuffer());
+      // Throws if the chunk was reordered, substituted, or truncated.
+      controller.enqueue(await decryptChunk(key, id, next, info.chunkCount, sealed));
+      next++;
+    },
+  });
+
+  const filename = encodeURIComponent(meta.name);
+  return new Response(body, {
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': String(meta.size),
+      'Content-Disposition': `attachment; filename="${filename}"; filename*=UTF-8''${filename}`,
+    },
+  });
+}
+```
+
+- [ ] **Step 2: Register the worker**
+
+In `web/app.js`, add this function and call it as the first line of `main()`:
+
+```js
+async function registerWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  try {
+    const reg = await navigator.serviceWorker.register('/sw.js', { type: 'module' });
+    // Downloads route through the worker, so wait until one controls this page.
+    if (!navigator.serviceWorker.controller) await navigator.serviceWorker.ready;
+    return reg;
+  } catch (err) {
+    console.warn('service worker registration failed', err);
+  }
+}
+```
+
+- [ ] **Step 3: Embed it**
+
+In `main.go`, extend the embed directive:
+
+```go
+//go:embed web/index.html web/app.js web/crypto.js web/sw.js
+```
+
+- [ ] **Step 4: Verify**
+
+Run the server, open `http://localhost:8080/login?t=devtoken`, unlock, and upload a file bigger than one chunk. Start the server with `--chunk-size 65536` so a 1 MB file spans sixteen chunks.
+
+Then in the browser console:
+
+```js
+const id = (await (await fetch('/api/inbox')).json())[0].id;
+Object.assign(document.createElement('a'), { href: `/dl/${id}`, download: '' }).click();
+```
+
+Check, in order:
+
+1. The browser's download shelf shows the original filename, not the blob id.
+2. The downloaded file is byte-identical to the original: `cmp original.bin ~/Downloads/original.bin`.
+3. DevTools, Application, Service Workers shows the worker as activated.
+4. Delete the IndexedDB entry, reload without unlocking, and confirm `/dl/{id}` returns the 403 rather than a corrupt file.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add web/sw.js web/app.js main.go
+git commit -m "feat(web): streaming decrypt-on-download in the service worker"
+```
+
+---
+
+### Task 10: Inbox
+
+**Files:**
+- Modify: `web/app.js` (replace the `refreshInbox` stub)
+
+**Interfaces:**
+- Consumes: `GET /api/inbox`, `DELETE /api/blob/{id}` from Task 4; `decryptMeta` from Task 7; `/dl/{id}` from Task 9.
+- Produces: `async function refreshInbox()`, rendering the list with real filenames.
+
+- [ ] **Step 1: Replace the stub**
+
+In `web/app.js`, replace `async function refreshInbox() {}` with:
+
+```js
+function humanSize(bytes) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let n = bytes, i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
+}
+
+function ago(iso) {
+  const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.round(mins / 60)}h ago`;
+}
+
+async function refreshInbox() {
+  const list = await (await api('/api/inbox')).json();
+  const ul = $('inbox');
+  ul.replaceChildren();
+
+  for (const entry of list) {
+    const li = document.createElement('li');
+
+    let label = 'incomplete transfer';
+    let sub = `from ${entry.sender}, ${ago(entry.createdAt)}`;
+    if (entry.complete) {
+      try {
+        const meta = await decryptMeta(key, entry.id, b64decode(entry.meta));
+        label = meta.name;
+        sub = `${humanSize(meta.size)}, from ${entry.sender}, ${ago(entry.createdAt)}`;
+      } catch {
+        // Sealed under a different passphrase, or tampered with. Say so rather
+        // than showing a name we cannot vouch for.
+        label = 'cannot decrypt';
+        sub = `from ${entry.sender}, wrong passphrase or tampered`;
+      }
+    } else {
+      sub += `, ${entry.have.length}/${entry.chunkCount} chunks`;
+    }
+
+    const text = document.createElement('div');
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = label;
+    const meta = document.createElement('div');
+    meta.className = 'sub';
+    meta.textContent = sub;
+    text.append(name, meta);
+
+    const actions = document.createElement('div');
+    if (entry.complete && label !== 'cannot decrypt') {
+      const get = document.createElement('a');
+      get.href = `/dl/${entry.id}`;
+      get.download = '';
+      get.textContent = 'Save';
+      actions.append(get, ' ');
+    }
+    const del = document.createElement('button');
+    del.textContent = 'Delete';
+    del.addEventListener('click', async () => {
+      await api(`/api/blob/${entry.id}`, { method: 'DELETE' });
+      await refreshInbox();
+    });
+    actions.append(del);
+
+    li.append(text, actions);
+    ul.append(li);
+  }
+
+  if (list.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'sub';
+    li.textContent = 'Nothing waiting.';
+    ul.append(li);
+  }
+}
+```
+
+Add `decryptMeta` to the import list at the top of `web/app.js`.
+
+Every value here goes through `textContent` and DOM construction rather than
+`innerHTML`, because filenames come from another device and are attacker-shaped
+input the moment any device is compromised.
+
+- [ ] **Step 2: Verify**
+
+Run the server, unlock, then check in order:
+
+1. Upload a file. It appears in the list with its real filename and human-readable size.
+2. Send text with the text box. It appears as a `.txt` entry.
+3. Click Save. The file downloads with the right name and contents.
+4. Click Delete. The entry disappears and `devdata/blobs/` loses the directory.
+5. With the server running, `curl -H 'Authorization: Bearer devtoken' localhost:8080/api/inbox` shows only ciphertext and metadata, no filenames.
+6. Upload a file named `<img src=x onerror=alert(1)>.txt` and confirm the list renders it as literal text with no alert.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add web/app.js
+git commit -m "feat(web): inbox listing, download and delete"
+```
+
+---
+
+### Task 11: Web Push
+
+**Files:**
+- Modify: `push.go` (full replacement)
+- Modify: `server.go` (add the subscribe route and handler)
+- Modify: `web/sw.js` (push and notificationclick handlers)
+- Modify: `web/app.js` (subscribe after unlock)
+- Test: `server_test.go` (append)
+
+**Interfaces:**
+- Consumes: `Pusher` call sites from Tasks 3 and 4, which already call `PublicKey()` and `NotifyOthers(sender)`.
+- Produces:
+  - `func NewPusher(dir, subject string) (*Pusher, error)`
+  - `func (p *Pusher) Subscribe(node string, raw []byte) error`
+  - unchanged signatures for `PublicKey` and `NotifyOthers`
+
+- [ ] **Step 1: Add the dependency**
+
+```bash
+go get github.com/SherClockHolmes/webpush-go@latest
+```
+
+- [ ] **Step 2: Write the failing test**
+
+Append to `server_test.go`:
+
+```go
+func TestSubscribeStoresAndPersists(t *testing.T) {
+	dir := t.TempDir()
+	pu, err := NewPusher(dir, "mailto:test@invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pu.PublicKey() == "" {
+		t.Fatal("VAPID public key should be generated on first run")
+	}
+
+	raw := `{"endpoint":"https://push.example/abc","keys":{"p256dh":"k","auth":"a"}}`
+	if err := pu.Subscribe("pixel", []byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	if err := pu.Subscribe("pixel", []byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := NewPusher(dir, "mailto:test@invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.Count(); got != 1 {
+		t.Fatalf("count = %d, want 1 after a duplicate endpoint", got)
+	}
+	if reloaded.PublicKey() != pu.PublicKey() {
+		t.Fatal("VAPID keys must survive a restart or every device loses its subscription")
+	}
+}
+
+func TestSubscribeRejectsGarbage(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	if got := do(t, s, "POST", "/api/push/subscribe", "not json").Code; got != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400", got)
+	}
+}
+```
+
+`TestSubscribeRejectsGarbage` needs a real `Pusher`, so change `newTestServer` to
+build one instead of using the zero value. Replace its `&Pusher{}` argument with:
+
+```go
+	pu, err := NewPusher(dir, "mailto:test@invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+```
+
+and pass `pu`.
+
+- [ ] **Step 3: Run tests to verify they fail**
+
+Run: `go test ./...`
+Expected: FAIL, undefined `NewPusher`, `Subscribe`, `Count`.
+
+- [ ] **Step 4: Replace `push.go`**
+
+```go
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sync"
+
+	webpush "github.com/SherClockHolmes/webpush-go"
+)
+
+type subscription struct {
+	Node string               `json:"node"`
+	Sub  webpush.Subscription `json:"sub"`
+}
+
+type vapidKeys struct {
+	Private string `json:"private"`
+	Public  string `json:"public"`
+}
+
+// Pusher owns the VAPID identity and the device subscription list. Both persist
+// in the data directory: regenerating the keys would silently invalidate every
+// existing subscription, which looks exactly like push being broken.
+type Pusher struct {
+	dir     string
+	subject string
+	keys    vapidKeys
+	mu      sync.Mutex
+	subs    []subscription
+}
+
+func NewPusher(dir, subject string) (*Pusher, error) {
+	p := &Pusher{dir: dir, subject: subject}
+
+	keyPath := filepath.Join(dir, "vapid.json")
+	if b, err := os.ReadFile(keyPath); err == nil {
+		if err := json.Unmarshal(b, &p.keys); err != nil {
+			return nil, err
+		}
+	} else {
+		priv, pub, err := webpush.GenerateVAPIDKeys()
+		if err != nil {
+			return nil, err
+		}
+		p.keys = vapidKeys{Private: priv, Public: pub}
+		out, err := json.Marshal(p.keys)
+		if err != nil {
+			return nil, err
+		}
+		if err := atomicWrite(keyPath, out); err != nil {
+			return nil, err
+		}
+	}
+
+	if b, err := os.ReadFile(filepath.Join(dir, "subs.json")); err == nil {
+		if err := json.Unmarshal(b, &p.subs); err != nil {
+			return nil, err
+		}
+	}
+	return p, nil
+}
+
+func (p *Pusher) PublicKey() string { return p.keys.Public }
+
+func (p *Pusher) Count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.subs)
+}
+
+func (p *Pusher) Subscribe(node string, raw []byte) error {
+	var sub webpush.Subscription
+	if err := json.Unmarshal(raw, &sub); err != nil {
+		return err
+	}
+	if sub.Endpoint == "" {
+		return errors.New("subscription has no endpoint")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.subs {
+		if p.subs[i].Sub.Endpoint == sub.Endpoint {
+			p.subs[i] = subscription{Node: node, Sub: sub}
+			return p.saveLocked()
+		}
+	}
+	p.subs = append(p.subs, subscription{Node: node, Sub: sub})
+	return p.saveLocked()
+}
+
+func (p *Pusher) saveLocked() error {
+	b, err := json.Marshal(p.subs)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(filepath.Join(p.dir, "subs.json"), b)
+}
+
+// NotifyOthers wakes every subscribed device except the one that just uploaded.
+// The push deliberately carries no useful payload: the filename lives behind the
+// encryption boundary, so the service worker fetches and decrypts it locally
+// rather than having the server describe a file it cannot read.
+func (p *Pusher) NotifyOthers(sender string) {
+	p.mu.Lock()
+	targets := make([]subscription, 0, len(p.subs))
+	for _, s := range p.subs {
+		if s.Node != sender {
+			targets = append(targets, s)
+		}
+	}
+	p.mu.Unlock()
+
+	var dead []string
+	for _, s := range targets {
+		sub := s.Sub
+		res, err := webpush.SendNotification([]byte("{}"), &sub, &webpush.Options{
+			Subscriber:      p.subject,
+			VAPIDPublicKey:  p.keys.Public,
+			VAPIDPrivateKey: p.keys.Private,
+			TTL:             3600,
+		})
+		if err != nil {
+			log.Printf("push to %s: %v", s.Node, err)
+			continue
+		}
+		res.Body.Close()
+		if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusGone {
+			dead = append(dead, sub.Endpoint)
+		}
+	}
+	if len(dead) > 0 {
+		p.prune(dead)
+	}
+}
+
+func (p *Pusher) prune(endpoints []string) {
+	gone := make(map[string]bool, len(endpoints))
+	for _, e := range endpoints {
+		gone[e] = true
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	kept := p.subs[:0]
+	for _, s := range p.subs {
+		if !gone[s.Sub.Endpoint] {
+			kept = append(kept, s)
+		}
+	}
+	p.subs = kept
+	if err := p.saveLocked(); err != nil {
+		log.Printf("prune: %v", err)
+	}
+}
+```
+
+- [ ] **Step 5: Add the subscribe route**
+
+In `server.go`, add to `routes()`:
+
+```go
+	s.mux.HandleFunc("POST /api/push/subscribe", s.gate(s.subscribe))
+```
+
+and append the handler:
+
+```go
+func (s *Server) subscribe(w http.ResponseWriter, r *http.Request) {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 8192))
+	if err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	if err := s.push.Subscribe(who(r).Node, raw); err != nil {
+		http.Error(w, "bad subscription", http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+```
+
+- [ ] **Step 6: Build the real Pusher in `main.go`**
+
+Replace `pusher := &Pusher{}` with:
+
+```go
+	pusher, err := NewPusher(*dataDir, *vapidSub)
+	if err != nil {
+		return err
+	}
+```
+
+- [ ] **Step 7: Handle push in the worker**
+
+Append to `web/sw.js`:
+
+```js
+self.addEventListener('push', (event) => {
+  event.waitUntil(announce());
+});
+
+// The push itself says nothing. Everything shown here is decrypted on this
+// device, which is the only place the filename exists in the clear.
+async function announce() {
+  let title = 'File waiting';
+  try {
+    const key = await loadKey();
+    const [newest] = await (await fetch('/api/inbox')).json();
+    if (key && newest && newest.complete) {
+      const meta = await decryptMeta(key, newest.id, b64decode(newest.meta));
+      title = meta.name;
+    }
+  } catch {
+    // Locked device or a fetch failure. The generic title still tells the
+    // owner something arrived.
+  }
+  return self.registration.showNotification('transfer-local', {
+    body: title,
+    tag: 'inbox',
+    icon: '/icon-192.png',
+  });
+}
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil((async () => {
+    for (const client of await self.clients.matchAll({ type: 'window' })) {
+      if (client.url.includes(self.location.origin)) return client.focus();
+    }
+    return self.clients.openWindow('/');
+  })());
+});
+```
+
+- [ ] **Step 8: Subscribe from the page**
+
+Append to `web/app.js` and call `subscribePush()` at the end of both unlock paths in `main()`:
+
+```js
+function urlBase64ToUint8Array(base64) {
+  const padded = (base64 + '='.repeat((4 - base64.length % 4) % 4))
+    .replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(padded);
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+
+async function subscribePush() {
+  if (!config.vapidKey || !('Notification' in window)) return;
+  const reg = await navigator.serviceWorker.ready;
+  if (await Notification.requestPermission() !== 'granted') return;
+  const sub = await reg.pushManager.getSubscription()
+    || await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(config.vapidKey),
+    });
+  await api('/api/push/subscribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(sub),
+  });
+}
+```
+
+- [ ] **Step 9: Run tests to verify they pass**
+
+Run: `go test ./... -v && node --test web/crypto.test.mjs`
+Expected: PASS, twenty-four Go tests and ten JS tests.
+
+- [ ] **Step 10: Verify on real devices**
+
+Push needs a real HTTPS origin, so this step runs against the deployed tailnet server rather than localhost. Deferred until Task 13 is done if the server is not yet on `axiom-vps`. From the Pixel and from `axiom-pc`:
+
+1. Open the app, unlock, and accept the notification prompt.
+2. Confirm `data/subs.json` on the server holds one entry per device.
+3. Upload from the Pixel. `axiom-pc` shows a notification naming the file, and the Pixel does not notify itself.
+4. Lock the Pixel's screen and upload from `axiom-pc`. The notification arrives with the screen off.
+5. Tap it. The app opens with the file in the list.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add push.go server.go server_test.go web/sw.js web/app.js main.go go.mod go.sum
+git commit -m "feat(push): payload-free web push with client-side filename decryption"
+```
+
+---
+
+### Task 12: PWA install, share target and file handlers
+
+**Files:**
+- Create: `web/manifest.webmanifest`
+- Create: `web/icon-192.png`, `web/icon-512.png`
+- Modify: `web/sw.js` (share target interception)
+- Modify: `web/app.js` (consume a stashed share, handle file launches)
+- Modify: `main.go` (embed the manifest and icons)
+
+**Interfaces:**
+- Consumes: `uploadFile` from Task 8, `kvPut`/`kvGet` from Task 7.
+- Produces: an installable app that appears in Android's share sheet and in Windows "Open with".
+
+- [ ] **Step 1: Create the icons**
+
+Any two square PNGs, 192 and 512 pixels. To generate placeholders without adding a dependency:
+
+```bash
+python -c "
+import struct, zlib
+def png(path, size, rgb):
+    raw = b''.join(b'\x00' + bytes(rgb) * size for _ in range(size))
+    def chunk(tag, data):
+        c = tag + data
+        return struct.pack('>I', len(data)) + c + struct.pack('>I', zlib.crc32(c))
+    open(path,'wb').write(
+        b'\x89PNG\r\n\x1a\n'
+        + chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0))
+        + chunk(b'IDAT', zlib.compress(raw))
+        + chunk(b'IEND', b''))
+png('web/icon-192.png', 192, (91,157,255))
+png('web/icon-512.png', 512, (91,157,255))
+"
+```
+
+- [ ] **Step 2: Write `web/manifest.webmanifest`**
+
+```json
+{
+  "name": "transfer-local",
+  "short_name": "transfer",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#11141a",
+  "theme_color": "#11141a",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ],
+  "share_target": {
+    "action": "/share",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url",
+      "files": [{ "name": "files", "accept": ["*/*"] }]
+    }
+  },
+  "file_handlers": [
+    {
+      "action": "/open",
+      "accept": {
+        "application/octet-stream": [".bin", ".iso", ".dmg"],
+        "application/pdf": [".pdf"],
+        "application/zip": [".zip"],
+        "image/jpeg": [".jpg", ".jpeg"],
+        "image/png": [".png"],
+        "text/plain": [".txt", ".log", ".md"],
+        "video/mp4": [".mp4"]
+      }
+    }
+  ]
+}
+```
+
+Chrome requires concrete MIME types in `file_handlers`, so this is a list rather
+than a wildcard. Drag-and-drop onto the window is the path that covers every
+other file type.
+
+- [ ] **Step 3: Intercept the share POST in the worker**
+
+In `web/sw.js`, extend the `fetch` listener. Replace it with:
+
+```js
+self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+  if (url.origin !== self.location.origin) return;
+
+  if (event.request.method === 'GET' && url.pathname.startsWith('/dl/')) {
+    event.respondWith(download(url.pathname.slice(4)));
+    return;
+  }
+  // The share POST must never reach the network: the server cannot accept
+  // plaintext, so the payload is stashed and the page encrypts it instead.
+  if (event.request.method === 'POST' && url.pathname === '/share') {
+    event.respondWith(stashShare(event.request));
+  }
+});
+
+async function stashShare(request) {
+  try {
+    const form = await request.formData();
+    const files = form.getAll('files').filter((f) => f instanceof File);
+    const text = [form.get('title'), form.get('text'), form.get('url')]
+      .filter(Boolean).join('\n');
+    await kvPut('pending-share', { files, text });
+  } catch (err) {
+    console.warn('share stash failed', err);
+  }
+  return Response.redirect('/?share=1', 303);
+}
+```
+
+Add `kvPut` to the import list at the top of `web/sw.js`.
+
+- [ ] **Step 4: Consume the share and file launches in the page**
+
+Append to `web/app.js`, and call `handleLaunch()` at the end of both unlock paths in `main()`:
+
+```js
+async function handleLaunch() {
+  // Android share sheet: the worker stashed the payload before redirecting here.
+  if (new URLSearchParams(location.search).has('share')) {
+    const pending = await kvGet('pending-share');
+    await kvPut('pending-share', null);
+    history.replaceState(null, '', '/');
+    if (pending) {
+      if (pending.files?.length) await runUploads(pending.files);
+      if (pending.text) { await uploadText(pending.text); await refreshInbox(); }
+    }
+  }
+  // Windows "Open with": Chrome hands the app the files it was launched on.
+  if ('launchQueue' in window) {
+    window.launchQueue.setConsumer(async (params) => {
+      if (!params.files?.length) return;
+      const files = await Promise.all(params.files.map((h) => h.getFile()));
+      await runUploads(files);
+    });
+  }
+}
+```
+
+Add `kvGet` and `kvPut` to the import list at the top of `web/app.js`.
+
+- [ ] **Step 5: Embed the manifest and icons**
+
+In `main.go`, replace the embed directive with its final form:
+
+```go
+//go:embed web/index.html web/app.js web/crypto.js web/sw.js web/manifest.webmanifest web/icon-192.png web/icon-512.png
+```
+
+- [ ] **Step 6: Verify**
+
+Run `go build ./... && go test ./...`, then deploy or run against the tailnet server. Install steps and checks, in order:
+
+1. **Windows, Chrome or Edge:** open the app, use the install button in the address bar. It opens in its own window with its own icon.
+2. Right-click a `.pdf` in Explorer, choose Open with, pick transfer-local. It launches and uploads that file.
+3. Drag any file onto the window. It uploads.
+4. In the installed app's menu, App info, enable "Start app when you sign in".
+5. **Android, Chrome:** open the app, Add to Home screen. It launches without browser chrome.
+6. Open Gallery, share a photo, and confirm transfer-local is in the share sheet. Pick it. The photo uploads and appears in the inbox on Windows.
+7. Share a link from Chrome to the app and confirm it arrives as a `.txt` entry.
+
+If the app is not offered for install, check DevTools, Application, Manifest for
+errors, and confirm the manifest is served as `application/manifest+json`.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add web/manifest.webmanifest web/icon-192.png web/icon-512.png web/sw.js web/app.js main.go
+git commit -m "feat(pwa): installable app with android share target and file handlers"
+```
+
+---
+
+### Task 13: Deployment
+
+**Files:**
+- Create: `deploy/transfer-local.service`
+- Create: `README.md`
+
+**Interfaces:**
+- Consumes: the finished binary and its flags.
+- Produces: a repeatable install on `axiom-vps`.
+
+- [ ] **Step 1: Write the systemd unit**
+
+Create `deploy/transfer-local.service`:
+
+```ini
+[Unit]
+Description=transfer-local encrypted inbox
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=transfer
+Group=transfer
+Environment=TS_AUTHKEY_FILE=/etc/transfer-local/authkey
+ExecStart=/usr/local/bin/transfer-local --data /var/lib/transfer-local
+Restart=on-failure
+RestartSec=5
+
+# The process needs its data directory and nothing else.
+StateDirectory=transfer-local
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=/var/lib/transfer-local
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`TS_AUTHKEY` is only read on the first start, when the node joins the tailnet.
+Afterward the node state in `/var/lib/transfer-local/tsnet` is what authenticates
+it, so the key file can be removed. Load it with a systemd drop-in or export it
+by hand for the first run rather than baking the key into the unit.
+
+- [ ] **Step 2: Write the README**
+
+Create `README.md`:
+
+```markdown
+# transfer-local
+
+A self-hosted encrypted inbox for moving files between your own devices. One Go
+binary, one installable web app, no native clients.
+
+Files are encrypted in the browser before upload, so the server holds ciphertext
+and never learns a filename. Only devices your Tailscale tailnet vouches for can
+reach it.
+
+## Prerequisites
+
+Both of these are enabled in the Tailscale admin console, under Settings,
+Features:
+
+- **MagicDNS.** Without it the server's hostname does not resolve.
+- **HTTPS Certificates.** Without it there is no trusted certificate, so no
+  secure context, so no install, push, share target, or download. The app does
+  not work without this one.
+
+You also need a reusable auth key for the server node.
+
+## Install
+
+    go build -o transfer-local .
+    scp transfer-local axiom-vps:/usr/local/bin/
+    scp deploy/transfer-local.service axiom-vps:/etc/systemd/system/
+
+On the server:
+
+    sudo useradd --system --home /var/lib/transfer-local transfer
+    sudo mkdir -p /var/lib/transfer-local && sudo chown transfer /var/lib/transfer-local
+    sudo -u transfer TS_AUTHKEY=tskey-auth-... /usr/local/bin/transfer-local --data /var/lib/transfer-local
+    # once it joins, stop it and let systemd take over
+    sudo systemctl enable --now transfer-local
+
+The app is then at `https://transfer-local.<your-tailnet>.ts.net`.
+
+## First run
+
+Open the URL on any device and choose a passphrase. Every other device must
+enter the same one. It is never sent to the server: it derives an AES key that
+stays in that device's IndexedDB. Losing it means losing anything still in the
+inbox, which is at most one TTL window.
+
+## Per-device setup
+
+**Windows, Chrome or Edge**
+
+1. Open the URL and install the app from the address bar.
+2. App menu, App info, enable "Start app when you sign in".
+3. Allow notifications when asked.
+
+Drag files onto the window to send. Right-click a file in Explorer, Open with,
+transfer-local also works for the registered types.
+
+**Android, Chrome**
+
+1. Open the URL, menu, Add to Home screen.
+2. Open it once and allow notifications.
+
+Share to it from any app's share sheet. Notifications only open the app while
+Tailscale is connected, since the hostname does not resolve otherwise.
+
+**iOS**
+
+Add to Home Screen works and notifications arrive on iOS 16.4 and later. iOS has
+no Web Share Target, so sending from the share sheet is not available.
+
+## Flags
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--auth` | `tailscale` | `tailscale` or `token` |
+| `--data` | `./data` | data directory |
+| `--hostname` | `transfer-local` | tsnet node name |
+| `--allow-users` | node owner | comma-separated tailnet logins |
+| `--allow-nodes` | any | comma-separated node names |
+| `--chunk-size` | 8 MiB | plaintext chunk size |
+| `--max-blob` | 50 GiB | maximum per transfer |
+| `--max-total` | 200 GiB | maximum stored at once |
+| `--ttl-hours` | 24 | inactivity before a transfer is swept |
+| `--addr` | `127.0.0.1:8080` | listen address, token mode only |
+
+## Token mode
+
+`--auth=token` with `TL_TOKEN` set is a LAN fallback with no Tailscale
+dependency. Visit `/login?t=<token>` once to set the cookie. Note that over plain
+HTTP this is not a secure context, so install, push, share target, and downloads
+all stop working. It exists for development and for a LAN without Tailscale, not
+as an equal alternative.
+
+## What the server can and cannot see
+
+It sees: blob ids, which node uploaded each one, chunk counts, ciphertext sizes,
+and timestamps. It does not see filenames, MIME types, or content. Chunks are
+AES-256-GCM sealed with the chunk's position and the file's total chunk count
+bound into the authenticated data, so reordering, truncating, or splicing chunks
+between files is detected on download rather than producing a plausible wrong
+file.
+
+## Tests
+
+    go test ./...
+    node --test web/crypto.test.mjs
+```
+
+- [ ] **Step 3: Deploy and verify end to end**
+
+Follow the README on `axiom-vps`, then check in order:
+
+1. `tailscale status` on another device lists `transfer-local`.
+2. `https://transfer-local.<tailnet>.ts.net` loads with no certificate warning.
+3. Install on `axiom-pc` and on the Pixel, using the same passphrase.
+4. Share a photo from the Pixel's Gallery. It arrives on `axiom-pc` with a notification.
+5. Send a 2 GB file from `axiom-pc`. Watch it stream, then download it on another machine and confirm `cmp` reports no difference.
+6. Pull the network mid-upload and restore it. The upload continues rather than restarting.
+7. `sudo -u transfer ls /var/lib/transfer-local/blobs/*/` and confirm every chunk is unreadable binary.
+8. `sudo systemctl restart transfer-local` and confirm existing devices still work without re-entering the passphrase.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add deploy/transfer-local.service README.md
+git commit -m "docs: deployment unit, install guide and threat model summary"
+```
+
+---
+
+## Deliberately not in this plan
+
+**Resume after a page reload.** The spec marks this SHOULD, not MUST, and it is
+dropped here. What ships is resume across network drops and retries: `putBytes`
+replays failed chunks against idempotent writes, and `uploadFile` skips whatever
+`have[]` already reports. That covers a dropped connection, a sleeping laptop,
+and a flaky uplink. What it does not cover is closing the tab mid-upload, because
+a `File` handle cannot survive a reload, so continuing would mean persisting
+`{blobId, name, size}` in IndexedDB and asking the user to reselect the same file
+on reopen. Add it as a follow-up if reopening a half-sent 20 GB upload turns out
+to be a real habit rather than a hypothetical one.
+
+**The native Android wrapper.** Spec section 10. Not planned, not scheduled, and
+nothing in this plan would be thrown away by adding it later.
+
+## Verification summary
+
+Run before calling the project done:
+
+```bash
+go vet ./...
+go test ./...
+node --test web/crypto.test.mjs
+```
+
+The three checks that matter most, because they are the ones whose failure looks
+like success:
+
+1. **`node --test web/crypto.test.mjs`** must reject reordered, truncated, and
+   spliced chunks. If any of those decrypt, the AAD binding is broken and files
+   can be tampered with undetectably.
+2. **A chunk file on the server must be unreadable.** If `cat` shows your file,
+   encryption is not actually in the path.
+3. **A non-allowlisted tailnet node must get 403 on every route**, static assets
+   included. There is no ungated path by design, and a regression here is silent.

@@ -1,4 +1,4 @@
-# transfer-local: design
+# airlock: design
 
 **Date:** 2026-08-15
 **Status:** approved, pending implementation plan
@@ -45,9 +45,9 @@ apps are explicitly deferred, not planned.
 
 ```
   Pixel 10 Pro                     axiom-vps                  axiom-pc
-  Chrome PWA                    transfer-local                Chrome PWA
+  Chrome PWA                    airlock                Chrome PWA
       |                        (tsnet node, Go)                   |
-      |  https://transfer-local.<tailnet>.ts.net                  |
+      |  https://airlock.<tailnet>.ts.net                  |
       +------------------ WireGuard / TLS ------------------------+
                                     |
                           data/blobs/<id>/{meta.json,0,1,2,...}

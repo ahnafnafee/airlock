@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -478,5 +480,152 @@ func TestTooManyChunksIsRejected(t *testing.T) {
 	body, _ := json.Marshal(map[string]any{"cids": ids})
 	if code := do(t, s, "POST", "/api/transfer", string(body)).Code; code != http.StatusInsufficientStorage {
 		t.Fatalf("code = %d, want 507", code)
+	}
+}
+
+func TestSweepOnceDropsExpiredTransfersThenOrphanChunks(t *testing.T) {
+	dir := t.TempDir()
+	chunks, _ := NewChunkStore(dir, 64, 1<<20)
+	transfers, _ := NewTransfers(dir, chunks, time.Millisecond, 100, 4096)
+
+	rec, _, _ := transfers.Create("pixel", nil, []string{cid(1)})
+	chunks.Put(cid(1), strings.NewReader("data"))
+	time.Sleep(10 * time.Millisecond)
+
+	gone, orphans, err := sweepOnce(transfers, chunks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gone != 1 {
+		t.Fatalf("swept %d transfers, want 1", gone)
+	}
+	// The chunk must go too, but only after its last referent did. Collecting the
+	// reference set before expiring transfers would spare it forever.
+	if orphans != 1 {
+		t.Fatalf("swept %d chunks, want 1", orphans)
+	}
+	if chunks.Has(cid(1)) {
+		t.Fatal("orphaned chunk survived")
+	}
+	if _, err := transfers.Get(rec.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatal("expired transfer survived")
+	}
+}
+
+func TestSweepOnceKeepsChunksAStillLiveTransferNeeds(t *testing.T) {
+	dir := t.TempDir()
+	chunks, _ := NewChunkStore(dir, 64, 1<<20)
+	transfers, _ := NewTransfers(dir, chunks, time.Hour, 100, 4096)
+
+	transfers.Create("pixel", nil, []string{cid(1)})
+	chunks.Put(cid(1), strings.NewReader("data"))
+
+	gone, orphans, err := sweepOnce(transfers, chunks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gone != 0 || orphans != 0 {
+		t.Fatalf("swept %d transfers and %d chunks, want 0 and 0", gone, orphans)
+	}
+}
+
+// Token mode is the entire authentication surface when there is no tailnet, so
+// the comparison has to turn away everything but the exact credential. The
+// cookie is not a convenience: a browser cannot attach a header to a top-level
+// navigation, so without it the app itself would be unreachable.
+func TestTokenIdentityAcceptsOnlyTheExactToken(t *testing.T) {
+	ident := tokenIdentity("s3cret")
+
+	bearer := httptest.NewRequest("GET", "/api/whoami", nil)
+	bearer.Header.Set("Authorization", "Bearer s3cret")
+	id, ok := ident(bearer)
+	if !ok {
+		t.Fatal("a correct bearer header was rejected")
+	}
+	if id.Node == "" || id.User != "token" {
+		t.Fatalf("identity = %+v, want a non-empty node and user \"token\"", id)
+	}
+
+	withCookie := httptest.NewRequest("GET", "/", nil)
+	withCookie.AddCookie(&http.Cookie{Name: "airlock_token", Value: "s3cret"})
+	if _, ok := ident(withCookie); !ok {
+		t.Fatal("a correct cookie was rejected")
+	}
+
+	for _, bad := range []string{"", "Bearer s3cre", "Bearer s3cret ", "Bearer S3cret", "Bearer ", "s3cret"} {
+		r := httptest.NewRequest("GET", "/", nil)
+		if bad != "" {
+			r.Header.Set("Authorization", bad)
+		}
+		if _, ok := ident(r); ok {
+			t.Fatalf("Authorization %q was accepted", bad)
+		}
+	}
+	wrongCookie := httptest.NewRequest("GET", "/", nil)
+	wrongCookie.AddCookie(&http.Cookie{Name: "airlock_token", Value: "s3cretx"})
+	if _, ok := ident(wrongCookie); ok {
+		t.Fatal("a wrong cookie value was accepted")
+	}
+}
+
+func TestLoginExchangesTheTokenForACookieTokenIdentityAccepts(t *testing.T) {
+	h := loginHandler("s3cret")
+
+	w := httptest.NewRecorder()
+	h(w, httptest.NewRequest("GET", "/login?t=wrong", nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("wrong token = %d, want 403", w.Code)
+	}
+	if got := w.Result().Cookies(); len(got) != 0 {
+		t.Fatalf("a rejected login set %v", got)
+	}
+
+	w = httptest.NewRecorder()
+	h(w, httptest.NewRequest("GET", "/login?t=s3cret", nil))
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("correct token = %d, want 303", w.Code)
+	}
+	cookies := w.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Value != "s3cret" {
+		t.Fatalf("cookies = %v", cookies)
+	}
+	if !cookies[0].HttpOnly {
+		t.Fatal("the token cookie must not be readable from script")
+	}
+	// The two halves name the same cookie in two places, so pin them together:
+	// a rename on one side would otherwise land every navigation on a 403.
+	r := httptest.NewRequest("GET", "/", nil)
+	r.AddCookie(cookies[0])
+	if _, ok := tokenIdentity("s3cret")(r); !ok {
+		t.Fatal("the cookie /login sets is not one tokenIdentity accepts")
+	}
+}
+
+func TestSaltIsGeneratedOnceAndACorruptFileIsNotReplaced(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "salt")
+
+	first, err := loadOrCreateSalt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(first)
+	if err != nil || len(raw) != 16 {
+		t.Fatalf("salt = %q, want standard base64 of 16 bytes (%v)", first, err)
+	}
+	// Every key on every device derives from this value. A salt that moved
+	// between restarts would orphan every sealed record already on disk.
+	second, err := loadOrCreateSalt(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatalf("salt changed across calls: %q then %q", first, second)
+	}
+
+	if err := os.WriteFile(path, []byte("short"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadOrCreateSalt(path); err == nil {
+		t.Fatal("a salt file of the wrong length was silently replaced")
 	}
 }

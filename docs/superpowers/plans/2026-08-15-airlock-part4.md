@@ -300,7 +300,12 @@ export const api = {
     new Uint8Array(await (await req(`/api/transfer/${id}/${kind}`)).arrayBuffer()),
   deleteTransfer: (id) => req(`/api/transfer/${id}`, { method: 'DELETE' }),
 
-  putChunk: (cid, bytes) => sendBytes(`/api/chunk/${cid}`, bytes),
+  // The transfer id is required on upload. Chunks live in a store shared by
+  // every transfer, so writing one leaves the transfer's own directory
+  // untouched, and without this the server could not refresh its inactivity
+  // clock and a long upload would be swept out from under itself.
+  putChunk: (cid, transferId, bytes) =>
+    sendBytes(`/api/chunk/${cid}?transfer=${transferId}`, bytes),
   getChunk: async (cid) =>
     new Uint8Array(await (await req(`/api/chunk/${cid}`)).arrayBuffer()),
 
@@ -578,7 +583,15 @@ function fakeApi(held = new Set()) {
       return { id: 'a'.repeat(32), missing: cids.filter((c) => !held.has(c)) };
     },
     async putRecord(id, kind, bytes) { calls.records.push({ kind, length: bytes.length }); },
-    async putChunk(cid, bytes) { calls.chunks.push(cid); held.add(cid); },
+    async putChunk(cid, transferId, bytes) {
+      // The transfer id is not optional: the server refuses a chunk without it,
+      // because that is what refreshes the transfer's inactivity clock.
+      if (!/^[0-9a-f]{32}$/.test(transferId || '')) {
+        throw new Error(`putChunk called without a transfer id: ${transferId}`);
+      }
+      calls.chunks.push(cid);
+      held.add(cid);
+    },
   };
 }
 
@@ -656,9 +669,9 @@ test('a failed chunk upload is retried', async () => {
   let failures = 2;
   const api = fakeApi();
   const inner = api.putChunk;
-  api.putChunk = async (cid, bytes) => {
+  api.putChunk = async (cid, transferId, bytes) => {
     if (failures-- > 0) throw new Error('network');
-    return inner(cid, bytes);
+    return inner(cid, transferId, bytes);
   };
   const r = await upload(fakeFile(pseudoRandom(20000, 17)), {
     mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api,
@@ -755,7 +768,7 @@ export async function upload(file, opts) {
     if (!wanted.has(cid)) continue;
 
     const sealed = await sealChunk(mk, mode, h, cid, plain);
-    const p = withRetry(() => api.putChunk(cid, sealed))
+    const p = withRetry(() => api.putChunk(cid, id, sealed))
       .then(() => {
         progress.sent++;
         onProgress({ ...progress });

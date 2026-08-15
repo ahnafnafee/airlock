@@ -180,6 +180,49 @@ func TestAllowRestoresARevokedDevice(t *testing.T) {
 	}
 }
 
+// The gate authenticates the connection, so an allowlisted device that visits a
+// hostile page would carry its own authority into any request that page fires.
+// Browsers label those; the fire-and-forget POST that permanently seals
+// /api/check is exactly the shape that needs turning away. Callers that send no
+// label, curl and the service worker among them, keep working.
+func TestGateRejectsBrowserLabelledCrossSiteRequests(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	cases := []struct {
+		site string
+		want int
+	}{
+		{"cross-site", http.StatusForbidden},
+		{"same-site", http.StatusForbidden},
+		{"same-origin", http.StatusOK},
+		{"none", http.StatusOK},
+		{"", http.StatusOK},
+	}
+	for _, c := range cases {
+		r := httptest.NewRequest("GET", "/api/whoami", nil)
+		if c.site != "" {
+			r.Header.Set("Sec-Fetch-Site", c.site)
+		}
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != c.want {
+			t.Fatalf("Sec-Fetch-Site %q = %d, want %d", c.site, w.Code, c.want)
+		}
+	}
+
+	// The write-once verifier is the sharpest target, so check the side effect
+	// itself did not land, not just the status code.
+	r := httptest.NewRequest("POST", "/api/check", strings.NewReader("evil-bytes"))
+	r.Header.Set("Sec-Fetch-Site", "cross-site")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("cross-site check = %d, want 403", w.Code)
+	}
+	if code := do(t, s, "POST", "/api/check", "real-bytes").Code; code != http.StatusNoContent {
+		t.Fatalf("check should still be unset, got %d", code)
+	}
+}
+
 func TestAllowOnUnknownDeviceIs404(t *testing.T) {
 	s, _ := newTestServer(t, true)
 	if code := do(t, s, "POST", "/api/devices/never-seen/allow", "").Code; code != http.StatusNotFound {

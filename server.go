@@ -94,6 +94,18 @@ func (s *Server) gate(h http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "not authorized", http.StatusForbidden)
 			return
 		}
+		// The identity belongs to the connection, not to whoever asked the
+		// browser to open it, so an allowlisted device browsing a hostile page
+		// would otherwise carry its own authority into a forged request. A
+		// cross-site POST needs no preflight and no readable response for its
+		// side effect to land, and /api/check is write-once, so one such request
+		// could seal a verifier nobody can decrypt. Browsers label the origin of
+		// every request they make; non-browser callers such as curl and the
+		// service worker send no label at all and are unaffected.
+		if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+			http.Error(w, "cross-site request", http.StatusForbidden)
+			return
+		}
 		// Registration is not authorization. Recording an unapproved device is
 		// what lets the pairing screen offer it, and the allow flag is read from
 		// the registry on every request so a revocation needs no restart and
@@ -178,8 +190,8 @@ func (s *Server) postCheck(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
-	f, err := os.OpenFile(filepath.Join(s.cfg.DataDir, "check.bin"),
-		os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	name := filepath.Join(s.cfg.DataDir, "check.bin")
+	f, err := os.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if errors.Is(err, os.ErrExist) {
 		http.Error(w, "check already set", http.StatusConflict)
 		return
@@ -188,8 +200,20 @@ func (s *Server) postCheck(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "write failed", http.StatusInternalServerError)
 		return
 	}
-	defer f.Close()
+	// Every failure after the create has to remove the file, and the close has
+	// to be checked rather than deferred and dropped. The file is the one-shot
+	// resource this route exists to claim: an empty or truncated check.bin left
+	// behind would answer every later attempt with 409 while offering the
+	// clients a verifier no passphrase can open, with no way back through the
+	// API.
 	if _, err := f.Write(b); err != nil {
+		f.Close()
+		os.Remove(name)
+		http.Error(w, "write failed", http.StatusInternalServerError)
+		return
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(name)
 		http.Error(w, "write failed", http.StatusInternalServerError)
 		return
 	}

@@ -240,3 +240,146 @@ func TestStaticIsServedThroughTheGate(t *testing.T) {
 		t.Fatalf("/open should serve index.html, got %q", body)
 	}
 }
+
+func createTransfer(t *testing.T, s *Server, body string) (string, []string) {
+	t.Helper()
+	w := do(t, s, "POST", "/api/transfer", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create = %d: %s", w.Code, w.Body.String())
+	}
+	var got struct {
+		ID      string   `json:"id"`
+		Missing []string `json:"missing"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &got)
+	return got.ID, got.Missing
+}
+
+func TestTransferRoundTripWithDedup(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	a, b := cid(1), cid(2)
+
+	id, missing := createTransfer(t, s, `{"cids":["`+a+`","`+b+`"]}`)
+	if len(missing) != 2 {
+		t.Fatalf("first transfer should need both chunks, got %v", missing)
+	}
+	for _, c := range missing {
+		if code := do(t, s, "PUT", "/api/chunk/"+c, "data").Code; code != http.StatusNoContent {
+			t.Fatalf("put chunk = %d", code)
+		}
+	}
+	do(t, s, "PUT", "/api/transfer/"+id+"/meta", "sealed-meta")
+	do(t, s, "PUT", "/api/transfer/"+id+"/chunklist", "sealed-list")
+
+	var info map[string]any
+	json.Unmarshal(do(t, s, "GET", "/api/transfer/"+id, "").Body.Bytes(), &info)
+	if info["complete"] != true {
+		t.Fatalf("complete = %v", info["complete"])
+	}
+	if info["sender"] != "pixel" {
+		t.Fatalf("sender = %v, want the server-asserted node", info["sender"])
+	}
+
+	// The whole point: a second transfer over the same content uploads nothing.
+	_, missing2 := createTransfer(t, s, `{"cids":["`+a+`","`+b+`"]}`)
+	if len(missing2) != 0 {
+		t.Fatalf("second transfer should need no chunks, got %v", missing2)
+	}
+
+	if body := do(t, s, "GET", "/api/chunk/"+a, "").Body.String(); body != "data" {
+		t.Fatalf("chunk read back as %q", body)
+	}
+	if body := do(t, s, "GET", "/api/transfer/"+id+"/chunklist", "").Body.String(); body != "sealed-list" {
+		t.Fatalf("chunklist = %q", body)
+	}
+}
+
+func TestSenderAndIdAreNeverTakenFromTheClient(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	id, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"],"sender":"someone-else","id":"deadbeef"}`)
+	if id == "deadbeef" {
+		t.Fatal("the client set its own transfer id")
+	}
+	var info map[string]any
+	json.Unmarshal(do(t, s, "GET", "/api/transfer/"+id, "").Body.Bytes(), &info)
+	if info["sender"] != "pixel" {
+		t.Fatalf("sender = %v, want pixel", info["sender"])
+	}
+}
+
+func TestInboxIsFilteredByRecipient(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	mine, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"],"to":["pixel"]}`)
+	theirs, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"],"to":["laptop"]}`)
+
+	var inbox []map[string]any
+	json.Unmarshal(do(t, s, "GET", "/api/inbox", "").Body.Bytes(), &inbox)
+	seen := map[string]bool{}
+	for _, e := range inbox {
+		seen[e["id"].(string)] = true
+	}
+	if !seen[mine] {
+		t.Fatal("transfer addressed to this node is missing")
+	}
+	if seen[theirs] {
+		t.Fatal("transfer addressed elsewhere leaked in")
+	}
+}
+
+func TestDeleteMovesTransferToHistory(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	id, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"]}`)
+	do(t, s, "PUT", "/api/transfer/"+id+"/meta", "sealed-meta")
+
+	if code := do(t, s, "DELETE", "/api/transfer/"+id, "").Code; code != http.StatusNoContent {
+		t.Fatalf("delete = %d", code)
+	}
+	if code := do(t, s, "GET", "/api/transfer/"+id, "").Code; code != http.StatusNotFound {
+		t.Fatalf("get after delete = %d, want 404", code)
+	}
+	var hist []map[string]any
+	json.Unmarshal(do(t, s, "GET", "/api/history", "").Body.Bytes(), &hist)
+	if len(hist) != 1 || hist[0]["id"] != id {
+		t.Fatalf("history = %v", hist)
+	}
+	if hist[0]["meta"] != "c2VhbGVkLW1ldGE=" {
+		t.Fatalf("history should retain the sealed metadata, got %v", hist[0]["meta"])
+	}
+}
+
+func TestMalformedIdsAreRejected(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	if code := do(t, s, "GET", "/api/chunk/nothex", "").Code; code != http.StatusBadRequest {
+		t.Fatalf("bad cid = %d, want 400", code)
+	}
+	if code := do(t, s, "GET", "/api/transfer/nothex", "").Code; code != http.StatusNotFound {
+		t.Fatalf("bad transfer id = %d, want 404", code)
+	}
+	if code := do(t, s, "POST", "/api/transfer", `{"cids":["../../etc/passwd"]}`).Code; code != http.StatusBadRequest {
+		t.Fatalf("traversal-shaped cid = %d, want 400", code)
+	}
+	id, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"]}`)
+	if code := do(t, s, "PUT", "/api/transfer/"+id+"/cids.json", "x").Code; code != http.StatusBadRequest {
+		t.Fatalf("record kind naming an internal file = %d, want 400", code)
+	}
+}
+
+func TestOversizeChunkIsRejected(t *testing.T) {
+	s, _ := newTestServer(t, true) // maxChunkBytes is 64 in tests
+	big := strings.Repeat("x", 4096)
+	if code := do(t, s, "PUT", "/api/chunk/"+cid(1), big).Code; code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("code = %d, want 413", code)
+	}
+}
+
+func TestTooManyChunksIsRejected(t *testing.T) {
+	s, _ := newTestServer(t, true) // cap is 100 in tests
+	ids := make([]string, 101)
+	for i := range ids {
+		ids[i] = cid(byte(i))
+	}
+	body, _ := json.Marshal(map[string]any{"cids": ids})
+	if code := do(t, s, "POST", "/api/transfer", string(body)).Code; code != http.StatusInsufficientStorage {
+		t.Fatalf("code = %d, want 507", code)
+	}
+}

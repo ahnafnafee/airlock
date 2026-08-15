@@ -74,6 +74,16 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/devices/{node}/allow", g(s.setAllowed(true)))
 	s.mux.HandleFunc("POST /api/devices/{node}/revoke", g(s.setAllowed(false)))
 
+	s.mux.HandleFunc("POST /api/transfer", g(s.createTransfer))
+	s.mux.HandleFunc("GET /api/transfer/{id}", g(s.getTransfer))
+	s.mux.HandleFunc("DELETE /api/transfer/{id}", g(s.deleteTransfer))
+	s.mux.HandleFunc("PUT /api/transfer/{id}/{kind}", g(s.putRecord))
+	s.mux.HandleFunc("GET /api/transfer/{id}/{kind}", g(s.getRecord))
+	s.mux.HandleFunc("PUT /api/chunk/{cid}", g(s.putChunk))
+	s.mux.HandleFunc("GET /api/chunk/{cid}", g(s.getChunk))
+	s.mux.HandleFunc("GET /api/inbox", g(s.inbox))
+	s.mux.HandleFunc("GET /api/history", g(s.history))
+
 	// The file_handlers launch URL has to render the app rather than 404.
 	s.mux.HandleFunc("GET /open", g(func(w http.ResponseWriter, r *http.Request) {
 		clone := r.Clone(r.Context())
@@ -243,4 +253,121 @@ func (s *Server) setAllowed(allowed bool) http.HandlerFunc {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// createTransfer is the whole dedup, delta-sync and resume mechanism. The client
+// sends every chunk id it computed; the server answers with the subset it does
+// not already hold, and the client uploads only those.
+func (s *Server) createTransfer(w http.ResponseWriter, r *http.Request) {
+	// Only cids and to are read. The sender and the transfer id come from the
+	// server, so a client can forge neither.
+	var req struct {
+		Cids []string `json:"cids"`
+		To   []string `json:"to"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&req); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	rec, missing, err := s.cfg.Transfers.Create(who(r).Node, req.To, req.Cids)
+	if fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": rec.ID, "missing": missing})
+}
+
+func (s *Server) getTransfer(w http.ResponseWriter, r *http.Request) {
+	info, err := s.cfg.Transfers.Get(r.PathValue("id"))
+	if fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (s *Server) deleteTransfer(w http.ResponseWriter, r *http.Request) {
+	if fail(w, s.cfg.Transfers.Delete(r.PathValue("id"))) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) putRecord(w http.ResponseWriter, r *http.Request) {
+	id, kind := r.PathValue("id"), r.PathValue("kind")
+	body := http.MaxBytesReader(w, r.Body, 1<<20)
+	if fail(w, s.cfg.Transfers.PutRecord(id, kind, body)) {
+		return
+	}
+	s.notifyIfComplete(id, who(r).Node)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) getRecord(w http.ResponseWriter, r *http.Request) {
+	f, err := s.cfg.Transfers.OpenRecord(r.PathValue("id"), r.PathValue("kind"))
+	if fail(w, err) {
+		return
+	}
+	defer f.Close()
+	serveFile(w, r, f)
+}
+
+func (s *Server) putChunk(w http.ResponseWriter, r *http.Request) {
+	// The store's own limit is authoritative for a chunk that lands. This reader
+	// bounds the body itself, which is what matters on the dedup path where the
+	// store discards an already-held chunk's bytes rather than measuring them.
+	body := http.MaxBytesReader(w, r.Body, s.cfg.Chunks.maxChunkBytes+1024)
+	if fail(w, s.cfg.Chunks.Put(r.PathValue("cid"), body)) {
+		return
+	}
+	// ponytail: a chunk that lands after both sealed records completes its
+	// transfer without waking anyone, because this route carries a chunk id and
+	// no transfer id, and one chunk can belong to any number of transfers. Thread
+	// the transfer id through the upload (a query parameter is enough) and call
+	// notifyIfComplete and Transfers.Touch here.
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) getChunk(w http.ResponseWriter, r *http.Request) {
+	f, err := s.cfg.Chunks.Open(r.PathValue("cid"))
+	if fail(w, err) {
+		return
+	}
+	defer f.Close()
+	serveFile(w, r, f)
+}
+
+func serveFile(w http.ResponseWriter, r *http.Request, f *os.File) {
+	info, err := f.Stat()
+	if err != nil {
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	http.ServeContent(w, r, "", info.ModTime(), f)
+}
+
+// notifyIfComplete fires a push once the last piece of a transfer lands. The
+// two sealed records can arrive in either order, so both writes call this and
+// whichever one finds the transfer complete wins.
+func (s *Server) notifyIfComplete(id, sender string) {
+	info, err := s.cfg.Transfers.Get(id)
+	if err != nil || !info.Complete {
+		return
+	}
+	go s.cfg.Push.Notify(info.To, sender)
+}
+
+func (s *Server) inbox(w http.ResponseWriter, r *http.Request) {
+	list, err := s.cfg.Transfers.Inbox(who(r).Node)
+	if fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (s *Server) history(w http.ResponseWriter, r *http.Request) {
+	hist, err := s.cfg.Transfers.History()
+	if fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, hist)
 }

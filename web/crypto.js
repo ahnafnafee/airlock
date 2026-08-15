@@ -160,8 +160,14 @@ export async function openRecord(mk, domain, transferId, record) {
 export const makeCheck = (mk) =>
   sealRecord(mk, MODE_SEALED, DOMAIN.CHECK, null, enc(CHECK_PLAINTEXT));
 
+// The check blob is the only passphrase gate, and it arrives from the server,
+// which this module trusts with nothing. A plaintext record carries no
+// authentication tag, so anyone could forge one that decodes to the expected
+// literal under any key. Only the sealed form can be a valid check, and
+// makeCheck only ever emits that form.
 export async function verifyCheck(mk, record) {
   try {
+    if (record.length < 1 || modeOf(record) !== MODE_SEALED) return false;
     const got = await openRecord(mk, DOMAIN.CHECK, null, record);
     return new TextDecoder().decode(got) === CHECK_PLAINTEXT;
   } catch {

@@ -139,6 +139,16 @@ test('the check blob accepts the right passphrase and rejects the wrong one', as
   assert.equal(await verifyCheck(await wrongP, record), false);
 });
 
+test('a forged plaintext check blob is rejected under any key', async () => {
+  // The check blob comes from the untrusted server. A plaintext record has no
+  // authentication tag, so without a mode guard anyone could hand over a blob
+  // that decodes to the expected literal and pass the passphrase gate with no
+  // key at all.
+  const forged = new Uint8Array([MODE_PLAIN, ...enc('airlock-v1')]);
+  assert.equal(await verifyCheck(await mkP, forged), false);
+  assert.equal(await verifyCheck(await wrongP, forged), false);
+});
+
 test('hash packing round trips', async () => {
   const hashes = [];
   for (let i = 0; i < 5; i++) hashes.push(new Uint8Array(32).fill(i));

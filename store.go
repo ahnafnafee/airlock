@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -22,7 +23,13 @@ var (
 	ErrNotFound = errors.New("not found")
 	ErrBadIndex = errors.New("chunk index out of range")
 	ErrQuota    = errors.New("storage quota exceeded")
+	ErrTooLarge = errors.New("body exceeds the permitted size")
 )
+
+// maxManifestBytes bounds the sealed manifest. A filename is at most 255 bytes,
+// so this is ample, and it is what keeps an inbox listing, which embeds every
+// manifest, from growing without limit.
+const maxManifestBytes = 8 << 10
 
 // Meta is everything the server knows about a blob. The filename, MIME type and
 // contents live inside the client-encrypted manifest, which the server stores as
@@ -48,9 +55,19 @@ type Store struct {
 	maxBlob   int64
 	maxTotal  int64
 	ttl       time.Duration
+
+	// createMu serializes the quota check against the directory creation that
+	// commits to it. Without it, two concurrent creates read the same stale
+	// usage and both pass.
+	// ponytail: one lock, held only across Create. Chunk writes stay
+	// unserialized, which is where the throughput is.
+	createMu sync.Mutex
 }
 
 func NewStore(dir string, chunkSize, maxBlob, maxTotal int64, ttl time.Duration) (*Store, error) {
+	if chunkSize < 1 {
+		return nil, errors.New("chunk size must be positive")
+	}
 	if err := os.MkdirAll(filepath.Join(dir, "blobs"), 0o700); err != nil {
 		return nil, err
 	}
@@ -70,12 +87,17 @@ func (s *Store) Create(sender string, chunkCount int) (*Meta, error) {
 	if chunkCount < 1 {
 		return nil, ErrBadIndex
 	}
-	// Reserve against the declared upper bound rather than metering as bytes
-	// land, so an over-quota transfer is refused before it costs anything.
-	declared := int64(chunkCount) * s.chunkSize
-	if declared > s.maxBlob {
+	// Bound chunkCount by division before multiplying. Checking the product
+	// instead overflows int64 for a large enough chunkCount and wraps to a
+	// value that passes both quota tests.
+	if int64(chunkCount) > s.maxBlob/s.chunkSize {
 		return nil, ErrQuota
 	}
+	declared := int64(chunkCount) * s.chunkSize
+
+	s.createMu.Lock()
+	defer s.createMu.Unlock()
+
 	used, err := s.usedBytes()
 	if err != nil {
 		return nil, err
@@ -105,9 +127,16 @@ func (s *Store) Create(sender string, chunkCount int) (*Meta, error) {
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
+		os.RemoveAll(dir)
 		return nil, err
 	}
-	return m, atomicWrite(filepath.Join(dir, "meta.json"), b)
+	// Roll back on failure, so a half-created blob cannot linger as a
+	// permanently ErrNotFound directory that still counts against the quota.
+	if err := atomicWrite(filepath.Join(dir, "meta.json"), b); err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
+	return m, nil
 }
 
 // ponytail: full walk per create. Fine at a few hundred live blobs. Cache the
@@ -154,7 +183,7 @@ func (s *Store) PutMeta(id string, r io.Reader) error {
 	if _, err := s.readMeta(dir); err != nil {
 		return err
 	}
-	return writeStream(filepath.Join(dir, "manifest"), r)
+	return writeStream(filepath.Join(dir, "manifest"), r, maxManifestBytes)
 }
 
 func (s *Store) PutChunk(id string, n int, r io.Reader) error {
@@ -169,19 +198,29 @@ func (s *Store) PutChunk(id string, n int, r io.Reader) error {
 	if n < 0 || n >= m.ChunkCount {
 		return ErrBadIndex
 	}
-	return writeStream(filepath.Join(dir, strconv.Itoa(n)), r)
+	// 12 byte IV plus 16 byte tag is the ciphertext overhead; 64 is slack.
+	return writeStream(filepath.Join(dir, strconv.Itoa(n)), r, s.chunkSize+64)
 }
 
 // writeStream lands the body in a temp file and renames it into place, so a
 // dropped connection can never leave a truncated chunk that resume would
-// mistake for a finished one.
-func writeStream(path string, r io.Reader) error {
+// mistake for a finished one. The limit is enforced here rather than only at
+// the HTTP layer, because Create reserves quota from a projection of
+// chunkCount times chunkSize, and that projection holds only if no single
+// write can exceed its share.
+func writeStream(path string, r io.Reader, limit int64) error {
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(f, r); err != nil {
+	// Read one byte past the limit, so hitting it is distinguishable from a
+	// body that merely ends there.
+	n, err := io.Copy(f, io.LimitReader(r, limit+1))
+	if err == nil && n > limit {
+		err = ErrTooLarge
+	}
+	if err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return err
@@ -196,6 +235,7 @@ func writeStream(path string, r io.Reader) error {
 func atomicWrite(path string, b []byte) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, path)

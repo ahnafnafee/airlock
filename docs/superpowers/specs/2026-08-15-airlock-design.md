@@ -219,7 +219,7 @@ The caller to design against is an authenticated, allowlisted device running
 | Integer overflow in quota math | Counts bounded by division before any multiplication |
 | Path traversal | Ids validated against `^[0-9a-f]{64}$` (chunks) or `^[0-9a-f]{32}$` (transfers) before any path is built |
 | Chunk-id squatting | A `cid` is content-derived; a client uploading wrong bytes under a real id corrupts only its own transfers, and every download verifies the GCM tag |
-| Unauthorized read, delete, or relay | Every route gated, static assets included |
+| Unauthorized read, delete, or relay | Every route gated, static assets included, and inbox, history and delete scoped to transfers the caller sent or received |
 | Storage growth | TTL sweep on last write, plus mark-and-sweep of unreferenced chunks |
 
 Fail closed: if tsnet cannot come up, or token mode has no token, the process
@@ -257,6 +257,24 @@ The metadata stays sealed, so history is a list of filenames only the owner's
 devices can read.
 
 History is capped at 1000 entries and 90 days, whichever binds first.
+
+### One visibility rule, everywhere
+
+A device may see and delete exactly the transfers that were its own: the ones it
+sent, plus the ones addressed to it or to everyone. `GET /api/inbox`,
+`GET /api/history` and `DELETE /api/transfer/{id}` all apply that same predicate.
+
+This is stricter than it strictly needs to be on a single-owner tailnet, and it
+is deliberate. An earlier version of this design let any allowlisted device
+delete anything, reasoning that a device holding the passphrase can already read
+everything. That reasoning was incomplete on two counts. Disclosure and
+destruction are different harms and only one of them is recoverable. And once
+transfers carry a recipient list, letting an unrelated device delete an addressed
+transfer is surprising rather than permissive.
+
+Applying the rule to history as well as to the inbox also removes an
+inconsistency that would otherwise leak which devices talk to each other, which
+is metadata the sealed records were specifically designed to withhold.
 
 ### Thumbnails
 
@@ -307,9 +325,9 @@ PUT    /api/chunk/{cid}                   <- ciphertext, idempotent
 GET    /api/chunk/{cid}                   -> ciphertext
 GET    /api/transfer/{id}                 -> {cids[], to[], sender, have[], complete, meta, thumb}
 GET    /api/transfer/{id}/chunklist       -> sealed bytes
-GET    /api/inbox                         -> [transfer summaries for this node]
-DELETE /api/transfer/{id}                 -> 204
-GET    /api/history                       -> [tombstones]
+GET    /api/inbox                         -> [transfers this node sent or received]
+DELETE /api/transfer/{id}                 -> 204, or 404 if not this node's transfer
+GET    /api/history                       -> [tombstones this node sent or received]
 
 POST   /api/push/subscribe {sub}          -> 204
 POST   /api/relay/offer    {transfer}     -> {missing: [cid...]}   relay peers only

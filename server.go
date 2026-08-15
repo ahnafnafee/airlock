@@ -293,7 +293,13 @@ func (s *Server) deleteTransfer(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) putRecord(w http.ResponseWriter, r *http.Request) {
 	id, kind := r.PathValue("id"), r.PathValue("kind")
-	body := http.MaxBytesReader(w, r.Body, 1<<20)
+	// The store's maxRecord is the authority and it is configurable, so the
+	// reader's cap is derived from it rather than restated. A cap written down
+	// here would silently become the real limit the moment the two disagreed,
+	// and a chunklist grows with the transfer: 32 raw bytes per chunk means a
+	// large transfer's list runs to megabytes. The headroom leaves the
+	// oversize verdict to writeStream, which returns ErrTooLarge.
+	body := http.MaxBytesReader(w, r.Body, int64(s.cfg.Transfers.maxRecord)+1024)
 	if fail(w, s.cfg.Transfers.PutRecord(id, kind, body)) {
 		return
 	}
@@ -310,7 +316,31 @@ func (s *Server) getRecord(w http.ResponseWriter, r *http.Request) {
 	serveFile(w, r, f)
 }
 
+// putChunk stores one sealed chunk on behalf of a named transfer. The transfer
+// id is a required query parameter rather than a second path segment because a
+// chunk is content addressed and shared: the same bytes can belong to any
+// number of transfers, so the id names the upload this request is part of, not
+// an owner of the data. Without it the server could do neither of the two
+// things that have to happen here. It could not refresh the transfer's
+// inactivity clock, because chunks live in the shared store outside the
+// transfer directory and an upload leaves that directory's mtime untouched, so
+// a long upload would be swept out from under itself. And it could not tell
+// when the last piece of a transfer landed, which is the normal way a transfer
+// completes: the client seals both records first, so the chunk loop is what
+// finishes the job for every transfer that is not fully deduplicated.
 func (s *Server) putChunk(w http.ResponseWriter, r *http.Request) {
+	tid := r.URL.Query().Get("transfer")
+	if !tidRe.MatchString(tid) {
+		http.Error(w, "malformed transfer id", http.StatusBadRequest)
+		return
+	}
+	// Touch doubles as the existence check, so it runs before the write: a
+	// chunk is never stored against a transfer that has already expired or
+	// been deleted, and the caller learns its transfer is gone instead of
+	// uploading into a directory nothing references.
+	if fail(w, s.cfg.Transfers.Touch(tid)) {
+		return
+	}
 	// The store's own limit is authoritative for a chunk that lands. This reader
 	// bounds the body itself, which is what matters on the dedup path where the
 	// store discards an already-held chunk's bytes rather than measuring them.
@@ -318,11 +348,13 @@ func (s *Server) putChunk(w http.ResponseWriter, r *http.Request) {
 	if fail(w, s.cfg.Chunks.Put(r.PathValue("cid"), body)) {
 		return
 	}
-	// ponytail: a chunk that lands after both sealed records completes its
-	// transfer without waking anyone, because this route carries a chunk id and
-	// no transfer id, and one chunk can belong to any number of transfers. Thread
-	// the transfer id through the upload (a query parameter is enough) and call
-	// notifyIfComplete and Transfers.Touch here.
+	// ponytail: this asks whether the transfer is complete after every single
+	// chunk, and the answer costs one stat per chunk in the transfer, so a
+	// whole upload is quadratic in the chunk count. Invisible for a personal
+	// node's transfers and real at the maxChunks ceiling. Keep a per-transfer
+	// count of still-missing chunks in memory, decrement it on each successful
+	// write, and run the full check only when it reaches zero.
+	s.notifyIfComplete(tid, who(r).Node)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -346,8 +378,8 @@ func serveFile(w http.ResponseWriter, r *http.Request, f *os.File) {
 }
 
 // notifyIfComplete fires a push once the last piece of a transfer lands. The
-// two sealed records can arrive in either order, so both writes call this and
-// whichever one finds the transfer complete wins.
+// chunks and the two sealed records can arrive in any order, so every write
+// path calls this and whichever one completes the transfer wins.
 func (s *Server) notifyIfComplete(id, sender string) {
 	info, err := s.cfg.Transfers.Get(id)
 	if err != nil || !info.Complete {

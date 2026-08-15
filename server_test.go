@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -264,7 +266,7 @@ func TestTransferRoundTripWithDedup(t *testing.T) {
 		t.Fatalf("first transfer should need both chunks, got %v", missing)
 	}
 	for _, c := range missing {
-		if code := do(t, s, "PUT", "/api/chunk/"+c, "data").Code; code != http.StatusNoContent {
+		if code := do(t, s, "PUT", "/api/chunk/"+c+"?transfer="+id, "data").Code; code != http.StatusNoContent {
 			t.Fatalf("put chunk = %d", code)
 		}
 	}
@@ -366,9 +368,83 @@ func TestMalformedIdsAreRejected(t *testing.T) {
 
 func TestOversizeChunkIsRejected(t *testing.T) {
 	s, _ := newTestServer(t, true) // maxChunkBytes is 64 in tests
+	id, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"]}`)
 	big := strings.Repeat("x", 4096)
-	if code := do(t, s, "PUT", "/api/chunk/"+cid(1), big).Code; code != http.StatusRequestEntityTooLarge {
+	if code := do(t, s, "PUT", "/api/chunk/"+cid(1)+"?transfer="+id, big).Code; code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("code = %d, want 413", code)
+	}
+}
+
+// A chunk upload that does not name its transfer cannot refresh that
+// transfer's clock or notice that it just completed, so the id is required
+// rather than optional: a caller that forgets it is told so at once instead of
+// silently losing both.
+func TestChunkUploadMustNameItsTransfer(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	if code := do(t, s, "PUT", "/api/chunk/"+cid(1), "data").Code; code != http.StatusBadRequest {
+		t.Fatalf("missing transfer id = %d, want 400", code)
+	}
+	if code := do(t, s, "PUT", "/api/chunk/"+cid(1)+"?transfer=nothex", "data").Code; code != http.StatusBadRequest {
+		t.Fatalf("malformed transfer id = %d, want 400", code)
+	}
+	gone := strings.Repeat("a", 32)
+	if code := do(t, s, "PUT", "/api/chunk/"+cid(1)+"?transfer="+gone, "data").Code; code != http.StatusNotFound {
+		t.Fatalf("unknown transfer id = %d, want 404", code)
+	}
+	if f, err := s.cfg.Chunks.Open(cid(1)); err == nil {
+		f.Close()
+		t.Fatal("a chunk was stored against a transfer that does not exist")
+	}
+}
+
+// Chunks live outside the transfer directory, so without an explicit Touch a
+// transfer's clock never moves and the sweep expires it mid-upload.
+func TestChunkUploadKeepsItsTransferAlive(t *testing.T) {
+	s, _ := newTestServer(t, true) // ttl is one hour in tests
+	id, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"]}`)
+
+	dir := filepath.Join(s.cfg.Transfers.dir, id)
+	stale := time.Now().Add(-2 * time.Hour)
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if err := os.Chtimes(filepath.Join(dir, e.Name()), stale, stale); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(dir, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := do(t, s, "PUT", "/api/chunk/"+cid(1)+"?transfer="+id, "data").Code; code != http.StatusNoContent {
+		t.Fatalf("put chunk = %d", code)
+	}
+	swept, err := s.cfg.Transfers.Sweep(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if swept != 0 {
+		t.Fatalf("swept %d transfers, want the upload to have kept this one alive", swept)
+	}
+	if code := do(t, s, "GET", "/api/transfer/"+id, "").Code; code != http.StatusOK {
+		t.Fatalf("get after sweep = %d, want 200", code)
+	}
+}
+
+// The record reader's cap has to come from the store's configurable maxRecord.
+// A cap written down in the handler would become the real limit the moment the
+// two disagreed, and no test that used the default could see it.
+func TestRecordSizeFollowsTheConfiguredMaximum(t *testing.T) {
+	s, _ := newTestServer(t, true) // maxRecord is 4096 in tests
+	id, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"]}`)
+
+	if code := do(t, s, "PUT", "/api/transfer/"+id+"/chunklist", strings.Repeat("x", 4096)).Code; code != http.StatusNoContent {
+		t.Fatalf("record at the configured maximum = %d, want 204", code)
+	}
+	if code := do(t, s, "PUT", "/api/transfer/"+id+"/chunklist", strings.Repeat("x", 4097)).Code; code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("record over the configured maximum = %d, want 413", code)
 	}
 }
 

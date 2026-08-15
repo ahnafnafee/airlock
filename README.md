@@ -32,7 +32,7 @@ One Go binary, one installable web app, no native clients.
   - [`1` Sealed at rest](#1-sealed-at-rest)
   - [`2` Verified by Tailscale](#2-verified-by-tailscale)
   - [`3` Installs like an app](#3-installs-like-an-app)
-  - [`4` Resumable, unlimited size](#4-resumable-unlimited-size)
+  - [`4` Deduplicated, delta-synced, resumable](#4-deduplicated-delta-synced-resumable)
   - [`5` One shared inbox](#5-one-shared-inbox)
 - [📦 Installation](#-installation)
 - [⌨️ Local Development](#️-local-development)
@@ -102,11 +102,24 @@ No native Android app. No native Windows app. A thin wrapper remains possible la
 
 </div>
 
-### `4` Resumable, unlimited size
+### `4` Deduplicated, delta-synced, resumable
 
-Files are cut into 8 MiB chunks, encrypted one at a time, and uploaded with idempotent writes. Ask the server which chunks it already has, send the rest. A dropped connection, a sleeping laptop, or a flaky uplink costs you the current chunk and nothing more.
+Files are split by content, not by offset. Each chunk is stored under an id derived from its own bytes, which means one question answers four features at once: *which of these ids do you already have?*
+
+| You get | Because |
+| --- | --- |
+| **Dedup** | Identical chunks produce identical ids, so the server stores one copy |
+| **Delta sync** | An edited file shares most ids with its old version, so only the changed parts upload |
+| **Resume after a drop** | Ask which ids are present, send the rest |
+| **Resume after a reload** | The same question. Re-chunking is deterministic, so no client state has to survive |
+
+That last row is why the design is worth its complexity. Nothing is persisted in the browser to make resume work: close the tab mid-upload, reopen, pick the same file, and it continues.
+
+Boundaries come from a rolling hash rather than fixed offsets, because fixed offsets defeat delta sync entirely: inserting one byte at the front shifts every later boundary and invalidates every chunk.
 
 Downloads are handled by the service worker, which fetches, decrypts, and hands the browser a streaming response with a real `Content-Disposition`. The browser saves it natively, with its own progress bar, streaming to disk. A 20 GB file never sits in memory, on either end.
+
+The honest cost: a host that compromises the box learns which chunks repeat within and across your transfers. That leak is inherent to dedup in a zero-knowledge system, and it is the price of this whole section.
 
 <div align="right">
 
@@ -159,14 +172,17 @@ Open it on any device and choose a passphrase. Every other device enters the sam
 | --- | --- | --- |
 | `--auth` | `tailscale` | `tailscale` or `token` |
 | `--data` | `./data` | data directory |
-| `--hostname` | `airlock` | tsnet node name |
+| `--tailscale-mode` | `host` | `host` serves through the machine's tailscaled, `embedded` joins as its own tsnet node |
+| `--hostname` | `airlock` | node name, embedded mode only |
 | `--allow-users` | node owner | comma-separated tailnet logins |
 | `--allow-nodes` | any | comma-separated node names |
-| `--chunk-size` | 8 MiB | plaintext chunk size |
-| `--max-blob` | 50 GiB | maximum per transfer |
-| `--max-total` | 200 GiB | maximum stored at once |
+| `--require-approval` | off | hold new devices until an approved device admits them |
+| `--max-chunk` | 16 MiB | maximum bytes per chunk |
+| `--max-total` | 200 GiB | maximum bytes stored across all chunks |
 | `--ttl-hours` | 24 | inactivity before a transfer is swept |
 | `--addr` | `127.0.0.1:8080` | listen address, token mode only |
+
+`host` is the default because embedded `tsnet` is in-process userspace netstack with no kernel TUN, and therefore misses the TSO, GRO, GSO and `mmsg()` work that got Tailscale's userspace WireGuard past 10 Gb/s. That work lives in the daemon. An [open upstream issue](https://github.com/tailscale/tailscale/issues/9707) reports tsnet running roughly 8 to 9 times slower. Embedded mode stays available for a host with no Tailscale installed.
 
 <div align="right">
 
@@ -225,12 +241,16 @@ Store and forward, not peer to peer. The receiver may be asleep, so bytes wait o
 | File | Responsibility |
 | --- | --- |
 | `main.go` | Flags, listener selection, wiring, sweep loop |
+| `tailscale.go` | Tailnet identity and TLS, in host and embedded modes |
 | `server.go` | HTTP handlers, identity gate, request validation |
-| `store.go` | Blob store on disk: create, chunk writes, listing, sweep |
-| `push.go` | VAPID keys, subscriptions, notification delivery |
-| `web/crypto.js` | Key derivation, chunk sealing, AAD construction |
-| `web/app.js` | UI, upload loop, inbox, setup |
-| `web/sw.js` | Decrypt-on-download, push handling, share target |
+| `chunkstore.go` | Content-addressed ciphertext, quotas, mark-and-sweep |
+| `transfers.go` | Transfer records, recipient-filtered inbox, history |
+| `devices.go` | Device registry, live allowlist, pairing state |
+| `push.go` | VAPID keys, subscriptions, targeted delivery |
+| `web/cdc.js` | Content-defined chunk boundaries |
+| `web/crypto.js` | Key hierarchy, convergent sealing, record domains |
+| `web/upload.js` | Two-pass upload with dedup negotiation |
+| `web/sw.js` | Decrypt-on-download, push, share target |
 
 Exactly two Go dependencies, `tailscale.com` and `webpush-go`. Everything else is standard library. The frontend has zero dependencies.
 
@@ -263,25 +283,26 @@ Fail closed: if Tailscale cannot come up, or token mode has no token configured,
 
 Built task by task from [the implementation plan](./docs/superpowers/plans/2026-08-15-airlock.md), against [the design spec](./docs/superpowers/specs/2026-08-15-airlock-design.md).
 
+**Phase 1** is the content-addressed foundation: send and receive end to end, with dedup, delta sync and resume, behind the identity gate.
+
 | # | Task | State |
 | --- | --- | --- |
-| 1 | Blob store, write path | 🟡 In review |
-| 2 | Blob store, read and lifecycle | ⬜ Pending |
-| 3 | HTTP core, identity gate and config | ⬜ Pending |
-| 4 | HTTP blob endpoints | ⬜ Pending |
-| 5 | Wiring, flags, token mode, sweep loop | ⬜ Pending |
-| 6 | Tailscale identity, TLS and allowlist | ⬜ Pending |
-| 7 | Browser crypto module | ⬜ Pending |
-| 8 | Setup flow and upload | ⬜ Pending |
-| 9 | Service worker download | ⬜ Pending |
-| 10 | Inbox | ⬜ Pending |
-| 11 | Web Push | ⬜ Pending |
-| 12 | PWA install, share target, file handlers | ⬜ Pending |
-| 13 | Deployment | ⬜ Pending |
+| 1 | Content-addressed chunk store | ✅ Done |
+| 2 | Transfer records, inbox and history | 🟡 In review |
+| 3 | Device registry and live allowlist | ⬜ Pending |
+| 4 | HTTP core and identity gate | ⬜ Pending |
+| 5 | HTTP transfers and chunks | ⬜ Pending |
+| 6 | Wiring, flags, sweep loop | ⬜ Pending |
+| 7 | Tailscale identity, host and embedded modes | ⬜ Pending |
+| 8 | Content-defined chunking | 🟡 In review |
+| 9 | Browser crypto, sealed and plaintext | ⬜ Pending |
+| 10 | App shell and unlock | ⬜ Pending |
+| 11 | Upload with dedup negotiation | ⬜ Pending |
+| 12 | Service worker download and inbox | ⬜ Pending |
 
-Airlock becomes genuinely usable at task 9 and feature complete at task 12.
+**Phase 2** adds device pairing and the recipient picker, transfer history, thumbnails, Web Push, PWA install and share target, relays, an Android shell for silent background receive, and the throughput benchmark that settles which Tailscale mode is the default.
 
-**Deliberately not built:** device pairing UI, recipient picker, transfer history, thumbnails, dedup, delta sync, relays, and accounts. Resume across a full page reload is deferred; resume across network drops ships.
+**Deliberately not built:** accounts, sharing outside your own tailnet, public links, and any server-side view of plaintext.
 
 <div align="right">
 

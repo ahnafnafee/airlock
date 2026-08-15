@@ -11,17 +11,27 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
 var tidRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
+// tmpPrefix names a transfer directory that is still being built. It cannot
+// match tidRe, so transferDir rejects it and every walk over the tree skips it.
+const tmpPrefix = ".new-"
+
 // recordKinds is a closed set. A record kind reaches the filesystem as a
 // filename, so allowing an arbitrary string would let a caller name cids.json
 // or meta.json and overwrite the server's own bookkeeping.
 var recordKinds = map[string]bool{"meta": true, "chunklist": true, "thumb": true}
 
+// ponytail: history is one JSON file holding up to historyMaxEntries
+// tombstones, each carrying its transfer's sealed metadata inline. The sealed
+// record is a filename and a key, so entries are small in practice, but the
+// ceiling is historyMaxEntries times the record cap. Move the sealed metadata
+// out to a file per tombstone if that ceiling ever stops being theoretical.
 const (
 	historyMaxEntries = 1000
 	historyMaxAge     = 90 * 24 * time.Hour
@@ -47,14 +57,18 @@ type TransferInfo struct {
 	Thumb    string   `json:"thumb"`
 }
 
+// Tombstone records that a transfer existed and ended. It counts chunks rather
+// than bytes: the server never learns a sealed chunk's plaintext length, and
+// the chunk files themselves are shared with any other transfer that references
+// the same content, so no byte total could be attributed to one transfer.
 type Tombstone struct {
-	ID        string    `json:"id"`
-	Sender    string    `json:"sender"`
-	To        []string  `json:"to"`
-	Meta      string    `json:"meta"`
-	Bytes     int64     `json:"bytes"`
-	CreatedAt time.Time `json:"createdAt"`
-	EndedAt   time.Time `json:"endedAt"`
+	ID         string    `json:"id"`
+	Sender     string    `json:"sender"`
+	To         []string  `json:"to"`
+	Meta       string    `json:"meta"`
+	ChunkCount int       `json:"chunkCount"`
+	CreatedAt  time.Time `json:"createdAt"`
+	EndedAt    time.Time `json:"endedAt"`
 }
 
 type Transfers struct {
@@ -65,6 +79,11 @@ type Transfers struct {
 	maxRecord int
 
 	histMu sync.Mutex
+
+	// recMu guards recUsed and serializes each record write against the quota
+	// check that admits it, the same way ChunkStore guards its own total.
+	recMu   sync.Mutex
+	recUsed int64
 }
 
 func NewTransfers(dir string, chunks *ChunkStore, ttl time.Duration, maxChunksPerTransfer, maxRecordBytes int) (*Transfers, error) {
@@ -72,10 +91,61 @@ func NewTransfers(dir string, chunks *ChunkStore, ttl time.Duration, maxChunksPe
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, err
 	}
+	// Records land on the same disk as chunks, so they are measured at startup
+	// and metered afterwards exactly as the chunk store measures itself.
+	used, err := walkBytes(root)
+	if err != nil {
+		return nil, err
+	}
 	return &Transfers{
 		dir: root, chunks: chunks, ttl: ttl,
 		maxChunks: maxChunksPerTransfer, maxRecord: maxRecordBytes,
+		recUsed: used,
 	}, nil
+}
+
+// admitLocked reports whether n more bytes of records fit in the data
+// directory's budget. Records and chunks share one disk, so they are counted
+// against one total rather than each pretending the other's bytes are free.
+// Callers hold recMu across the write that follows, so two writers cannot both
+// pass on the same stale total.
+func (t *Transfers) admitLocked(n int64) error {
+	if t.chunks.Used()+t.recUsed+n > t.chunks.maxTotalBytes {
+		return ErrQuota
+	}
+	return nil
+}
+
+// releaseRecordBytes returns a removed directory's bytes to the shared budget.
+func (t *Transfers) releaseRecordBytes(n int64) {
+	t.recMu.Lock()
+	defer t.recMu.Unlock()
+	t.recUsed -= n
+	if t.recUsed < 0 {
+		t.recUsed = 0
+	}
+}
+
+// removeTree deletes a directory under the transfers root and gives its bytes
+// back to the budget.
+func (t *Transfers) removeTree(dir string) error {
+	n, err := walkBytes(dir)
+	if err != nil {
+		n = 0
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	t.releaseRecordBytes(n)
+	return nil
+}
+
+func fileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
 }
 
 // transferDir is the only place a transfer id becomes a path.
@@ -116,30 +186,50 @@ func (t *Transfers) Create(sender string, to, cids []string) (*Transfer, []strin
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		return nil, nil, err
-	}
-
-	// Write the id list before anything else. It is the server's reference
-	// record, and a sweep that ran between Mkdir and this write would otherwise
-	// consider the transfer's chunks unreferenced.
-	if err := t.writeJSON(dir, "cids.json", cids); err != nil {
-		os.RemoveAll(dir)
-		return nil, nil, err
-	}
-	if err := t.writeJSON(dir, "meta.json", rec); err != nil {
-		os.RemoveAll(dir)
-		return nil, nil, err
-	}
-	return rec, t.chunks.Missing(cids), nil
-}
-
-func (t *Transfers) writeJSON(dir, name string, v any) error {
-	b, err := json.Marshal(v)
+	cidsJSON, err := json.Marshal(cids)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	return atomicWrite(filepath.Join(dir, name), b)
+	metaJSON, err := json.Marshal(rec)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	t.recMu.Lock()
+	defer t.recMu.Unlock()
+	n := int64(len(cidsJSON) + len(metaJSON))
+	if err := t.admitLocked(n); err != nil {
+		return nil, nil, err
+	}
+
+	// A transfer directory is built under a name that fails tidRe and published
+	// by a single rename, so the invariant holds without a window: a directory
+	// named by a valid transfer id already contains its id list. Referenced()
+	// can therefore never see a live transfer as unreferenced and hand the
+	// chunk sweep a set missing chunks this transfer needs.
+	//
+	// ponytail: a sweep that snapshotted its reference set before the rename
+	// can still delete a deduplicated chunk just after Missing() observed it.
+	// The window is microseconds against an hourly sweep. Close it with a lock
+	// the create path and the sweep both take if it ever bites.
+	tmp := filepath.Join(t.dir, tmpPrefix+rec.ID)
+	if err := os.Mkdir(tmp, 0o700); err != nil {
+		return nil, nil, err
+	}
+	if err := atomicWrite(filepath.Join(tmp, "cids.json"), cidsJSON); err != nil {
+		os.RemoveAll(tmp)
+		return nil, nil, err
+	}
+	if err := atomicWrite(filepath.Join(tmp, "meta.json"), metaJSON); err != nil {
+		os.RemoveAll(tmp)
+		return nil, nil, err
+	}
+	if err := os.Rename(tmp, dir); err != nil {
+		os.RemoveAll(tmp)
+		return nil, nil, err
+	}
+	t.recUsed += n
+	return rec, t.chunks.Missing(cids), nil
 }
 
 func (t *Transfers) PutRecord(id, kind string, r io.Reader) error {
@@ -153,7 +243,41 @@ func (t *Transfers) PutRecord(id, kind string, r io.Reader) error {
 	if _, err := os.Stat(filepath.Join(dir, "meta.json")); err != nil {
 		return ErrNotFound
 	}
-	return writeStream(filepath.Join(dir, kind), r, int64(t.maxRecord))
+	p := filepath.Join(dir, kind)
+
+	t.recMu.Lock()
+	defer t.recMu.Unlock()
+	// The record's length is not declared, so the cap is what has to be
+	// reserved. Measuring what actually landed afterwards keeps the total
+	// honest, the same trade the chunk store makes.
+	if err := t.admitLocked(int64(t.maxRecord)); err != nil {
+		return err
+	}
+	before := fileSize(p)
+	if err := writeStream(p, r, int64(t.maxRecord)); err != nil {
+		return err
+	}
+	t.recUsed += fileSize(p) - before
+	return nil
+}
+
+// Touch refreshes a transfer's inactivity clock. Chunks are stored outside the
+// transfer directory, so an upload leaves that directory's mtime untouched; the
+// chunk upload path calls this so a transfer still receiving data is not swept
+// mid-flight. See the note on Sweep.
+func (t *Transfers) Touch(id string) error {
+	dir, err := t.transferDir(id)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	if err := os.Chtimes(dir, now, now); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrNotFound
+		}
+		return err
+	}
+	return nil
 }
 
 func (t *Transfers) OpenRecord(id, kind string) (*os.File, error) {
@@ -276,7 +400,7 @@ func (t *Transfers) Delete(id string) error {
 	if err != nil {
 		return err
 	}
-	return os.RemoveAll(dir)
+	return t.removeTree(dir)
 }
 
 // appendTombstone keeps the sealed metadata, so history is a list of filenames
@@ -295,7 +419,7 @@ func (t *Transfers) appendTombstone(info *TransferInfo) error {
 	}
 	hist = append(hist, Tombstone{
 		ID: info.ID, Sender: info.Sender, To: info.To, Meta: info.Meta,
-		Bytes: int64(info.ChunkCount), CreatedAt: info.CreatedAt, EndedAt: time.Now().UTC(),
+		ChunkCount: info.ChunkCount, CreatedAt: info.CreatedAt, EndedAt: time.Now().UTC(),
 	})
 
 	cutoff := time.Now().Add(-historyMaxAge)
@@ -360,6 +484,9 @@ func (t *Transfers) Referenced() (map[string]bool, error) {
 		}
 		var cids []string
 		if err := t.readJSON(dir, "cids.json", &cids); err != nil {
+			// Create publishes a transfer directory by rename, so one named by
+			// a valid id always holds its id list. A read that fails here is a
+			// directory a concurrent delete is removing, not a live transfer.
 			continue
 		}
 		for _, id := range cids {
@@ -369,9 +496,11 @@ func (t *Transfers) Referenced() (map[string]bool, error) {
 	return ref, nil
 }
 
-// Sweep expires transfers by their last write rather than their creation, so a
-// long upload is never swept mid-flight and a finished one expires the stated
-// TTL after its final piece landed.
+// Sweep expires a transfer once nothing has written to its directory for the
+// TTL. Writing a sealed record refreshes that clock by itself. A chunk upload
+// does not, because chunks live in the shared store outside this tree, so the
+// upload path has to call Touch; without that call a transfer's clock never
+// moves and it expires one TTL after it was created, mid-upload or not.
 func (t *Transfers) Sweep(now time.Time) (int, error) {
 	ents, err := os.ReadDir(t.dir)
 	if err != nil {
@@ -380,6 +509,15 @@ func (t *Transfers) Sweep(now time.Time) (int, error) {
 	swept := 0
 	for _, e := range ents {
 		if !e.IsDir() {
+			continue
+		}
+		if strings.HasPrefix(e.Name(), tmpPrefix) {
+			// A crash between the Mkdir and the publishing rename in Create
+			// leaves one of these behind. It was never a transfer, so it earns
+			// no tombstone and is not counted as swept.
+			if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) > t.ttl {
+				t.removeTree(filepath.Join(t.dir, e.Name()))
+			}
 			continue
 		}
 		dir, err := t.transferDir(e.Name())

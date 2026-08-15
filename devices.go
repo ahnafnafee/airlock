@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -28,9 +29,17 @@ type Devices struct {
 
 	mu     sync.RWMutex
 	byNode map[string]Device
+	// lastSaveErr holds the most recent persistence failure. A registry that
+	// cannot write is a degraded security posture, not a cosmetic problem: the
+	// allowlist on disk is what survives a restart, so a silent write failure
+	// would readmit a revoked device the next time the process starts.
+	lastSaveErr error
 }
 
 func NewDevices(dir string, defaultAllow bool) (*Devices, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
 	d := &Devices{
 		path:         filepath.Join(dir, "devices.json"),
 		defaultAllow: defaultAllow,
@@ -72,8 +81,23 @@ func (d *Devices) Seen(node, user string) Device {
 	dev.User = user
 	dev.LastSeen = now
 	d.byNode[node] = dev
-	d.saveLocked()
+	// The signature returns only a Device, so a persistence failure cannot reach
+	// the caller. It must not vanish either: an unrecorded registration means the
+	// on-disk allowlist is stale, and after a restart an empty registry bootstraps
+	// the next node straight in.
+	if err := d.saveLocked(); err != nil {
+		log.Printf("devices: persisting %s failed: %v", node, err)
+	}
 	return dev
+}
+
+// SaveErr reports the most recent persistence failure, or nil if the last write
+// landed. The wiring layer surfaces it on the health route so an operator can
+// see that revocations are no longer durable.
+func (d *Devices) SaveErr() error {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.lastSaveErr
 }
 
 // Allowed is called on every request, so revoking a device takes effect on its
@@ -127,8 +151,9 @@ func (d *Devices) saveLocked() error {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Node < out[j].Node })
 	b, err := json.Marshal(out)
-	if err != nil {
-		return err
+	if err == nil {
+		err = atomicWrite(d.path, b)
 	}
-	return atomicWrite(d.path, b)
+	d.lastSaveErr = err
+	return err
 }

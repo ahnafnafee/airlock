@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -75,6 +77,11 @@ func TestRevokeTakesEffectImmediately(t *testing.T) {
 	if d.Allowed("pixel") {
 		t.Fatal("revocation should be visible at once")
 	}
+	// The identity gate runs Seen then Allowed on every request, so a later
+	// sighting must never recompute Allowed from policy and undo the revocation.
+	if d.Seen("pixel", "owner@example.com").Allowed || d.Allowed("pixel") {
+		t.Fatal("a later sighting must not readmit a revoked device")
+	}
 	if err := d.SetAllowed("pixel", true); err != nil {
 		t.Fatal(err)
 	}
@@ -97,6 +104,11 @@ func TestPairedFlagPersistsAcrossReopen(t *testing.T) {
 	if err := d.SetPaired("pixel"); err != nil {
 		t.Fatal(err)
 	}
+	// Revoking before the reopen covers the Allowed field's round trip too: a
+	// revocation that does not survive a restart is a silently reopened door.
+	if err := d.SetAllowed("pixel", false); err != nil {
+		t.Fatal(err)
+	}
 
 	reopened, err := NewDevices(dir, true)
 	if err != nil {
@@ -105,6 +117,24 @@ func TestPairedFlagPersistsAcrossReopen(t *testing.T) {
 	list := reopened.List()
 	if len(list) != 1 || !list[0].Paired {
 		t.Fatalf("paired flag lost across reopen: %+v", list)
+	}
+	if list[0].Allowed || reopened.Allowed("pixel") {
+		t.Fatalf("revocation lost across reopen: %+v", list)
+	}
+}
+
+func TestNewDevicesCreatesItsDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	d, err := NewDevices(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Seen("pixel", "owner@example.com")
+	if err := d.SaveErr(); err != nil {
+		t.Fatalf("registration was not persisted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "devices.json")); err != nil {
+		t.Fatalf("devices.json missing: %v", err)
 	}
 }
 

@@ -291,6 +291,57 @@ async function openMeta(mk, info) {
 // like on the wire. Normalized once here, so no later line has to remember.
 const listOf = (value) => (Array.isArray(value) ? value : []);
 
+// Whether every recipient's own progress bitmap says it holds the whole
+// transfer. Nothing is decided on the strength of what a device sent: a chunk
+// whose delivery failed after it left is exactly the case the sender's own
+// record cannot see, so the answer is read back from the server per recipient.
+//
+// It sits outside makeSessions for the reason openMeta does, that a save needs
+// the same answer a session does, and it takes its api as an argument rather
+// than closing over one so an injected fake still decides it in a test.
+async function deliveredToEveryone(api, info) {
+  const to = listOf(info.to);
+  // An unaddressed transfer has no fixed recipient set, so there is no point at
+  // which it is provably delivered to everyone and nothing here may drop its
+  // chunks.
+  if (to.length === 0) return false;
+  const declined = listOf(info.declined);
+  const count = listOf(info.cids).length;
+  for (const node of to) {
+    if (declined.includes(node)) continue;
+    const bitmap = await api.getProgress(info.id, node);
+    if (indexesFrom(bitmap, count).length !== count) return false;
+  }
+  return true;
+}
+
+// Whether a save may delete the staged chunks it reads on its way through.
+//
+// Two questions, and both have to answer yes. The first is whose stage it is: a
+// device sees the transfers it sent as well as the ones it was sent, and a
+// transfer whose sealed metadata names no stage of its own staged under the
+// transfer's own id, so a save on the sending side would be deleting the only
+// copy of what this device still owes.
+//
+// The second is whether anyone is still owed at all, and it is what makes the
+// pruning final rather than temporary. A receiver's stage is also what its
+// resume answers from, and a transfer leaves the sender's queue only once every
+// recipient's bitmap is full. Empty a receiving stage while another addressee is
+// still short and the next offer finds every position missing, so the whole file
+// crosses the wire again and lands back on disk beside the copy just assembled.
+// A transfer already delivered to everyone is never offered again, so there is
+// nothing left to refill it.
+//
+// Either question failing to answer leaves the stage alone. The wrong guess in
+// that direction costs disk; the other one is unrecoverable.
+export async function mayConsumeStage(api, me, info) {
+  try {
+    return info.sender !== me && await deliveredToEveryone(api, info);
+  } catch {
+    return false;
+  }
+}
+
 // Turning a received transfer into one file the operating system can hold.
 //
 // This is not part of receiving. The chunks are already on this device or on the
@@ -330,13 +381,11 @@ export async function assembleTransfer(transferId, { spawn = spawnAssembler } = 
     throw new Error('the server named a malformed chunk id');
   }
 
-  // A device sees the transfers it sent as well as the ones it was sent, and a
-  // transfer whose sealed metadata names no stage of its own staged under this
-  // same id. Reading those chunks costs nothing; deleting them as they are read
-  // would destroy the only copy of what this device still owes. An identity that
-  // cannot be established spares the stage rather than spending it, because the
-  // wrong guess in that direction is unrecoverable and the other one is disk.
-  const consume = await identity().then((me) => info.sender !== me, () => false);
+  // Reading the staged chunks costs nothing. Deleting them as they are read is
+  // the decision, and mayConsumeStage above is where it is made. An identity
+  // that cannot be established spares the stage for the same reason everything
+  // else in that answer does.
+  const consume = await identity().then((me) => mayConsumeStage(api, me, info), () => false);
 
   const worker = spawn();
   try {
@@ -468,26 +517,12 @@ export function makeSessions(deps) {
     };
   }
 
-  // Nothing is deleted on the strength of what this device sent. Only the
-  // recipient's own bitmap, read back from the server, says a chunk landed.
-  async function deliveredToEveryone(info) {
-    // An unaddressed transfer has no fixed recipient set, so there is no point
-    // at which it is provably delivered to everyone and nothing here may drop
-    // its chunks.
-    if (info.to.length === 0) return false;
-    const count = info.cids.length;
-    for (const node of info.to) {
-      if (info.declined.includes(node)) continue;
-      const bitmap = await api.getProgress(info.id, node);
-      if (indexesFrom(bitmap, count).length !== count) return false;
-    }
-    return true;
-  }
-
   async function confirmAndClear(info, stage) {
     for (let attempt = 0; attempt < confirmTries; attempt++) {
       if (attempt > 0) await wait(confirmGapMs);
-      if (await deliveredToEveryone(info)) {
+      // Nothing is deleted on the strength of what this device sent. Only the
+      // recipient's own bitmap, read back from the server, says a chunk landed.
+      if (await deliveredToEveryone(api, info)) {
         await stage.clear();
         return true;
       }

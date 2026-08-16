@@ -53,11 +53,10 @@ const wrap = (file, meta) => new File([file], fileName(meta), {
 // chunk rather than twice the file size, and it is safe for exactly the reason
 // above: the same bytes are still on the server.
 //
-// Consuming is refusable, because one stage is not this transfer's to spend. A
-// device sees the transfers it sent as well as the ones it was sent, and a
-// transfer whose sealed metadata names no stage of its own staged under the
-// transfer's own id. Deleting there would destroy the only copy of what this
-// device still owes every recipient that has not taken delivery yet.
+// Consuming is refusable, because a stage is not always this save's to spend.
+// Its caller decides, and refuses in two cases: a stage holding what this device
+// still owes somebody, and a stage that anything might still ask to resume from.
+// Emptying either one turns a save into a second delivery of the whole file.
 export function chunkSource(dir, cids, { fetchChunk, consume = true }) {
   const staged = new Set();
   return {

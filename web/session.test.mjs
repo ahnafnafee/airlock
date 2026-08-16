@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { liveTransport, makeSessions } from './session.js';
+import { liveTransport, makeSessions, mayConsumeStage } from './session.js';
 import { api } from './api.js';
 import { LINK_COUNT } from './peer.js';
 import { bitmapOf } from './staging.js';
@@ -232,6 +232,53 @@ test('staged chunks are dropped once the recipient confirms every one', async ()
 
   await h.sessions.startSend(ID);
   assert.equal(stage.cleared, 1);
+});
+
+// A save reads the stage on its way through and may delete what it read. These
+// four are the whole of when it may, because the stage is both what this device
+// still owes other people and what a resumed transfer answers from.
+const FULL = new Uint8Array([0b111]);
+const bitmaps = (per) => ({ getProgress: async (id, node) => per[node] ?? new Uint8Array(0) });
+
+test('a save never spends the stage of a transfer this device is sending', async () => {
+  // A transfer whose sealed metadata names no stage of its own is staged under
+  // the transfer's own id, which is the same directory a save reads. Deleting
+  // there destroys the only copy of what this device still owes.
+  const info = { id: ID, sender: ME, to: [PEER], declined: [], cids: CIDS };
+  assert.equal(await mayConsumeStage(bitmaps({ [PEER]: FULL }), ME, info), false);
+});
+
+test('a save spends a received stage only once every recipient holds the file', async () => {
+  const info = { id: ID, sender: PEER, to: [ME, 'laptop'], declined: [], cids: CIDS };
+
+  // The laptop is still owed, so this transfer is still in the sender's queue
+  // and will be offered here again. An emptied stage answers that offer with
+  // every position missing, so the whole file crosses the wire a second time and
+  // lands beside the copy this save just assembled.
+  assert.equal(
+    await mayConsumeStage(bitmaps({ [ME]: FULL, laptop: new Uint8Array([0b001]) }), ME, info),
+    false);
+
+  // Delivered to everybody, so nothing will ever offer it again.
+  assert.equal(
+    await mayConsumeStage(bitmaps({ [ME]: FULL, laptop: FULL }), ME, info), true);
+
+  // A decline is final, so a recipient that refused is owed nothing and its
+  // empty bitmap does not hold the stage open forever.
+  assert.equal(
+    await mayConsumeStage(bitmaps({ [ME]: FULL }), ME,
+      { ...info, declined: ['laptop'] }), true);
+});
+
+test('a stage is spared whenever the answer cannot be established', async () => {
+  const info = { id: ID, sender: PEER, to: [ME], declined: [], cids: CIDS };
+  const failing = { getProgress: async () => { throw new Error('the server is unreachable'); } };
+  assert.equal(await mayConsumeStage(failing, ME, info), false);
+
+  // An unaddressed transfer has no recipient set, so there is no point at which
+  // it is provably delivered to everyone.
+  assert.equal(
+    await mayConsumeStage(bitmaps({}), ME, { ...info, to: null, declined: null }), false);
 });
 
 test('the sender reads the stage the sealed metadata names', async () => {

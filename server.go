@@ -391,7 +391,7 @@ func (s *Server) putRecord(w http.ResponseWriter, r *http.Request) {
 	if fail(w, s.cfg.Transfers.PutRecord(id, kind, body)) {
 		return
 	}
-	s.notifyIfComplete(id, who(r).Node)
+	s.announce(id, who(r).Node)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -481,7 +481,7 @@ func (s *Server) putChunk(w http.ResponseWriter, r *http.Request) {
 	// node's transfers and real at the maxChunks ceiling. Keep a per-transfer
 	// count of still-missing chunks in memory, decrement it on each successful
 	// write, and run the full check only when it reaches zero.
-	s.notifyIfComplete(tid, who(r).Node)
+	s.announce(tid, who(r).Node)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -504,12 +504,29 @@ func serveFile(w http.ResponseWriter, r *http.Request, f *os.File) {
 	http.ServeContent(w, r, "", info.ModTime(), f)
 }
 
-// notifyIfComplete fires a push once the last piece of a transfer lands. The
-// chunks and the two sealed records can arrive in any order, so every write
-// path calls this and whichever one completes the transfer wins.
-func (s *Server) notifyIfComplete(id, sender string) {
+// announce tells the addressees a transfer is waiting, once the transfer can be
+// described. That is when its metadata record lands, not when the server holds
+// its bytes.
+//
+// Completeness is the wrong trigger and was the old one. It means the server
+// holds every chunk, which only ever happens on the hold-on-server path. A
+// direct transfer keeps its bytes on the sending device by design, so it is
+// never complete here and the recipient was never told about it at all. That
+// silenced the whole notification subsystem for the product's default: the
+// stream said nothing and no push woke a phone whose app was closed, and the
+// file sat unseen until its owner happened to open Airlock by hand.
+//
+// A recipient that is already running is reached by the stream anyway, so the
+// announcement that matters most is the push, which is exactly the one a
+// closed app depends on.
+func (s *Server) announce(id, sender string) {
 	info, err := s.cfg.Transfers.Get(id)
-	if err != nil || !info.Complete {
+	// The metadata record is what names the file, so before it exists there is
+	// nothing a notification could say.
+	if err != nil || info.Meta == "" {
+		return
+	}
+	if !s.cfg.Transfers.markAnnounced(id) {
 		return
 	}
 	// The open stream is the fast path and reaches a running app immediately.

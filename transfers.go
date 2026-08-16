@@ -83,6 +83,16 @@ type Transfers struct {
 
 	histMu sync.Mutex
 
+	// announced remembers which transfers have already told their addressees
+	// they exist. Records and chunks arrive in any order and every write asks to
+	// announce, so without this a transfer would notify once per write. It is
+	// in memory on purpose: after a restart, re-announcing a transfer that is
+	// still waiting is a repeated nudge about something genuinely still waiting,
+	// which is the better failure than a persisted flag that could suppress the
+	// only notification a recipient ever gets.
+	annMu     sync.Mutex
+	announced map[string]bool
+
 	// recMu guards recUsed and serializes each record write against the quota
 	// check that admits it, the same way ChunkStore guards its own total.
 	recMu   sync.Mutex
@@ -103,7 +113,8 @@ func NewTransfers(dir string, chunks *ChunkStore, ttl time.Duration, maxChunksPe
 	return &Transfers{
 		dir: root, chunks: chunks, ttl: ttl,
 		maxChunks: maxChunksPerTransfer, maxRecord: maxRecordBytes,
-		recUsed: used,
+		recUsed:   used,
+		announced: map[string]bool{},
 	}, nil
 }
 
@@ -140,6 +151,9 @@ func (t *Transfers) removeTree(dir string) error {
 		return err
 	}
 	t.releaseRecordBytes(n)
+	// The directory is named for the transfer, so its base name is the id whose
+	// announcement claim is now meaningless.
+	t.forgetAnnounced(filepath.Base(dir))
 	return nil
 }
 
@@ -816,4 +830,27 @@ func newestMTime(dir string) (time.Time, error) {
 		}
 	}
 	return newest, nil
+}
+
+// markAnnounced claims the right to announce a transfer, returning true to
+// exactly one caller. Every write path asks, because the records and chunks of
+// one transfer arrive in any order and any of them may be the write that makes
+// the transfer describable.
+func (t *Transfers) markAnnounced(id string) bool {
+	t.annMu.Lock()
+	defer t.annMu.Unlock()
+	if t.announced[id] {
+		return false
+	}
+	t.announced[id] = true
+	return true
+}
+
+// forgetAnnounced drops the claim when a transfer goes away, so the set cannot
+// grow without bound across a long-running server and a re-created id can
+// announce again.
+func (t *Transfers) forgetAnnounced(id string) {
+	t.annMu.Lock()
+	defer t.annMu.Unlock()
+	delete(t.announced, id)
 }

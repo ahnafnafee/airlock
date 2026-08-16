@@ -995,3 +995,53 @@ func TestConfigNamesTheAuthenticationMode(t *testing.T) {
 		t.Fatalf("auth = %v, want token", got["auth"])
 	}
 }
+
+// The product's default is a direct transfer: the sender keeps the bytes and
+// hands them to the recipient itself, so the server never holds a chunk and the
+// transfer is never "complete" here. Announcing on completeness therefore told
+// nobody about the only kind of transfer most people ever send. A recipient is
+// told once its metadata record lands, which is what names the file.
+func TestDirectTransferAnnouncesWithoutTheServerHoldingChunks(t *testing.T) {
+	s, devices := newTestServer(t, true)
+	devices.Seen("laptop", "owner@example.com", "")
+
+	// Two chunks the server will never receive, which is what "direct" means.
+	body := `{"to":["laptop"],"cids":["` + strings.Repeat("a", 64) + `","` + strings.Repeat("b", 64) + `"]}`
+	w := do(t, s, "POST", "/api/transfer", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create = %d: %s", w.Code, w.Body)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &created)
+
+	events, cancel := s.cfg.Events.Subscribe("laptop")
+	defer cancel()
+
+	if code := do(t, s, "PUT", "/api/transfer/"+created.ID+"/meta", "sealed-meta").Code; code != http.StatusNoContent {
+		t.Fatalf("meta = %d", code)
+	}
+
+	select {
+	case got := <-events:
+		if got != "inbox" {
+			t.Fatalf("announced %q, want an inbox event", got)
+		}
+	case <-time.After(2 * time.Second):
+		info, _ := s.cfg.Transfers.Get(created.ID)
+		t.Fatalf("no announcement for a direct transfer (complete=%v, missing=%d): "+
+			"the recipient is never told a file is waiting", info.Complete, len(info.Missing))
+	}
+
+	// Writes keep arriving after the announcement, and each one asks again. A
+	// recipient should not be nudged once per record.
+	if code := do(t, s, "PUT", "/api/transfer/"+created.ID+"/thumb", "sealed-thumb").Code; code != http.StatusNoContent {
+		t.Fatalf("thumb = %d", code)
+	}
+	select {
+	case got := <-events:
+		t.Fatalf("announced twice for one transfer (second event %q)", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+}

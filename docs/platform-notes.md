@@ -131,6 +131,32 @@ All measured, not inferred.
   arrived over the peer path with the server holding none of it, and the
   assembled bytes matched the sender's hash. The tab was never focused.
 
+
+## How to take the remaining measurements
+
+Everything left needs hardware this machine does not have. The setup is the same
+for all of it and takes one command.
+
+On the machine that will host, with Tailscale running and logged in:
+
+```
+go build -o airlock.exe .
+./airlock.exe --port 8444
+```
+
+It prints the address to open. Every other device on the tailnet opens that same
+URL. Two notes that cost time if you meet them cold, both recorded above: this
+machine currently has `accept-dns` disabled, so the name will not resolve here
+until `tailscale set --accept-dns=true`, and ports 443 and 8443 are already
+taken, which is why the line above uses 8444.
+
+For a phone, install to the Home Screen BEFORE setting the passphrase. An
+installed app has its own storage partition and cannot see anything set up in a
+browser tab, so doing it the other way round means doing it twice.
+
+Each unchecked box below is a single question with a single answer to write
+beside it. None of them needs the code read.
+
 ## Not verified
 
 Nothing below has been run. Do not state any of it as fact in another document.

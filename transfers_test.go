@@ -147,13 +147,13 @@ func TestDeleteLeavesATombstone(t *testing.T) {
 	rec, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1)})
 	tr.PutRecord(rec.ID, "meta", strings.NewReader("sealed-meta"))
 
-	if err := tr.Delete(rec.ID); err != nil {
+	if err := tr.Delete(rec.ID, "pixel"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tr.Get(rec.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
-	hist, err := tr.History()
+	hist, err := tr.History("pixel")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestSweepExpiresOnLastWrite(t *testing.T) {
 	if _, err := tr.Get(rec.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatal("expired transfer survived")
 	}
-	if hist, _ := tr.History(); len(hist) != 1 {
+	if hist, _ := tr.History("pixel"); len(hist) != 1 {
 		t.Fatal("expiry should leave a tombstone too")
 	}
 }
@@ -318,7 +318,7 @@ func TestHalfBuiltTransferIsInvisibleAndSweptAway(t *testing.T) {
 	if _, err := os.Stat(partial); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("the half-built directory should have been removed")
 	}
-	if hist, _ := tr.History(); len(hist) != 0 {
+	if hist, _ := tr.History("pixel"); len(hist) != 0 {
 		t.Fatal("a half-built transfer should leave no tombstone")
 	}
 }
@@ -361,7 +361,7 @@ func TestRecordsAreMeteredAgainstTheSharedBudget(t *testing.T) {
 	}
 
 	// Deleting a transfer returns its record bytes to the budget.
-	if err := tr.Delete(filled); err != nil {
+	if err := tr.Delete(filled, "pixel"); err != nil {
 		t.Fatal(err)
 	}
 	rec, _, err := tr.Create("pixel", nil, []string{cid(1)})
@@ -370,5 +370,103 @@ func TestRecordsAreMeteredAgainstTheSharedBudget(t *testing.T) {
 	}
 	if err := tr.PutRecord(rec.ID, "meta", strings.NewReader(record)); err != nil {
 		t.Fatalf("put after a delete freed room: %v", err)
+	}
+}
+
+// History carries the same metadata an inbox does, so it has to be filtered the
+// same way. Each of the three transfers exercises one arm of the predicate: one
+// addressed to this node, one sent by it to somewhere else, and one that is
+// neither. The middle one is what gives the test power over the sender arm; an
+// unaddressed transfer would pass under a filter that only checked recipients.
+func TestHistoryIsScopedToTheCaller(t *testing.T) {
+	tr, _ := newTransfers(t)
+	mine, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1)})
+	sent, _, _ := tr.Create("desktop", []string{"laptop"}, []string{cid(1)})
+	theirs, _, _ := tr.Create("pixel", []string{"laptop"}, []string{cid(1)})
+
+	// Every delete here is made by a node entitled to it, so this test measures
+	// the history filter and nothing else.
+	for _, d := range []struct{ id, node string }{
+		{mine.ID, "pixel"}, {sent.ID, "desktop"}, {theirs.ID, "pixel"},
+	} {
+		if err := tr.Delete(d.id, d.node); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	hist, err := tr.History("desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, h := range hist {
+		seen[h.ID] = true
+	}
+	if !seen[mine.ID] {
+		t.Fatal("a tombstone addressed to this node is missing")
+	}
+	if !seen[sent.ID] {
+		t.Fatal("a tombstone this node sent is missing")
+	}
+	if seen[theirs.ID] {
+		t.Fatal("a tombstone for another device's transfer leaked into this history")
+	}
+}
+
+func TestDeleteRequiresSenderOrRecipient(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1)})
+
+	// A node that is neither sender nor addressee gets ErrNotFound rather than a
+	// distinct error, so the endpoint never confirms that a transfer it has no
+	// business knowing about exists.
+	if err := tr.Delete(rec.ID, "laptop"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	if _, err := tr.Get(rec.ID); err != nil {
+		t.Fatal("the refused delete must not have removed anything")
+	}
+	if hist, _ := tr.History("pixel"); len(hist) != 0 {
+		t.Fatal("the refused delete left a tombstone behind")
+	}
+	if err := tr.Delete(rec.ID, "desktop"); err != nil {
+		t.Fatalf("the addressee should be able to delete: %v", err)
+	}
+}
+
+func TestSenderCanDeleteTheirOwnTransfer(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1)})
+	if err := tr.Delete(rec.ID, "pixel"); err != nil {
+		t.Fatalf("the sender should be able to delete: %v", err)
+	}
+}
+
+func TestUnaddressedTransfersAreDeletableByAnyone(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, _ := tr.Create("pixel", nil, []string{cid(1)})
+	if err := tr.Delete(rec.ID, "laptop"); err != nil {
+		t.Fatalf("an unaddressed transfer is everyone's: %v", err)
+	}
+}
+
+func TestSweepIgnoresAddressingWhenExpiring(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := NewChunkStore(dir, 64, 1<<20)
+	tr, _ := NewTransfers(dir, c, time.Millisecond, 100, 4096)
+	rec, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1)})
+	time.Sleep(10 * time.Millisecond)
+
+	// Expiry is the server's own action, not one performed on behalf of a
+	// device, so the visibility rule must not block it.
+	n, err := tr.Sweep(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("swept %d, want 1", n)
+	}
+	if _, err := tr.Get(rec.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatal("an addressed transfer survived expiry")
 	}
 }

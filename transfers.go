@@ -337,7 +337,10 @@ func (t *Transfers) readRecordB64(dir, kind string) string {
 	return base64.StdEncoding.EncodeToString(b)
 }
 
-// Inbox returns transfers addressed to everyone or to this node, newest first.
+// Inbox returns the transfers this node may see, newest first: the ones it sent
+// plus the ones addressed to it or to everyone. A sender sees its own outbound
+// transfers because it may delete them, and a list that hid what its own delete
+// button reaches would be the surprising half of that pair.
 func (t *Transfers) Inbox(node string) ([]*TransferInfo, error) {
 	all, err := t.list()
 	if err != nil {
@@ -345,11 +348,18 @@ func (t *Transfers) Inbox(node string) ([]*TransferInfo, error) {
 	}
 	out := []*TransferInfo{}
 	for _, info := range all {
-		if addressedTo(info.To, node) {
+		if visibleTo(info.Sender, info.To, node) {
 			out = append(out, info)
 		}
 	}
 	return out, nil
+}
+
+// visibleTo reports whether a node may see and act on a transfer. One predicate
+// serves the inbox, the history and deletion, because the device that can see a
+// transfer is exactly the device that may remove it.
+func visibleTo(sender string, to []string, node string) bool {
+	return sender == node || addressedTo(to, node)
 }
 
 func addressedTo(to []string, node string) bool {
@@ -388,15 +398,29 @@ func (t *Transfers) list() ([]*TransferInfo, error) {
 	return out, nil
 }
 
-func (t *Transfers) Delete(id string) error {
+// Delete removes a transfer on behalf of a device. A caller that cannot see the
+// transfer gets ErrNotFound rather than a distinct error, so the endpoint never
+// confirms the existence of a transfer the caller has no business knowing about.
+func (t *Transfers) Delete(id, node string) error {
 	info, err := t.Get(id)
 	if err != nil {
 		return err
 	}
+	if !visibleTo(info.Sender, info.To, node) {
+		return ErrNotFound
+	}
+	return t.remove(info)
+}
+
+// remove is the unscoped deletion. Expiry is the server's own action rather than
+// one performed for a device, so the sweep goes through here and the visibility
+// rule does not block it. Were expiry to run through Delete instead, a transfer
+// addressed to a device that never comes back would live forever.
+func (t *Transfers) remove(info *TransferInfo) error {
 	if err := t.appendTombstone(info); err != nil {
 		return err
 	}
-	dir, err := t.transferDir(id)
+	dir, err := t.transferDir(info.ID)
 	if err != nil {
 		return err
 	}
@@ -439,12 +463,22 @@ func (t *Transfers) appendTombstone(info *TransferInfo) error {
 	return atomicWrite(filepath.Join(t.dir, "..", "history.json"), b)
 }
 
-func (t *Transfers) History() ([]Tombstone, error) {
+// History returns the tombstones this node may see, newest first. A tombstone
+// carries the same sender and recipient list the transfer did, so it gets the
+// same visibility rule: the filenames stay sealed either way, but which devices
+// talk to each other is exactly the metadata these records exist to withhold.
+func (t *Transfers) History(node string) ([]Tombstone, error) {
 	t.histMu.Lock()
 	defer t.histMu.Unlock()
-	hist, err := t.historyLocked()
+	all, err := t.historyLocked()
 	if err != nil {
 		return nil, err
+	}
+	hist := make([]Tombstone, 0, len(all))
+	for _, tomb := range all {
+		if visibleTo(tomb.Sender, tomb.To, node) {
+			hist = append(hist, tomb)
+		}
 	}
 	sort.Slice(hist, func(i, j int) bool { return hist[i].EndedAt.After(hist[j].EndedAt) })
 	return hist, nil
@@ -528,7 +562,11 @@ func (t *Transfers) Sweep(now time.Time) (int, error) {
 		if err != nil || now.Sub(last) <= t.ttl {
 			continue
 		}
-		if t.Delete(e.Name()) == nil {
+		info, err := t.Get(e.Name())
+		if err != nil {
+			continue
+		}
+		if t.remove(info) == nil {
 			swept++
 		}
 	}

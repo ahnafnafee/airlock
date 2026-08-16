@@ -322,10 +322,18 @@ func TestSenderAndIdAreNeverTakenFromTheClient(t *testing.T) {
 	}
 }
 
-func TestInboxIsFilteredByRecipient(t *testing.T) {
-	s, _ := newTestServer(t, true)
+func TestInboxIsScopedToThisDevice(t *testing.T) {
+	s, _ := newTestServer(t, true) // identity is always node "pixel"
 	mine, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"],"to":["pixel"]}`)
-	theirs, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"],"to":["laptop"]}`)
+	// Sent from here to somewhere else. The sender may delete it, so it belongs
+	// in the list the delete button is attached to.
+	sent, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"],"to":["laptop"]}`)
+	// Between two other devices, so it has to be made through the store: every
+	// transfer created over HTTP has this device as its sender.
+	theirs, _, err := s.cfg.Transfers.Create("laptop", []string{"desktop"}, []string{cid(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var inbox []map[string]any
 	json.Unmarshal(do(t, s, "GET", "/api/inbox", "").Body.Bytes(), &inbox)
@@ -336,8 +344,11 @@ func TestInboxIsFilteredByRecipient(t *testing.T) {
 	if !seen[mine] {
 		t.Fatal("transfer addressed to this node is missing")
 	}
-	if seen[theirs] {
-		t.Fatal("transfer addressed elsewhere leaked in")
+	if !seen[sent] {
+		t.Fatal("a transfer this device sent is missing")
+	}
+	if seen[theirs.ID] {
+		t.Fatal("a transfer between two other devices leaked in")
 	}
 }
 
@@ -359,6 +370,51 @@ func TestDeleteMovesTransferToHistory(t *testing.T) {
 	}
 	if hist[0]["meta"] != "c2VhbGVkLW1ldGE=" {
 		t.Fatalf("history should retain the sealed metadata, got %v", hist[0]["meta"])
+	}
+}
+
+// The test identity is fixed at node "pixel", and every transfer created over
+// HTTP therefore has "pixel" as its sender, which is already enough to see and
+// delete it. A transfer between two other devices has to be made through the
+// store, and that is what these two tests need to have any power at all.
+func TestHistoryEndpointIsScoped(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	mine, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"],"to":["pixel"]}`)
+	do(t, s, "DELETE", "/api/transfer/"+mine, "")
+
+	theirs, _, err := s.cfg.Transfers.Create("laptop", []string{"desktop"}, []string{cid(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.cfg.Transfers.Delete(theirs.ID, "laptop"); err != nil {
+		t.Fatal(err)
+	}
+
+	var hist []map[string]any
+	json.Unmarshal(do(t, s, "GET", "/api/history", "").Body.Bytes(), &hist)
+	seen := map[string]bool{}
+	for _, h := range hist {
+		seen[h["id"].(string)] = true
+	}
+	if !seen[mine] {
+		t.Fatal("this device's own tombstone is missing from its history")
+	}
+	if seen[theirs.ID] {
+		t.Fatal("another device's tombstone leaked into this history")
+	}
+}
+
+func TestDeleteOfAnotherDevicesTransferIs404(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	theirs, _, err := s.cfg.Transfers.Create("laptop", []string{"desktop"}, []string{cid(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := do(t, s, "DELETE", "/api/transfer/"+theirs.ID, "").Code; code != http.StatusNotFound {
+		t.Fatalf("code = %d, want 404", code)
+	}
+	if code := do(t, s, "GET", "/api/transfer/"+theirs.ID, "").Code; code != http.StatusOK {
+		t.Fatal("the refused delete removed the transfer anyway")
 	}
 }
 

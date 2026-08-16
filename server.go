@@ -285,7 +285,7 @@ func (s *Server) getTransfer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteTransfer(w http.ResponseWriter, r *http.Request) {
-	if fail(w, s.cfg.Transfers.Delete(r.PathValue("id"))) {
+	if fail(w, s.cfg.Transfers.Delete(r.PathValue("id"), who(r).Node)) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -397,7 +397,7 @@ func (s *Server) inbox(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) history(w http.ResponseWriter, r *http.Request) {
-	hist, err := s.cfg.Transfers.History()
+	hist, err := s.cfg.Transfers.History(who(r).Node)
 	if fail(w, err) {
 		return
 	}

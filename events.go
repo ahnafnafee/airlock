@@ -5,6 +5,10 @@ import "sync"
 // Events is a fan-out of "something arrived for you" nudges. It carries no
 // detail: a client that receives one re-fetches its inbox, which keeps every
 // filename behind the encryption boundary and makes a dropped event harmless.
+//
+// It doubles as the delivery half of a signalling postbox. Those messages are
+// addressed to one node and carry an opaque payload this package never parses,
+// and unlike a nudge they may not be dropped.
 type Events struct {
 	mu   sync.Mutex
 	next int
@@ -29,9 +33,19 @@ func (e *Events) Subscribe(node string) (<-chan string, func()) {
 
 	id := e.next
 	e.next++
-	// Buffered by one: a nudge already waiting makes a second one redundant,
-	// since the client re-reads the whole inbox either way.
-	ch := make(chan string, 1)
+	// Nudges collapse, so one slot would do for them. Signalling messages do
+	// not: dropping an answer or a candidate stalls a handshake that has no
+	// other way to recover.
+	//
+	// ponytail: sixteen slots buy room for one handshake's worth of candidates
+	// against a stream that is reading at all, and no more. A reader that has
+	// stopped entirely still loses messages, silently, because Send drops
+	// rather than blocks and a wedged stream must never hold the lock. The
+	// ceiling is a peer whose stream stalls mid-handshake: it hangs until the
+	// caller times out. Lift it by closing a stream whose buffer fills, so the
+	// peer reconnects and starts a fresh handshake instead of waiting on a
+	// half-delivered one.
+	ch := make(chan string, 16)
 	e.subs[id] = subscriber{node: node, ch: ch}
 
 	var once sync.Once
@@ -75,4 +89,45 @@ func (e *Events) Publish(recipients []string, sender string) {
 		default:
 		}
 	}
+}
+
+// Online reports which nodes hold at least one open stream. A device with
+// several tabs open is still one device.
+func (e *Events) Online() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	seen := map[string]bool{}
+	out := []string{}
+	for _, s := range e.subs {
+		if !seen[s.node] {
+			seen[s.node] = true
+			out = append(out, s.node)
+		}
+	}
+	return out
+}
+
+// Send delivers one opaque signalling payload to every stream a node holds and
+// reports whether anything received it. The caller needs that answer: a sender
+// whose offer went nowhere leaves the transfer queued rather than waiting for a
+// reply that will never arrive.
+//
+// The payload is a string this server never parses.
+func (e *Events) Send(to, payload string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delivered := false
+	for _, s := range e.subs {
+		if s.node != to {
+			continue
+		}
+		select {
+		case s.ch <- "signal:" + payload:
+			delivered = true
+		default:
+			// This stream is not draining. Another tab may still take it, so
+			// keep going rather than declaring failure here.
+		}
+	}
+	return delivered
 }

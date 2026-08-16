@@ -2,6 +2,7 @@ import { registerView, state, el } from '../app.js';
 import { api } from '../api.js';
 import { upload } from '../upload.js';
 import { renderStrip } from '../strip.js';
+import { MODE_SEALED, MODE_PLAIN } from '../crypto.js';
 
 function humanSize(bytes) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -31,6 +32,28 @@ registerView('send', 'Send', (panel) => {
     el('button', { type: 'button', onclick: () => picker.click() }, 'or choose'),
     picker);
 
+  // The sealing state is a control rather than a caption, because it is the one
+  // decision on this screen that cannot be undone after the fact. The note is
+  // the checkbox's own label, so the state is readable without color: --seal
+  // while the key stays on this device, --breach once it does not, and the off
+  // text names the consequence instead of describing the setting.
+  //
+  // The box reads its initial state from state.mode and paintSeal writes the
+  // mode back, so the control and the mode uploads read cannot drift apart.
+  const sealed = el('input', {
+    type: 'checkbox', id: 'sealed', checked: state.mode === MODE_SEALED,
+  });
+  const sealNote = el('span', {});
+  function paintSeal() {
+    state.mode = sealed.checked ? MODE_SEALED : MODE_PLAIN;
+    sealNote.textContent = sealed.checked
+      ? 'Sealed on this device'
+      : 'Not sealed. Anyone with access to the server can read this.';
+    sealNote.className = sealed.checked ? 'data sealed' : 'data bad';
+  }
+  paintSeal();
+  sealed.addEventListener('change', paintSeal);
+
   const recipient = el('select', { id: 'to' }, el('option', { value: '' }, 'All my devices'));
   const staging = el('div', { hidden: true });
   const status = el('div', { class: 'data muted' });
@@ -39,6 +62,7 @@ registerView('send', 'Send', (panel) => {
   panel.append(
     el('h2', {}, 'Send'),
     drop,
+    el('p', {}, el('label', { for: 'sealed' }, sealed, ' ', sealNote)),
     el('p', { class: 'label' }, 'To'),
     recipient,
     staging,

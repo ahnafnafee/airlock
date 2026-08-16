@@ -256,46 +256,23 @@ So: the sending device as the title, the filename and size as the body, the tran
 
 **The thumbnail cannot be a `blob:` URL.** Notification images are fetched by the browser process rather than by page script, and a blob URL minted inside a worker is not reliably reachable from there. The worker serves it from a same-origin route it intercepts instead, exactly as it already does for `/dl/{id}`.
 
-- [ ] **Step 1: Create the badge icon**
+- [ ] **Step 1: Confirm the icons**
 
-Android draws `badge` as a monochrome silhouette in the status bar, so it is a solid white shape on transparency, not the full-color mark.
+The icons are already generated and committed: `web/icon-192.png`, `web/icon-512.png`, `web/icon-maskable.png` and `web/icon-badge.png`. Do not write a new generator.
+
+They come from `docs/assets/make-icons.py`, which is the single source for the mark and matches `docs/assets/logo.svg`. Regenerate only if the mark changes:
 
 ```bash
-python - <<'PY'
-import struct, zlib, math
-
-SIZE = 72
-
-def write_png(path, rgba):
-    raw = b''.join(b'\x00' + bytes(v for px in row for v in px) for row in rgba)
-    def chunk(tag, data):
-        body = tag + data
-        return struct.pack('>I', len(data)) + body + struct.pack('>I', zlib.crc32(body))
-    open(path, 'wb').write(
-        b'\x89PNG\r\n\x1a\n'
-        + chunk(b'IHDR', struct.pack('>IIBBBBB', SIZE, SIZE, 8, 6, 0, 0, 0))
-        + chunk(b'IDAT', zlib.compress(raw, 9))
-        + chunk(b'IEND', b''))
-
-c = SIZE / 2
-r = SIZE * 0.42
-ring = SIZE * 0.11
-px = [[[255, 255, 255, 0] for _ in range(SIZE)] for _ in range(SIZE)]
-for y in range(SIZE):
-    for x in range(SIZE):
-        dx, dy = x + 0.5 - c, y + 0.5 - c
-        on = abs(math.hypot(dx, dy) - r) <= ring / 2
-        if abs(dy) <= SIZE * 0.06 and -r * 0.5 <= dx <= r * 0.25:
-            on = True
-        for sign in (1, -1):
-            if abs(dy - sign * (dx - r * 0.40)) <= SIZE * 0.08 \
-               and r * 0.02 <= dx <= r * 0.45 and abs(dy) <= r * 0.34:
-                on = True
-        if on:
-            px[y][x] = [255, 255, 255, 255]
-write_png('web/icon-badge.png', px)
-PY
+python docs/assets/make-icons.py
 ```
+
+Two things that generator gets right and a naive one does not, so do not simplify it:
+
+- **Supersampling.** Coverage is averaged over samples per pixel. Without it, rings come out visibly stair-stepped.
+- **Real shapes.** The arrowhead is a triangle tested by barycentric sign, not a diagonal band approximated with an inequality. The band version produced a mangled chevron.
+
+The bolt ring is derived from the gap between the two ring edges rather than from the midpoint of their centrelines, which are different points. Both rings carry the same stroke weight.
+
 
 Open it and shrink it to about 24 pixels, which is roughly how it will be drawn. If the arrow disappears, thicken it rather than shipping a grey blob.
 

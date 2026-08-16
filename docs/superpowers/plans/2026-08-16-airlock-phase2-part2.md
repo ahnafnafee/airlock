@@ -11,86 +11,33 @@
 ### Task 18: PWA install, share target and file handlers
 
 **Files:**
-- Create: `web/manifest.webmanifest`, `web/icon-192.png`, `web/icon-512.png`, `web/icon-maskable.png`
+- Create: `web/manifest.webmanifest`
+- Already present: `web/icon-192.png`, `web/icon-512.png`, `web/icon-maskable.png`, `web/icon-badge.png`
 - Modify: `web/sw.js` (intercept the share POST)
 - Modify: `web/app.js` (consume a stashed share, handle file launches)
 - Modify: `main.go` (embed the manifest and icons)
 
 **This is what makes the browser version not a compromise.** The Tailscale certificate already gave the page a real secure context; this task spends it. Android's share sheet becomes a send target, Windows Explorer gets an Open with entry, and the app installs with its own icon and window.
 
-- [ ] **Step 1: Generate the icons**
+- [ ] **Step 1: Confirm the icons**
 
-Airlock's mark is the hatch from `docs/assets/logo.svg`: a ring, six bolts, and an arrow through the middle, in `#5b9dff` on the hull ground. Rasterize it at three sizes with no added dependency:
+The icons are already generated and committed: `web/icon-192.png`, `web/icon-512.png`, `web/icon-maskable.png` and `web/icon-badge.png`. Do not write a new generator.
+
+They come from `docs/assets/make-icons.py`, which is the single source for the mark and matches `docs/assets/logo.svg`. Regenerate only if the mark changes:
 
 ```bash
-python - <<'PY'
-import struct, zlib, math
-
-HULL = (0x0E, 0x16, 0x14)
-MARK = (0x5B, 0x9D, 0xFF)
-
-def render(size, pad_ratio):
-    px = [[HULL[:] for _ in range(size)] for _ in range(size)]
-    c = size / 2
-    r = size * (0.5 - pad_ratio)
-    ring_w = max(1.0, size * 0.048)
-
-    def put(x, y):
-        if 0 <= x < size and 0 <= y < size:
-            px[y][x] = list(MARK)
-
-    for y in range(size):
-        for x in range(size):
-            dx, dy = x + 0.5 - c, y + 0.5 - c
-            d = math.hypot(dx, dy)
-            if abs(d - r) <= ring_w / 2:
-                put(x, y)
-            if abs(d - r * 0.70) <= max(1.0, ring_w * 0.45):
-                put(x, y)
-
-    # six bolts on the ring
-    for i in range(6):
-        a = math.radians(90 + i * 60)
-        bx, by = c + math.cos(a) * r * 0.855, c - math.sin(a) * r * 0.855
-        br = size * 0.037
-        for y in range(int(by - br - 1), int(by + br + 2)):
-            for x in range(int(bx - br - 1), int(bx + br + 2)):
-                if math.hypot(x + 0.5 - bx, y + 0.5 - by) <= br:
-                    put(x, y)
-
-    # the arrow: a shaft and two strokes
-    half = max(1.0, size * 0.030)
-    for y in range(size):
-        for x in range(size):
-            dx, dy = x + 0.5 - c, y + 0.5 - c
-            if abs(dy) <= half and -r * 0.44 <= dx <= r * 0.30:
-                put(x, y)
-            for sign in (1, -1):
-                if abs(dy - sign * (dx - r * 0.44)) <= half * 1.6 \
-                   and r * 0.10 <= dx <= r * 0.46 and abs(dy) <= r * 0.30:
-                    put(x, y)
-    return px
-
-def write_png(path, px):
-    size = len(px)
-    raw = b''.join(b'\x00' + bytes(v for row_px in row for v in row_px) for row in px)
-    def chunk(tag, data):
-        body = tag + data
-        return struct.pack('>I', len(data)) + body + struct.pack('>I', zlib.crc32(body))
-    open(path, 'wb').write(
-        b'\x89PNG\r\n\x1a\n'
-        + chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0))
-        + chunk(b'IDAT', zlib.compress(raw, 9))
-        + chunk(b'IEND', b''))
-
-write_png('web/icon-192.png', render(192, 0.06))
-write_png('web/icon-512.png', render(512, 0.06))
-# A maskable icon must survive a circular crop, so the mark sits well inside.
-write_png('web/icon-maskable.png', render(512, 0.20))
-PY
+python docs/assets/make-icons.py
 ```
 
-Open each one and confirm it reads as a hatch rather than a smear. If the arrow is illegible at 192, widen `half` rather than shipping something muddy.
+Two things that generator gets right and a naive one does not, so do not simplify it:
+
+- **Supersampling.** Coverage is averaged over samples per pixel. Without it, rings come out visibly stair-stepped.
+- **Real shapes.** The arrowhead is a triangle tested by barycentric sign, not a diagonal band approximated with an inequality. The band version produced a mangled chevron.
+
+The bolt ring is derived from the gap between the two ring edges rather than from the midpoint of their centrelines, which are different points. Both rings carry the same stroke weight.
+
+
+Open each one and confirm it reads as a hatch. If anything looks wrong, adjust the proportions in the generator and regenerate rather than editing a PNG by hand.
 
 - [ ] **Step 2: Write `web/manifest.webmanifest`**
 

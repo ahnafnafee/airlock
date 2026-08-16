@@ -288,7 +288,7 @@ func (t *Transfers) OpenRecord(id, kind string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(filepath.Join(dir, kind))
+	f, err := openShared(filepath.Join(dir, kind))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNotFound
 	}

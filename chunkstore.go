@@ -140,7 +140,7 @@ func (c *ChunkStore) Open(id string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(p)
+	f, err := openShared(p)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNotFound
 	}

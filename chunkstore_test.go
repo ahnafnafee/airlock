@@ -200,3 +200,34 @@ func TestWriteStreamCleansUpOnOversize(t *testing.T) {
 		t.Fatal("temp file should have been removed")
 	}
 }
+
+func TestAnOpenChunkDoesNotBlockItsOwnRemoval(t *testing.T) {
+	c := newChunks(t)
+	if err := c.Put(cid(1), strings.NewReader("first")); err != nil {
+		t.Fatal(err)
+	}
+	f, err := c.Open(cid(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	// Sweeping while a reader holds the file must still remove it. On Windows a
+	// handle without FILE_SHARE_DELETE blocks this, and the sweep silently stops
+	// reclaiming space.
+	if _, err := c.Sweep(map[string]bool{}); err != nil {
+		t.Fatalf("sweep with an open reader: %v", err)
+	}
+	if c.Has(cid(1)) {
+		t.Fatal("an open reader prevented the sweep from removing the chunk")
+	}
+}
+
+// The shared open replaces os.Open, so it has to keep reporting a missing file
+// as ErrNotFound. Every 404 on the download path depends on that mapping.
+func TestOpenReportsAMissingChunkAsNotFound(t *testing.T) {
+	c := newChunks(t)
+	if _, err := c.Open(cid(3)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}

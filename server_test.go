@@ -686,3 +686,17 @@ func TestSaltIsGeneratedOnceAndACorruptFileIsNotReplaced(t *testing.T) {
 		t.Fatal("a salt file of the wrong length was silently replaced")
 	}
 }
+
+func TestDeclineEndpoint(t *testing.T) {
+	s, _ := newTestServer(t, true) // identity is node "pixel"
+	id, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"],"to":["pixel"]}`)
+
+	if code := do(t, s, "POST", "/api/transfer/"+id+"/decline", "").Code; code != http.StatusNoContent {
+		t.Fatalf("decline = %d, want 204", code)
+	}
+	var inbox []map[string]any
+	json.Unmarshal(do(t, s, "GET", "/api/inbox", "").Body.Bytes(), &inbox)
+	if len(inbox) != 0 {
+		t.Fatalf("a declined transfer is still in the inbox: %v", inbox)
+	}
+}

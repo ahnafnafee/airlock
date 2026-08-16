@@ -49,6 +49,10 @@ export const api = {
     new Uint8Array(await (await req(`/api/transfer/${id}/${kind}`)).arrayBuffer()),
   deleteTransfer: (id) => req(`/api/transfer/${id}`, { method: 'DELETE' }),
 
+  // Declining is a server-side record, not a dismissal. It hides the transfer
+  // from this device, and deletes it once every addressee has refused.
+  decline: (id) => req(`/api/transfer/${id}/decline`, { method: 'POST' }),
+
   // The transfer id is required on upload. Chunks live in a store shared by
   // every transfer, so writing one leaves the transfer's own directory
   // untouched, and without this the server could not refresh its inactivity

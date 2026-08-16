@@ -43,6 +43,7 @@ type Transfer struct {
 	ID         string    `json:"id"`
 	Sender     string    `json:"sender"`
 	To         []string  `json:"to"`
+	Declined   []string  `json:"declined"`
 	CreatedAt  time.Time `json:"createdAt"`
 	ChunkCount int       `json:"chunkCount"`
 }
@@ -65,6 +66,7 @@ type Tombstone struct {
 	ID         string    `json:"id"`
 	Sender     string    `json:"sender"`
 	To         []string  `json:"to"`
+	Declined   []string  `json:"declined"`
 	Meta       string    `json:"meta"`
 	ChunkCount int       `json:"chunkCount"`
 	CreatedAt  time.Time `json:"createdAt"`
@@ -348,7 +350,7 @@ func (t *Transfers) Inbox(node string) ([]*TransferInfo, error) {
 	}
 	out := []*TransferInfo{}
 	for _, info := range all {
-		if visibleTo(info.Sender, info.To, node) {
+		if visibleTo(info.Sender, info.To, node) && !contains(info.Declined, node) {
 			out = append(out, info)
 		}
 	}
@@ -366,8 +368,12 @@ func addressedTo(to []string, node string) bool {
 	if len(to) == 0 {
 		return true
 	}
-	for _, n := range to {
-		if n == node {
+	return contains(to, node)
+}
+
+func contains(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
 			return true
 		}
 	}
@@ -412,6 +418,82 @@ func (t *Transfers) Delete(id, node string) error {
 	return t.remove(info)
 }
 
+// Decline records that a device does not want this transfer.
+//
+// It hides the transfer from that device. If the transfer named its recipients
+// and every one of them has declined, it is deleted outright, because nobody is
+// left who could collect it. An unaddressed transfer is not deleted by a single
+// refusal, since every device was equally its destination; it stops appearing
+// for the decliner and expires on the usual clock.
+//
+// ponytail: the read and the rewrite are not one atomic step, so two devices
+// declining at the same instant can lose one of the two entries, and a transfer
+// every addressee refused then waits out its TTL instead of going immediately.
+// Two people refusing the same transfer within one filesystem write of each
+// other is not a case a personal node meets. Take a per-transfer lock across
+// the read and the write if it ever does.
+func (t *Transfers) Decline(id, node string) error {
+	info, err := t.Get(id)
+	if err != nil {
+		return err
+	}
+	if !visibleTo(info.Sender, info.To, node) {
+		return ErrNotFound
+	}
+	if contains(info.Declined, node) {
+		return nil
+	}
+
+	rec := info.Transfer
+	rec.Declined = append(append([]string{}, info.Declined...), node)
+
+	dir, err := t.transferDir(id)
+	if err != nil {
+		return err
+	}
+	if err := t.writeMetaJSON(dir, &rec); err != nil {
+		return err
+	}
+
+	if len(rec.To) > 0 && allDeclined(rec.To, rec.Declined) {
+		info.Transfer = rec
+		return t.remove(info)
+	}
+	return nil
+}
+
+func allDeclined(to, declined []string) bool {
+	for _, node := range to {
+		if !contains(declined, node) {
+			return false
+		}
+	}
+	return true
+}
+
+// writeMetaJSON republishes a transfer's meta.json, the server's own record of
+// the transfer, and not the sealed "meta" record a client uploads. It keeps the
+// record budget honest by measuring what actually landed, the way PutRecord
+// does. The rewrite is deliberately not admitted against the quota: it grows
+// the file by one node name, and refusing it would leave a full disk with no
+// way to decline its way back out.
+func (t *Transfers) writeMetaJSON(dir string, rec *Transfer) error {
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	p := filepath.Join(dir, "meta.json")
+
+	t.recMu.Lock()
+	defer t.recMu.Unlock()
+	before := fileSize(p)
+	if err := atomicWrite(p, b); err != nil {
+		return err
+	}
+	t.recUsed += fileSize(p) - before
+	return nil
+}
+
 // remove is the unscoped deletion. Expiry is the server's own action rather than
 // one performed for a device, so the sweep goes through here and the visibility
 // rule does not block it. Were expiry to run through Delete instead, a transfer
@@ -442,7 +524,8 @@ func (t *Transfers) appendTombstone(info *TransferInfo) error {
 		return err
 	}
 	hist = append(hist, Tombstone{
-		ID: info.ID, Sender: info.Sender, To: info.To, Meta: info.Meta,
+		ID: info.ID, Sender: info.Sender, To: info.To, Declined: info.Declined,
+		Meta:       info.Meta,
 		ChunkCount: info.ChunkCount, CreatedAt: info.CreatedAt, EndedAt: time.Now().UTC(),
 	})
 

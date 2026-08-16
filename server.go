@@ -80,6 +80,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/transfer", g(s.createTransfer))
 	s.mux.HandleFunc("GET /api/transfer/{id}", g(s.getTransfer))
 	s.mux.HandleFunc("DELETE /api/transfer/{id}", g(s.deleteTransfer))
+	s.mux.HandleFunc("POST /api/transfer/{id}/decline", g(s.declineTransfer))
 	s.mux.HandleFunc("PUT /api/transfer/{id}/{kind}", g(s.putRecord))
 	s.mux.HandleFunc("GET /api/transfer/{id}/{kind}", g(s.getRecord))
 	s.mux.HandleFunc("PUT /api/chunk/{cid}", g(s.putChunk))
@@ -291,6 +292,16 @@ func (s *Server) getTransfer(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteTransfer(w http.ResponseWriter, r *http.Request) {
 	if fail(w, s.cfg.Transfers.Delete(r.PathValue("id"), who(r).Node)) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// declineTransfer refuses a transfer on behalf of the calling device. A refusal
+// has to be recorded on the server: a button that only closed a notification
+// would leave the transfer occupying the quota and waiting in the next inbox.
+func (s *Server) declineTransfer(w http.ResponseWriter, r *http.Request) {
+	if fail(w, s.cfg.Transfers.Decline(r.PathValue("id"), who(r).Node)) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

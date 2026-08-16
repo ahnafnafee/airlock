@@ -470,3 +470,86 @@ func TestSweepIgnoresAddressingWhenExpiring(t *testing.T) {
 		t.Fatal("an addressed transfer survived expiry")
 	}
 }
+
+func TestDeclineHidesFromTheDecliningDeviceOnly(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, _ := tr.Create("pixel", nil, []string{cid(1)})
+
+	if err := tr.Decline(rec.ID, "desktop"); err != nil {
+		t.Fatal(err)
+	}
+	desktop, _ := tr.Inbox("desktop")
+	if len(desktop) != 0 {
+		t.Fatal("a declined transfer should leave the decliner's inbox")
+	}
+	// Unaddressed means every device was its destination, so one refusal does
+	// not speak for the others.
+	laptop, _ := tr.Inbox("laptop")
+	if len(laptop) != 1 {
+		t.Fatalf("laptop sees %d, want the transfer still there", len(laptop))
+	}
+	if _, err := tr.Get(rec.ID); err != nil {
+		t.Fatal("the transfer itself should survive")
+	}
+}
+
+func TestDeclineByEveryAddresseeDeletesTheTransfer(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, _ := tr.Create("pixel", []string{"desktop", "laptop"}, []string{cid(1)})
+
+	if err := tr.Decline(rec.ID, "desktop"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tr.Get(rec.ID); err != nil {
+		t.Fatal("one of two addressees declining must not delete it")
+	}
+	if err := tr.Decline(rec.ID, "laptop"); err != nil {
+		t.Fatal(err)
+	}
+	// Nobody is left who could collect it.
+	if _, err := tr.Get(rec.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatal("the last addressee declining should delete the transfer")
+	}
+	hist, _ := tr.History("pixel")
+	if len(hist) != 1 || len(hist[0].Declined) != 2 {
+		t.Fatalf("the tombstone should record who declined: %+v", hist)
+	}
+}
+
+func TestDeclineIsIdempotent(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1)})
+	if err := tr.Decline(rec.ID, "desktop"); err != nil {
+		t.Fatal(err)
+	}
+	// The transfer is gone, so a repeat is a 404 rather than an error worth
+	// surfacing to a user who tapped twice.
+	if err := tr.Decline(rec.ID, "desktop"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeclineTwiceOnAnUnaddressedTransferIsHarmless(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, _ := tr.Create("pixel", nil, []string{cid(1)})
+	for i := 0; i < 3; i++ {
+		if err := tr.Decline(rec.ID, "desktop"); err != nil {
+			t.Fatalf("attempt %d: %v", i, err)
+		}
+	}
+	info, err := tr.Get(rec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Declined) != 1 {
+		t.Fatalf("Declined = %v, want one entry", info.Declined)
+	}
+}
+
+func TestDeclineRequiresVisibility(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1)})
+	if err := tr.Decline(rec.ID, "laptop"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound for a device it was never sent to", err)
+	}
+}

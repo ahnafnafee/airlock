@@ -55,13 +55,9 @@ func hostListener() (net.Listener, IdentityFunc, error) {
 	if len(st.TailscaleIPs) == 0 {
 		return nil, nil, errors.New("tailscaled reports no tailnet address")
 	}
-	// HTTPS Certificates off in the admin console is the failure that otherwise
-	// starts cleanly and then fails every single TLS handshake, which reads as a
-	// broken browser rather than a missing setting.
-	if len(st.CertDomains) == 0 {
-		return nil, nil, errors.New(
-			"this tailnet has no HTTPS certificate domains. Enable HTTPS Certificates " +
-				"in the Tailscale admin console under Settings, Features, then restart")
+	url, err := tailnetHTTPSURL(st.CertDomains, *port)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	users, err := resolveAllowedUsers(ctx, lc)
@@ -89,8 +85,7 @@ func hostListener() (net.Listener, IdentityFunc, error) {
 	// The MagicDNS name is the only URL that works: GetCertificate has no
 	// certificate for an IP literal, so reaching the same listener by address
 	// fails during the handshake.
-	name := strings.TrimSuffix(st.CertDomains[0], ".")
-	log.Printf("open https://%s:%d/ on any device on your tailnet", name, *port)
+	log.Printf("open %s on any device on your tailnet", url)
 	return ln, identityFromWhoIs(lc, users), nil
 }
 
@@ -110,6 +105,14 @@ func embeddedListener() (net.Listener, IdentityFunc, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	st, err := lc.Status(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("tsnet status: %w", err)
+	}
+	url, err := tailnetHTTPSURL(st.CertDomains, *port)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	users, err := resolveAllowedUsers(ctx, lc)
 	if err != nil {
@@ -124,7 +127,25 @@ func embeddedListener() (net.Listener, IdentityFunc, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("listen tls on port %d: %w", *port, err)
 	}
+	log.Printf("open %s on any device on your tailnet", url)
 	return ln, identityFromWhoIs(lc, users), nil
+}
+
+// tailnetHTTPSURL turns the certificate name Tailscale assigned this node into
+// the one browser URL an operator should use. IP literals do not match the
+// tailnet certificate, and spelling out :443 is needless friction when copying
+// the startup line to another device.
+func tailnetHTTPSURL(domains []string, port int) (string, error) {
+	if len(domains) == 0 {
+		return "", errors.New(
+			"this tailnet has no HTTPS certificate domains. Enable HTTPS Certificates " +
+				"on the DNS page of the Tailscale admin console, then restart")
+	}
+	name := strings.TrimSuffix(domains[0], ".")
+	if port == 443 {
+		return "https://" + name + "/", nil
+	}
+	return fmt.Sprintf("https://%s:%d/", name, port), nil
 }
 
 func identityFromWhoIs(lc whoIser, users map[string]bool) IdentityFunc {

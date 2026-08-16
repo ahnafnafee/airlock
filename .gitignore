@@ -2,4 +2,9 @@ data/
 devdata/
 airlock
 airlock.exe
+*.exe~
 /design
+/uidemo/
+/dz/
+/.env
+/backups/

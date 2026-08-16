@@ -238,6 +238,31 @@ func TestTailscaleListenerRejectsUnknownMode(t *testing.T) {
 	}
 }
 
+func TestTailnetHTTPSURL(t *testing.T) {
+	cases := []struct {
+		name    string
+		domains []string
+		port    int
+		want    string
+		wantErr bool
+	}{
+		{"default https port is omitted", []string{"airlock.example.ts.net."}, 443, "https://airlock.example.ts.net/", false},
+		{"custom port is explicit", []string{"airlock.example.ts.net"}, 4443, "https://airlock.example.ts.net:4443/", false},
+		{"https certificates disabled", nil, 443, "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := tailnetHTTPSURL(c.domains, c.port)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
+			}
+			if got != c.want {
+				t.Fatalf("url = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestSplitSet(t *testing.T) {
 	cases := []struct {
 		in   string

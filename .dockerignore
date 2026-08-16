@@ -1,0 +1,17 @@
+.git
+.github
+.env
+.tmp*
+backups
+data
+design
+devdata
+uidemo
+*.exe
+*.exe~
+*.out
+**/*_test.go
+**/*.test.mjs
+node_modules
+docs
+deploy

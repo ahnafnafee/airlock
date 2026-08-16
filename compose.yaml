@@ -1,0 +1,38 @@
+name: airlock
+
+services:
+  airlock:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: airlock:local
+    restart: unless-stopped
+    environment:
+      # Set this in the shell for the first start only. The embedded Tailscale
+      # identity persists in airlock-data, so later containers need no key.
+      TS_AUTHKEY: ${TS_AUTHKEY:-}
+    command:
+      - --tailscale-mode=embedded
+      - --hostname=${AIRLOCK_HOSTNAME:-airlock}
+      - --data=/var/lib/airlock
+      - --port=443
+      - --require-approval
+      - --ttl-hours=${AIRLOCK_TTL_HOURS:-24}
+      - --max-total=${AIRLOCK_MAX_TOTAL:-214748364800}
+      - --vapid-subject=${AIRLOCK_VAPID_SUBJECT:-mailto:airlock@invalid}
+      - --allow-users=${AIRLOCK_ALLOW_USERS:-}
+      - --allow-nodes=${AIRLOCK_ALLOW_NODES:-}
+    volumes:
+      - airlock-data:/var/lib/airlock
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+
+volumes:
+  airlock-data:
+    name: ${AIRLOCK_DATA_VOLUME:-airlock-data}

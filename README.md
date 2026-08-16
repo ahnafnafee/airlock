@@ -15,7 +15,7 @@ One Go binary and an installable web app. No accounts, no cloud, no public port.
 [![][client-shield]][client-link]
 [![][deps-shield]][deps-link]
 
-[Features](#-features) · [Installation](#-installation) · [Architecture](#-architecture) · [Measured](#-measured) · [Threat model](#-threat-model) · [Status](#-status)
+[Features](#-features) · [Installation](#-installation) · [VPS + Android guide](./docs/deployment.md) · [Architecture](#-architecture) · [Measured](#-measured) · [Threat model](#-threat-model) · [Status](#-status)
 
 </div>
 
@@ -35,6 +35,7 @@ One Go binary and an installable web app. No accounts, no cloud, no public port.
   - [`4` Deduplicated, delta-synced, resumable](#4-deduplicated-delta-synced-resumable)
   - [`5` Installs like an app](#5-installs-like-an-app)
 - [📦 Installation](#-installation)
+  - [Docker VPS and Android](#docker-vps-and-android)
   - [Where to run it](#where-to-run-it)
   - [Linux, systemd](#linux-systemd)
   - [macOS, launchd](#macos-launchd)
@@ -177,10 +178,25 @@ You pick a destination, or leave it at all your devices, which stays the default
 
 ## 📦 Installation
 
-Two things must be enabled in the Tailscale admin console, under Settings then Features:
+Two things must be enabled on the **DNS** page of the Tailscale admin console:
 
 - **MagicDNS**, or the server's hostname does not resolve.
 - **HTTPS Certificates**, or there is no trusted certificate, therefore no secure context, therefore no install, push, share target, or download. Airlock does not work without this one.
+
+### Docker VPS and Android
+
+For a complete, copyable path from a fresh Ubuntu VPS through Docker Compose,
+the one-time embedded Tailscale enrollment, first-device setup, Android
+approval and pairing, direct and held transfer checks, backups, upgrades, and
+troubleshooting, follow **[Deploy Airlock on a VPS and add an Android
+device](./docs/deployment.md)**.
+
+The container publishes no host port: Airlock joins the tailnet inside the
+process and prints the private HTTPS URL to its log. The guide also explains
+why a Tailscale sidecar, Serve, Funnel, or an ordinary reverse proxy is not a
+drop-in replacement for that layout. Docker's embedded-tailnet path and the
+physical Android acceptance checks remain explicitly marked until they are run
+on the target VPS and phone.
 
 ### Where to run it
 
@@ -327,9 +343,21 @@ Tailnet mode is chosen with `--tailscale-mode`, and the flag defaults to `host`,
 
 **Windows and macOS, Chrome or Edge.** Open the URL and install from the address bar. It gets its own window and icon. Right-click any file and choose **Send with Airlock**, or drag it onto the window.
 
-**Android, Chrome.** Add to Home screen. Share to it from any app's share sheet.
+**Android, Chrome.** Add to Home screen, then verify that Airlock appears in the
+share sheet. The manifest implements that integration, but the physical-device
+check is still open. The [VPS and Android guide](./docs/deployment.md#6-add-and-register-an-android-phone)
+walks through both Tailscale approval and Airlock's separate approval and
+passphrase steps.
 
-**Android, Firefox.** It works, and the picker is all of it. Firefox for Android offers no install, never puts Airlock in the share sheet however the manifest is written, and does not hand a pasted file to a web page. Open Airlock and choose the file. This is the weakest way in of any browser here, so if you would rather start from the other app's share sheet, [Taildrop][taildrop-link] is already on the device with Tailscale and does register there. It puts the file straight into your other device's downloads rather than into Airlock, and it is not encrypted in Airlock's sense, but it covers exactly this gap.
+**Android, Firefox.** The implemented fallback is the in-app picker, and the
+physical Android check is still open. Firefox for Android offers no install,
+never puts Airlock in the share sheet however the manifest is written, and does
+not hand a pasted file to a web page. Open Airlock and choose the file. This is
+the weakest way in of any browser here, so if you would rather start from the
+other app's share sheet, [Taildrop][taildrop-link] is already on the device with
+Tailscale and does register there. It puts the file straight into your other
+device's downloads rather than into Airlock, and it is not encrypted in
+Airlock's sense, but it covers exactly this gap.
 
 **iOS, Safari.** Open the URL, tap Share, tap **Add to Home Screen**. This is a Safari feature, not an App Store app: no Apple developer account, no signing, no review. It is the same tailnet page with an icon. The floor is iOS 18.4, below which the wake lock does not work in an installed app, Declarative Web Push is absent, and folder selection silently picks nothing.
 

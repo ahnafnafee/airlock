@@ -131,6 +131,24 @@ All measured, not inferred.
   arrived over the peer path with the server holding none of it, and the
   assembled bytes matched the sender's hash. The tab was never focused.
 
+### Docker image, isolated local smoke
+
+Docker Engine 29.7.2, Linux container on the Windows 11 development machine.
+This validates the container contract, not the embedded tailnet or Android:
+
+- The pinned multi-stage image builds and runs as UID/GID 65532 with a read-only
+  root, all capabilities dropped, and `no-new-privileges` enabled.
+- A fresh named volume is owned by 65532:65532 at mode 0700.
+- In token mode, the shell returns 200, an unauthenticated state API returns
+  403, and the same API returns 200 with the bearer token.
+- Replacing the container while keeping its volume preserves the salt, VAPID
+  key, device registry, and application approval state.
+- The resolved Compose configuration publishes no host ports.
+
+The smoke resources were isolated under `airlock-doc-audit-*` names and removed
+after each run. The production guide therefore labels the Docker packaging as
+locally tested while leaving its live `tsnet` and physical-device path below.
+
 
 ## How to take the remaining measurements
 
@@ -181,6 +199,9 @@ Nothing below has been run. Do not state any of it as fact in another document.
 - [ ] Embedded mode once, on any platform, with no `TS_AUTHKEY`. If it blocks
       printing an interactive login URL, it is unusable as a service and the
       docs must not recommend it.
+- [ ] The supplied Docker Compose deployment on a real Linux VPS: enroll its
+      embedded node with a one-off key, print the trusted URL, recreate it with
+      an empty `TS_AUTHKEY`, and reopen the same URL from another tailnet device.
 - [ ] An installed Windows Chrome or Edge PWA opens from **Open with Airlock**,
       stages the chosen file, completes a send after the owner chooses a device,
       and starts at sign-in when that option is enabled.

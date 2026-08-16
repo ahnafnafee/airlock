@@ -17,8 +17,12 @@ import (
 const manifestPath = "web/manifest.webmanifest"
 
 var (
-	jsImport  = regexp.MustCompile(`(?:from|import)\s*\(?\s*'(\.[^']*)'`)
-	htmlAsset = regexp.MustCompile(`(?:href|src)="/([^"]+)"`)
+	jsImport = regexp.MustCompile(`(?:from|import)\s*\(?\s*'(\.[^']*)'`)
+	// A worker is loaded by URL rather than by import, so it reaches the network
+	// without an import statement naming it and would otherwise be the one kind
+	// of module the check above cannot see.
+	jsWorkerURL = regexp.MustCompile(`new URL\(\s*'(\.[^']*)'\s*,\s*import\.meta\.url`)
+	htmlAsset   = regexp.MustCompile(`(?:href|src)="/([^"]+)"`)
 )
 
 type webManifest struct {
@@ -66,8 +70,10 @@ func TestEveryReferencedWebAssetIsEmbedded(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		for _, m := range jsImport.FindAllStringSubmatch(string(src), -1) {
-			mustBeEmbedded(t, path.Join(path.Dir(p), m[1]), p)
+		for _, re := range []*regexp.Regexp{jsImport, jsWorkerURL} {
+			for _, m := range re.FindAllStringSubmatch(string(src), -1) {
+				mustBeEmbedded(t, path.Join(path.Dir(p), m[1]), p)
+			}
 		}
 		return nil
 	})

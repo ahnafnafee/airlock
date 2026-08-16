@@ -447,15 +447,10 @@ export function makeSessions(deps) {
           // An index outside the chunk list names no position in the bitmap, so
           // storing it would leave a file in the stage that nothing ever reads.
           if (!Number.isInteger(i) || i < 0 || i >= info.cids.length) return;
-          // ponytail: this is the one call in the module that writes to the
-          // origin private file system, and openStage writes through
-          // createSyncAccessHandle, which a browser only allows inside a
-          // dedicated worker. The ceiling is that the receiving half does not
-          // run in the page at all: the first chunk to arrive rejects with
-          // InvalidStateError, while every read the sending half makes stays
-          // main-thread safe. Lift it by moving the stage's writes into a
-          // worker behind a message protocol, keeping openStage's signature, so
-          // this line is the only one that has to stay exactly as it is.
+          // This is the one call in the module that writes to the origin private
+          // file system. The stage answers it from a dedicated worker, since
+          // createSyncAccessHandle is not callable from the page, so the bytes
+          // are handed over here and the write is done by the time it resolves.
           await stage.put(i, bytes);
         },
       }), 'the connection dropped mid-transfer');

@@ -91,7 +91,7 @@ Because the Tailscale certificate makes the page a genuine secure context, the w
 
 - **Android share sheet.** Share a photo from Gallery, pick Airlock, done. This is the affordance people use most, and it costs one manifest entry.
 - **Web Push.** A file lands and your desktop notifies you with the real filename, decrypted locally, because the push itself carries no payload to leak.
-- **Windows file handling.** Right-click a file, Open with, Airlock. Or drag it onto the window.
+- **Windows file handling.** Right-click a PDF, an image, an archive, Open with, Airlock. Chrome makes a file handler name the types it accepts, so the list is the common ones; dragging onto the window is the path that covers every other type.
 - **Launch at login**, so it is simply always there.
 
 No native Android app. No native Windows app. Airlock is browser-only on purpose: a native shell was designed for one capability the PWA cannot provide, writing a received file to disk with the app closed, and cut because its price was a second implementation of the crypto. Two implementations of a cipher drift, and drift there does not fail loudly, it produces files that download successfully and will not open. Notification-then-tap costs a second and buys exactly one place where encryption happens.

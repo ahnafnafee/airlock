@@ -19,7 +19,8 @@ import (
 	"time"
 )
 
-//go:embed web/index.html web/tokens.css web/app.css web/api.js web/app.js web/crypto.js web/cdc.js web/upload.js web/strip.js web/sw.js web/views
+//go:embed web/index.html web/tokens.css web/app.css web/api.js web/app.js web/crypto.js web/cdc.js web/upload.js web/strip.js web/thumb.js web/sw.js web/views
+//go:embed web/manifest.webmanifest web/icon-192.png web/icon-512.png web/icon-maskable.png
 var webFS embed.FS
 
 var (

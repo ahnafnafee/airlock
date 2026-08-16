@@ -1,6 +1,6 @@
 import {
   DOMAIN, MODE_SEALED, openChunk, openRecord, unpackHashes, modeOf, loadMaster,
-  b64decode,
+  b64decode, kvPut,
 } from './crypto.js';
 
 // Registered with {type:'module'} so these imports work.
@@ -14,10 +14,34 @@ self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
+
   if (event.request.method === 'GET' && url.pathname.startsWith('/dl/')) {
     event.respondWith(download(url.pathname.slice(4)));
+    return;
+  }
+  if (event.request.method === 'POST' && url.pathname === '/share') {
+    event.respondWith(stashShare(event.request));
   }
 });
+
+// The share payload arrives as plaintext and the server can never see it, so it
+// is stashed locally and the page encrypts and uploads it. This request must
+// never reach the network: it is answered here whatever happens, including when
+// the stash fails, because a POST that falls through to the server would hand it
+// the very bytes the design exists to keep from it.
+async function stashShare(request) {
+  try {
+    const form = await request.formData();
+    const files = form.getAll('files').filter((f) => f instanceof File);
+    const text = [form.get('title'), form.get('text'), form.get('url')]
+      .filter(Boolean).join('\n');
+    await kvPut('pending-share', { files, text });
+  } catch (err) {
+    console.warn('share stash failed', err);
+  }
+  // 303 so the browser turns the POST into a GET. The page reads the stash.
+  return Response.redirect('/?share=1', 303);
+}
 
 self.addEventListener('push', (event) => {
   event.waitUntil(announce());

@@ -1,6 +1,6 @@
 import {
   MODE_SEALED, deriveMaster, makeCheck, verifyCheck,
-  saveMaster, loadMaster, b64decode,
+  saveMaster, loadMaster, b64decode, kvGet, kvPut,
 } from './crypto.js';
 import { api, ApiError } from './api.js';
 
@@ -89,6 +89,39 @@ function enterApp() {
   const first = location.hash.slice(1);
   showView(views.has(first) ? first : views.keys().next().value);
   subscribePush();
+  // Like push, a launch is an enhancement and never a gate. A share that cannot
+  // be replayed leaves the app open on the send view rather than refusing to
+  // start.
+  handleLaunch().catch((err) => console.warn('launch handling failed', err));
+}
+
+// The two ways the operating system hands this app something to send. Both end
+// in the send view's own upload loop, never in a copy of it.
+async function handleLaunch() {
+  // Android share sheet: the worker stashed the payload before redirecting here,
+  // because the plaintext POST could not be allowed to reach the server. The
+  // stash is cleared before the upload starts, so a share that fails is not
+  // replayed on every later visit.
+  if (new URLSearchParams(location.search).has('share')) {
+    const pending = await kvGet('pending-share');
+    await kvPut('pending-share', null);
+    history.replaceState(null, '', '/');
+    if (pending) {
+      showView('send');
+      const { sendFiles, sendText } = await import('./views/send.js');
+      if (pending.files?.length) await sendFiles(pending.files);
+      else if (pending.text) await sendText(pending.text);
+    }
+  }
+  // Windows Open with: Chrome hands the app the files it was launched on.
+  if ('launchQueue' in window) {
+    window.launchQueue.setConsumer(async (params) => {
+      if (!params.files?.length) return;
+      showView('send');
+      const { sendFiles } = await import('./views/send.js');
+      await sendFiles(await Promise.all(params.files.map((h) => h.getFile())));
+    });
+  }
 }
 
 // The VAPID public key is base64url with the padding stripped, and

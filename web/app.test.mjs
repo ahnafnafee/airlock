@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ensurePaired, listen, onDevices, onInbox, retryDelay, __setStreamImpl,
+  ensurePaired, listen, onDevices, onInbox, retryDelay, secureEnough, __setStreamImpl,
   RETRY_BASE_MS, RETRY_CAP_MS,
 } from './app.js';
 
@@ -270,4 +270,22 @@ test('a device roster event has its own live subscribers', () => {
   assert.equal(changed, 1);
   s.last().emit('inbox', {});
   assert.equal(changed, 1, 'an inbox nudge is not a roster mutation');
+});
+
+// Web Crypto exists only on a secure origin, and every key this client holds
+// comes from it. Without this check the passphrase field accepts a passphrase
+// and then reports a TypeError from inside the key derivation, which reads as a
+// broken app rather than as the wrong address. The configuration that reaches
+// it is token mode opened by a LAN address, which is the one Airlock's own
+// instructions can lead someone to.
+test('an origin without web crypto is refused rather than half-run', () => {
+  const subtle = {};
+  assert.equal(secureEnough({ isSecureContext: true, crypto: { subtle } }), true);
+
+  // A LAN address over plain HTTP: the flag is false and subtle is absent.
+  assert.equal(secureEnough({ isSecureContext: false, crypto: {} }), false);
+  // Some engines leave the flag true but still withhold subtle.
+  assert.equal(secureEnough({ isSecureContext: true, crypto: {} }), false);
+  assert.equal(secureEnough({ isSecureContext: true }), false);
+  assert.equal(secureEnough({}), false);
 });

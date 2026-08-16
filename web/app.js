@@ -475,7 +475,25 @@ async function waitForApproval() {
   $('pairing').hidden = true;
 }
 
+// Web Crypto exists only on a secure origin, and every key this client holds
+// comes from it. An insecure origin is therefore not a degraded mode, it is no
+// mode at all: without this the passphrase field accepts a passphrase and then
+// reports a TypeError from deep inside the key derivation, which reads as a
+// broken app rather than as the wrong address.
+//
+// Tailscale mode always serves HTTPS and localhost is exempt from the rule, so
+// the configuration that lands here is token mode reached by a LAN address.
+export function secureEnough(scope = globalThis) {
+  return Boolean(scope.isSecureContext && scope.crypto && scope.crypto.subtle);
+}
+
 async function boot() {
+  if (!secureEnough()) {
+    const where = $('insecure-origin');
+    if (where) where.textContent = location.origin;
+    $('insecure').hidden = false;
+    return;
+  }
   // Before the first request, and well before the passphrase. A Home Screen web
   // app on iOS has its own storage partition and shares no IndexedDB, OPFS or
   // service worker registration with the same origin in a Safari tab, so a

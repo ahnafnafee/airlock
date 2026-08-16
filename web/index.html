@@ -44,6 +44,23 @@
   </main>
 </section>
 
+<section id="insecure" hidden>
+  <main>
+    <h2>This address is not secure</h2>
+    <p class="muted">
+      Airlock seals every file in your browser before it goes anywhere, and a
+      browser only offers the sealing key on a secure origin. This page arrived
+      over plain HTTP at <span id="insecure-origin" class="data"></span>, where
+      that key cannot be created, so there is nothing safe to do here.
+    </p>
+    <p class="muted">
+      Reach this server by its tailnet name instead. Tailscale serves it over
+      HTTPS with a real certificate, which is the address Airlock prints when it
+      starts. On the machine running the server, http://localhost works too.
+    </p>
+  </main>
+</section>
+
 <section id="pairing" hidden>
   <main>
     <h2>Waiting for approval</h2>

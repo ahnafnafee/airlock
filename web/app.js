@@ -138,6 +138,7 @@ async function registerWorker() {
 async function loadViews() {
   await import('./views/send.js');
   await import('./views/inbox.js');
+  await import('./views/devices.js');
 }
 
 async function boot() {

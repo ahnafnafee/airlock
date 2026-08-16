@@ -20,6 +20,9 @@ html, body {
 .data { font: var(--data)/1.4 var(--mono); }
 .muted { color: var(--vapor); }
 .bad { color: var(--breach); }
+/* Sealed, in the one sense --seal ever carries: this device holds the key and
+   can read what is on the server. Never used for anything in transit. */
+.sealed { color: var(--seal); }
 
 header {
   display: flex;

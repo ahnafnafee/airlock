@@ -392,14 +392,14 @@ Built task by task from [the implementation plans](./docs/superpowers/plans/), a
 | 17 | History view | ✅ Done |
 | 18 | PWA install, share target and file handlers | ✅ Done |
 | 19 | Server-sent events and a live inbox | ✅ Done |
-| 20 | Relays | 🚫 Canceled |
+| 20 | Relays | 🔁 Superseded, replanned as task 33 |
 | 21 | Android shell with background receive | 🟡 In progress |
 | 22 | Throughput benchmark and the plaintext toggle | ✅ Done |
 | 23 | Deployment and hardening | ✅ Done |
 
-Relays were canceled rather than deferred. They were specified as mirroring transfers to a second instance, and once content stopped passing through a server there was nothing left for a relay to relay that presence and signaling do not already cover.
+Relays were superseded, not canceled. The original task specified mirroring whole transfers to a second instance, and that shape is obsolete now that content does not rest on a server for a second instance to mirror. The replanned relay is a second instance sharing the queue and the signaling relay, so devices talking to different instances can still find each other and then connect directly to each other. It forwards pending transfer records, progress bitmaps, presence and session descriptions, and never a byte of file content. It is deferred behind tasks 27 to 32, and its plan gets written once the queue exists, so it is specified against the real shapes rather than guessed at.
 
-**Designed, not yet built,** tasks 24 to 40. Declining a transfer, rich notifications with accept and decline, staged send and the Windows context menu, presence and signaling, the queue and the progress bitmap, local staging, the direct channel, session orchestration, hold-for-me as the one server-storage path, the screen wake lock, parallel connections with unordered channels, parallel sealing in a single pass over the file, the throughput measurement, running with no flags anywhere, Windows file sharing, installing it anywhere, and verifying what is still unverified.
+**Designed, not yet built,** tasks 24 to 40. Declining a transfer, rich notifications with accept and decline, staged send and the Windows context menu, presence and signaling, the queue and the progress bitmap, local staging, the direct channel, session orchestration, hold-for-me as the one server-storage path, the replanned relay, the screen wake lock, parallel connections with unordered channels, parallel sealing in a single pass over the file, the throughput measurement, running with no flags anywhere, Windows file sharing, installing it anywhere, and verifying what is still unverified. That is eighteen items over seventeen numbers, because parts 5 and 6 of the plan each number a task 33: the replanned relay in one, the wake lock in the other.
 
 **Deliberately not built:** accounts, sharing outside your own tailnet, public links, and any server-side view of plaintext.
 

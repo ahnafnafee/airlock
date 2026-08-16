@@ -98,6 +98,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	events := NewEvents()
 
 	var ln net.Listener
 	var ident IdentityFunc
@@ -125,7 +126,7 @@ func run() error {
 
 	root.Handle("/", NewServer(ServerConfig{
 		Chunks: chunks, Transfers: transfers, Devices: devices, Push: pusher,
-		Ident: ident, DataDir: *dataDir, CDC: cdcDefaults,
+		Events: events, Ident: ident, DataDir: *dataDir, CDC: cdcDefaults,
 		TTLHours: *ttlHours, Salt: salt, Static: static,
 	}))
 

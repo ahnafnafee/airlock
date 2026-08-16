@@ -43,6 +43,7 @@ func newTestServerWithLimits(t *testing.T, allow bool, maxRecord int, maxTotal i
 	static := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<h1>hi</h1>")}}
 	srv := NewServer(ServerConfig{
 		Chunks: chunks, Transfers: transfers, Devices: devices, Push: &Pusher{},
+		Events: NewEvents(),
 		Ident: func(*http.Request) (Identity, bool) {
 			return Identity{Node: "pixel", User: "owner@example.com"}, allow
 		},

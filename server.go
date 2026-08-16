@@ -5,11 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 type Identity struct {
@@ -40,6 +42,7 @@ type ServerConfig struct {
 	Transfers *Transfers
 	Devices   *Devices
 	Push      *Pusher
+	Events    *Events
 	Ident     IdentityFunc
 	DataDir   string
 	CDC       CDCParams
@@ -84,6 +87,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/inbox", g(s.inbox))
 	s.mux.HandleFunc("GET /api/history", g(s.history))
 	s.mux.HandleFunc("POST /api/push/subscribe", g(s.subscribe))
+	s.mux.HandleFunc("GET /api/events", g(s.events))
 
 	// The file_handlers launch URL has to render the app rather than 404.
 	s.mux.HandleFunc("GET /open", g(func(w http.ResponseWriter, r *http.Request) {
@@ -386,7 +390,57 @@ func (s *Server) notifyIfComplete(id, sender string) {
 	if err != nil || !info.Complete {
 		return
 	}
+	// The open stream is the fast path and reaches a running app immediately.
+	// Push covers the case the stream cannot: an app that is not running at all.
+	s.cfg.Events.Publish(info.To, sender)
 	go s.cfg.Push.Notify(info.To, sender)
+}
+
+// events streams nudges to one device for as long as it stays connected. Each
+// one says only that the inbox changed, so the client re-reads it and every
+// filename stays behind the encryption boundary.
+func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	// Without this, a proxy that buffers would hold every nudge until the
+	// connection closed, which is exactly never.
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	// ponytail: nothing caps how many streams one device may hold open, so an
+	// approved device with a thousand tabs costs a thousand idle goroutines. A
+	// personal tailnet holds a handful of devices, so the ceiling is remote.
+	// Lift it by counting subscriptions per node and refusing past a small limit.
+	ch, stop := s.cfg.Events.Subscribe(who(r).Node)
+	defer stop()
+
+	// A periodic comment keeps intermediaries from reaping an idle stream and
+	// tells the client the connection is still alive.
+	ping := time.NewTicker(25 * time.Second)
+	defer ping.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case _, open := <-ch:
+			if !open {
+				return
+			}
+			fmt.Fprint(w, "event: inbox\ndata: 1\n\n")
+			flusher.Flush()
+		case <-ping.C:
+			fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
+		}
+	}
 }
 
 func (s *Server) inbox(w http.ResponseWriter, r *http.Request) {

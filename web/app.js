@@ -93,6 +93,30 @@ function enterApp() {
   // be replayed leaves the app open on the send view rather than refusing to
   // start.
   handleLaunch().catch((err) => console.warn('launch handling failed', err));
+  listen();
+}
+
+const listeners = new Set();
+
+// A view calls this to be told when something arrives. The event carries no
+// detail, so the handler re-reads whatever it needs.
+export function onInbox(fn) { listeners.add(fn); }
+
+// The open stream is what makes the inbox live without asking for a
+// notification permission. Push stays for the case this cannot cover: an app
+// that is not running at all.
+function listen() {
+  const source = new EventSource('/api/events');
+  source.addEventListener('inbox', () => {
+    for (const fn of listeners) fn();
+  });
+  // EventSource reconnects on its own after a drop, so there is nothing to
+  // schedule here. This only reports a stream the browser gave up on.
+  source.addEventListener('error', () => {
+    if (source.readyState === EventSource.CLOSED) {
+      console.warn('event stream closed');
+    }
+  });
 }
 
 // The two ways the operating system hands this app something to send. Both end

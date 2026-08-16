@@ -1,4 +1,4 @@
-import { registerView, state, el } from '../app.js';
+import { registerView, state, el, onInbox } from '../app.js';
 import { api } from '../api.js';
 import { DOMAIN, MODE_SEALED, openRecord, modeOf, b64decode } from '../crypto.js';
 
@@ -53,6 +53,9 @@ registerView('inbox', 'Inbox', (panel) => {
   const list = el('ul', { class: 'rows' });
   panel.append(el('h2', {}, 'Inbox'), list);
   refresh();
+  // The nudge says only that something changed, so the list is re-read rather
+  // than patched from the event.
+  onInbox(() => refresh());
 
   async function refresh() {
     let transfers;

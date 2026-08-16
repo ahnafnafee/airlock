@@ -1,4 +1,4 @@
-import { registerView, state, el } from '../app.js';
+import { registerView, state, el, onInbox } from '../app.js';
 import { api } from '../api.js';
 import { DOMAIN, MODE_SEALED, openRecord, modeOf, b64decode } from '../crypto.js';
 
@@ -55,6 +55,7 @@ registerView('history', 'History', (panel) => {
   const list = el('ul', { class: 'rows' });
   panel.append(el('h2', {}, 'History'), list);
   load();
+  onInbox(() => load());
 
   async function load() {
     let tombstones;

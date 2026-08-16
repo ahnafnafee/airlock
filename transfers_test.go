@@ -553,3 +553,90 @@ func TestDeclineRequiresVisibility(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNotFound for a device it was never sent to", err)
 	}
 }
+
+// transferIDs names what a queue holds. Printing the slice itself would print
+// pointers, which say nothing about which transfer turned up.
+func transferIDs(list []*TransferInfo) []string {
+	ids := []string{}
+	for _, info := range list {
+		ids = append(ids, info.ID)
+	}
+	return ids
+}
+
+func TestProgressIsPerRecipient(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, _ := tr.Create("pixel", []string{"desktop", "laptop"}, []string{cid(1), cid(2)})
+
+	if err := tr.SetProgress(rec.ID, "desktop", []byte{0b01}); err != nil {
+		t.Fatal(err)
+	}
+	desktop, err := tr.Progress(rec.ID, "desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(desktop) != 1 || desktop[0] != 0b01 {
+		t.Fatalf("desktop progress = %v", desktop)
+	}
+	// One device holding a chunk says nothing about another.
+	laptop, err := tr.Progress(rec.ID, "laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(laptop) != 0 {
+		t.Fatalf("laptop progress = %v, want empty", laptop)
+	}
+}
+
+func TestProgressRejectsAWrongSizedBitmap(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1), cid(2)})
+	// Two chunks need one byte. Anything else is a client bug, and accepting it
+	// would leave a bitmap whose bits do not line up with the chunk list.
+	if err := tr.SetProgress(rec.ID, "desktop", []byte{0, 0, 0}); !errors.Is(err, ErrBadID) {
+		t.Fatalf("err = %v, want ErrBadID", err)
+	}
+}
+
+func TestProgressRequiresVisibility(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1)})
+	if err := tr.SetProgress(rec.ID, "laptop", []byte{1}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestQueueListsWhatThisNodeStillOwes(t *testing.T) {
+	tr, _ := newTransfers(t)
+	mine, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1)})
+	theirs, _, _ := tr.Create("laptop", []string{"desktop"}, []string{cid(1)})
+
+	queue, err := tr.Queue("pixel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queue) != 1 || queue[0].ID != mine.ID {
+		t.Fatalf("queue = %v, want only what pixel sent (not %s)", transferIDs(queue), theirs.ID)
+	}
+}
+
+func TestAFullyDeliveredTransferLeavesTheQueue(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1), cid(2)})
+
+	// One of two bits set: the recipient is still missing a chunk.
+	if err := tr.SetProgress(rec.ID, "desktop", []byte{0b01}); err != nil {
+		t.Fatal(err)
+	}
+	if queue, _ := tr.Queue("pixel"); len(queue) != 1 {
+		t.Fatalf("queue = %v, want the partly delivered transfer", transferIDs(queue))
+	}
+	// Both bits set: the only recipient has everything.
+	if err := tr.SetProgress(rec.ID, "desktop", []byte{0b11}); err != nil {
+		t.Fatal(err)
+	}
+	queue, _ := tr.Queue("pixel")
+	if len(queue) != 0 {
+		t.Fatalf("queue = %v, want empty once every recipient has every chunk", transferIDs(queue))
+	}
+}

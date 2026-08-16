@@ -82,11 +82,17 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/transfer/{id}", g(s.getTransfer))
 	s.mux.HandleFunc("DELETE /api/transfer/{id}", g(s.deleteTransfer))
 	s.mux.HandleFunc("POST /api/transfer/{id}/decline", g(s.declineTransfer))
+	// A literal last segment is more specific than the {kind} record patterns
+	// below, so these win and "progress" never reaches the record handlers,
+	// which admit only a closed set of kinds and would reject it.
+	s.mux.HandleFunc("PUT /api/transfer/{id}/progress", g(s.putProgress))
+	s.mux.HandleFunc("GET /api/transfer/{id}/progress", g(s.getProgress))
 	s.mux.HandleFunc("PUT /api/transfer/{id}/{kind}", g(s.putRecord))
 	s.mux.HandleFunc("GET /api/transfer/{id}/{kind}", g(s.getRecord))
 	s.mux.HandleFunc("PUT /api/chunk/{cid}", g(s.putChunk))
 	s.mux.HandleFunc("GET /api/chunk/{cid}", g(s.getChunk))
 	s.mux.HandleFunc("GET /api/inbox", g(s.inbox))
+	s.mux.HandleFunc("GET /api/queue", g(s.queue))
 	s.mux.HandleFunc("GET /api/history", g(s.history))
 	s.mux.HandleFunc("POST /api/push/subscribe", g(s.subscribe))
 	s.mux.HandleFunc("GET /api/events", g(s.events))
@@ -333,6 +339,43 @@ func (s *Server) getRecord(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 	serveFile(w, r, f)
+}
+
+// putProgress records the caller's own progress. The node comes from the gate's
+// verified identity rather than the body, so no device can claim delivery on
+// another's behalf.
+func (s *Server) putProgress(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if fail(w, err) {
+		return
+	}
+	if fail(w, s.cfg.Transfers.SetProgress(r.PathValue("id"), who(r).Node, body)) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) getProgress(w http.ResponseWriter, r *http.Request) {
+	// A sender asks for a recipient's progress, so the node is a parameter here
+	// rather than the caller.
+	node := r.URL.Query().Get("node")
+	if node == "" {
+		node = who(r).Node
+	}
+	bitmap, err := s.cfg.Transfers.Progress(r.PathValue("id"), node)
+	if fail(w, err) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Write(bitmap)
+}
+
+func (s *Server) queue(w http.ResponseWriter, r *http.Request) {
+	list, err := s.cfg.Transfers.Queue(who(r).Node)
+	if fail(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
 }
 
 // putChunk stores one sealed chunk on behalf of a named transfer. The transfer

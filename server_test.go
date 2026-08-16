@@ -741,3 +741,67 @@ func TestSignalRejectsAPayloadThatWouldBreakTheStreamFraming(t *testing.T) {
 		t.Fatalf("code = %d, want 400", code)
 	}
 }
+
+// TestProgressRoutesRoundTripAndDrainTheQueue also pins the route shape: a
+// literal /progress has to win over the {kind} record patterns, which would
+// answer with a 400 for a kind that is not a record.
+func TestProgressRoutesRoundTripAndDrainTheQueue(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	// The test identity is pixel, so a transfer pixel sent to pixel is both in
+	// its queue and writable by it.
+	w := do(t, s, "POST", "/api/transfer", `{"cids":["`+cid(1)+`","`+cid(2)+`"],"to":["pixel"]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create = %d: %s", w.Code, w.Body)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := do(t, s, "PUT", "/api/transfer/"+created.ID+"/progress", "\x01").Code; got != http.StatusNoContent {
+		t.Fatalf("put progress = %d, want 204", got)
+	}
+	w = do(t, s, "GET", "/api/transfer/"+created.ID+"/progress", "")
+	if w.Code != http.StatusOK || w.Body.String() != "\x01" {
+		t.Fatalf("get progress = %d %q, want 200 and the bitmap back", w.Code, w.Body.String())
+	}
+
+	w = do(t, s, "GET", "/api/queue", "")
+	var queue []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &queue); err != nil {
+		t.Fatal(err)
+	}
+	if len(queue) != 1 || queue[0].ID != created.ID {
+		t.Fatalf("queue = %v, want the transfer with a chunk still outstanding", queue)
+	}
+
+	if got := do(t, s, "PUT", "/api/transfer/"+created.ID+"/progress", "\x03").Code; got != http.StatusNoContent {
+		t.Fatalf("put full progress = %d, want 204", got)
+	}
+	w = do(t, s, "GET", "/api/queue", "")
+	queue = nil
+	if err := json.Unmarshal(w.Body.Bytes(), &queue); err != nil {
+		t.Fatal(err)
+	}
+	if len(queue) != 0 {
+		t.Fatalf("queue = %v, want empty once the recipient has every chunk", queue)
+	}
+}
+
+func TestProgressRejectsAWrongSizedBitmapOverHTTP(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	w := do(t, s, "POST", "/api/transfer", `{"cids":["`+cid(1)+`"],"to":["pixel"]}`)
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if got := do(t, s, "PUT", "/api/transfer/"+created.ID+"/progress", "\x00\x00").Code; got != http.StatusBadRequest {
+		t.Fatalf("put oversized bitmap = %d, want 400", got)
+	}
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -402,6 +403,121 @@ func (t *Transfers) list() ([]*TransferInfo, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out, nil
+}
+
+// progressName keeps a recipient's bitmap in its own file, so two recipients
+// writing at the same time never contend and a partial write cannot corrupt
+// somebody else's record. The node name is hashed rather than used directly,
+// because it comes from WhoIs and has no format guarantee that makes it safe as
+// a filename.
+func progressName(node string) string {
+	sum := sha256.Sum256([]byte(node))
+	return "progress-" + hex.EncodeToString(sum[:8])
+}
+
+func bitmapLen(chunks int) int { return (chunks + 7) / 8 }
+
+// SetProgress records which chunks a recipient has staged, one bit per chunk
+// indexed by position in the transfer's own id list. A bitmap costs about 600
+// bytes for a 20 GB file, where a list of the ids themselves would run to
+// hundreds of kilobytes and be re-sent on every update.
+//
+// The server never infers this. The receiver writes it once the chunks are on
+// its own disk, because a server that guessed from what it had handed out would
+// be wrong exactly when it mattered, after a crash.
+func (t *Transfers) SetProgress(id, node string, bitmap []byte) error {
+	info, err := t.Get(id)
+	if err != nil {
+		return err
+	}
+	if !visibleTo(info.Sender, info.To, node) {
+		return ErrNotFound
+	}
+	if len(bitmap) != bitmapLen(len(info.Cids)) {
+		// A bitmap of the wrong length has bits that do not line up with the
+		// chunk list, which would silently mark the wrong chunks delivered.
+		return ErrBadID
+	}
+	dir, err := t.transferDir(id)
+	if err != nil {
+		return err
+	}
+	p := filepath.Join(dir, progressName(node))
+
+	t.recMu.Lock()
+	defer t.recMu.Unlock()
+	// Measured but not admitted against the quota, for the reason writeMetaJSON
+	// gives: the file is one bounded bitmap per recipient, and refusing it on a
+	// full disk would strand the transfer that is trying to finish. The
+	// measurement still has to happen, because removing the transfer later gives
+	// these bytes back and a total that never took them in would drift low.
+	before := fileSize(p)
+	if err := atomicWrite(p, bitmap); err != nil {
+		return err
+	}
+	t.recUsed += fileSize(p) - before
+	return nil
+}
+
+// Progress reports what a recipient has staged. A recipient that has written
+// nothing yet is not an error: it has nothing, which is what an empty bitmap
+// says.
+func (t *Transfers) Progress(id, node string) ([]byte, error) {
+	dir, err := t.transferDir(id)
+	if err != nil {
+		return nil, err
+	}
+	b, err := os.ReadFile(filepath.Join(dir, progressName(node)))
+	if errors.Is(err, os.ErrNotExist) {
+		return []byte{}, nil
+	}
+	return b, err
+}
+
+// Queue is what this node still owes: transfers it sent where some recipient is
+// missing at least one chunk. Opening the app and draining this is how a
+// transfer completes without the sender having to sit and wait.
+func (t *Transfers) Queue(sender string) ([]*TransferInfo, error) {
+	all, err := t.list()
+	if err != nil {
+		return nil, err
+	}
+	out := []*TransferInfo{}
+	for _, info := range all {
+		if info.Sender != sender {
+			continue
+		}
+		if t.fullyDelivered(info) {
+			continue
+		}
+		out = append(out, info)
+	}
+	return out, nil
+}
+
+func (t *Transfers) fullyDelivered(info *TransferInfo) bool {
+	// An unaddressed transfer has no fixed recipient set, so there is no point
+	// at which it is provably delivered to everyone. It leaves the queue on its
+	// TTL like anything else.
+	if len(info.To) == 0 {
+		return false
+	}
+	want := bitmapLen(len(info.Cids))
+	for _, node := range info.To {
+		if contains(info.Declined, node) {
+			continue
+		}
+		bitmap, err := t.Progress(info.ID, node)
+		if err != nil || len(bitmap) != want {
+			return false
+		}
+		for i := range info.Cids {
+			if bitmap[i/8]&(1<<(i%8)) == 0 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Delete removes a transfer on behalf of a device. A caller that cannot see the

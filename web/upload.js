@@ -46,6 +46,18 @@ export async function upload(file, opts) {
     ids.push(await chunkIdentity(mk, mode, plain));
   }
 
+  // A transfer must name at least one chunk. The server enforces that too, but
+  // it reports the refusal as a storage quota failure, which says nothing true
+  // about a zero-byte file. Refuse here so the reason reaching the caption is
+  // the actual one.
+  // ponytail: empty files cannot be sent at all. The ceiling is the server rule
+  // that a transfer names at least one chunk; lifting it means letting the
+  // create path accept an empty chunk list and teaching the receiving side to
+  // rebuild a zero-byte file from an empty chunk list.
+  if (ids.length === 0) {
+    throw new Error('an empty file has no chunks to send');
+  }
+
   const { id, missing } = await api.createTransfer(ids.map((x) => x.cid), to);
   // Every id is checked before it reaches a URL, on both sides of the wire. The
   // server is not hostile, but a malformed id here would build a path by string
@@ -65,6 +77,10 @@ export async function upload(file, opts) {
     // first upload of a mostly-empty disk image as almost entirely held.
     held: ids.filter((x) => !wanted.has(x.cid)).length,
     sent: 0,
+    // How many chunks are on the wire right this instant. The strip paints that
+    // window amber, and amber means in transit and nothing else, so the count
+    // has to come from the uploader rather than be guessed from CONCURRENCY.
+    inflight: 0,
   };
   // Report before uploading anything, so a re-send reads as an immediate wave of
   // already-held chunks rather than a stalled bar.
@@ -83,12 +99,17 @@ export async function upload(file, opts) {
     wanted.delete(cid);
 
     const sealed = await sealChunk(mk, mode, h, cid, plain);
+    // Reported on entry as well as on completion, so the strip can light the
+    // window that is actually moving instead of only the one that has landed.
+    progress.inflight++;
+    onProgress({ ...progress });
     const p = withRetry(() => api.putChunk(cid, id, sealed))
-      .then(() => {
-        progress.sent++;
+      .then(() => { progress.sent++; })
+      .finally(() => {
+        inflight.delete(p);
+        progress.inflight--;
         onProgress({ ...progress });
-      })
-      .finally(() => inflight.delete(p));
+      });
     inflight.add(p);
     if (inflight.size >= CONCURRENCY) await Promise.race(inflight);
   }

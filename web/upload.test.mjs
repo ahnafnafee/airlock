@@ -27,6 +27,10 @@ function fakeApi(held = new Set()) {
   return {
     calls,
     async createTransfer(cids, to) {
+      // The server refuses a transfer that names no chunks. The fake refuses it
+      // too, so the suite can never go green on a request the real server would
+      // reject.
+      if (cids.length < 1) throw new Error('507: storage quota exceeded');
       calls.created.push({ cids, to });
       return { id: 'a'.repeat(32), missing: cids.filter((c) => !held.has(c)) };
     },
@@ -144,13 +148,38 @@ test('plaintext mode uploads unsealed bytes', async () => {
   assert.equal(r.sent, r.total);
 });
 
-test('an empty file still produces a transfer', async () => {
+test('an empty file is refused, with the reason it was actually refused for', async () => {
+  // The server will not create a transfer that names no chunks, and reports the
+  // refusal as a storage quota failure. Sending one anyway would put "storage
+  // quota exceeded" under a zero-byte file, which is untrue about every part of
+  // the situation. The client refuses first and says why.
   const api = fakeApi();
-  const r = await upload(fakeFile(new Uint8Array(0), 'empty.txt'), {
-    mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api,
+  await assert.rejects(
+    upload(fakeFile(new Uint8Array(0), 'empty.txt'), {
+      mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api,
+    }),
+    /empty file/,
+  );
+  assert.equal(api.calls.created.length, 0, 'nothing should reach the server');
+  assert.equal(api.calls.records.length, 0);
+});
+
+test('progress reports how many chunks are on the wire', async () => {
+  // The strip paints that window amber, and amber means in transit and nothing
+  // else. Without a real count the signature element either never shows the
+  // sending state or guesses at it, and a guess can leave a segment pulsing
+  // after the upload has finished.
+  const seen = [];
+  const r = await upload(fakeFile(pseudoRandom(20000, 29)), {
+    mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api: fakeApi(),
+    onProgress: (p) => seen.push({ ...p }),
   });
-  assert.equal(r.total, 0);
-  assert.deepEqual(api.calls.records.map((x) => x.kind).sort(), ['chunklist', 'meta']);
+  assert.ok(r.sent > 0);
+  assert.ok(seen.some((p) => p.inflight > 0), 'some report must show work in flight');
+  assert.ok(seen.every((p) => p.inflight <= 4), 'never more than the concurrency limit');
+  assert.equal(seen.at(-1).inflight, 0, 'nothing may be left in flight at the end');
+  assert.equal(seen.at(-1).sent, r.sent);
+  assert.equal(r.inflight, 0);
 });
 
 test('a file made of repeated chunks reports nothing held on its first send', async () => {

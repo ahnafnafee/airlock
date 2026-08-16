@@ -53,22 +53,36 @@ registerView('send', 'Send', (panel) => {
       // otherwise leave every later success painted as a breach.
       status.className = 'data muted';
       let strip = null;
+      let last = null;
       try {
         const r = await upload(file, {
           mk: state.mk, mode: state.mode, to, cdc: state.config.cdc, api,
           onProgress: (p) => {
             if (!strip) strip = renderStrip(progress, p.total);
+            last = p;
             // Held chunks were never uploaded and must never render as stored:
             // the two colors mean different things and the distinction is the
             // whole point of the strip.
             strip.setRange(0, p.held, 'held');
             strip.setRange(p.held, p.held + p.sent, 'stored');
+            // The chunks on the wire go last, so that inside a segment shared by
+            // several chunks the state that is moving is the one you see.
+            strip.setRange(p.held + p.sent, p.held + p.sent + p.inflight, 'sending');
             status.textContent =
               `${file.name} · ${humanSize(file.size)} · ${p.held} of ${p.total} held`;
           },
         });
+        // Settle the strip. Nothing is in transit once upload resolves, so no
+        // segment may be left pulsing amber.
+        if (strip) {
+          strip.setRange(0, r.held, 'held');
+          strip.setRange(r.held, r.total, 'stored');
+        }
         status.textContent = `Sent ${file.name} · ${r.held} of ${r.total} chunks were already here`;
       } catch (err) {
+        // A failed send leaves nothing in transit either, and the chunks that
+        // never landed are queued, not stored.
+        if (strip && last) strip.setRange(last.held + last.sent, last.total, 'pending');
         status.textContent = `${file.name} did not send. ${err.message}`;
         status.className = 'data bad';
       }

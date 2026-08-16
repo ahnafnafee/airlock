@@ -1,30 +1,40 @@
 :root {
-  /* The ground is a desaturated green-black, the color of a pressure vessel
-     under low light. Deliberately not neutral near-black, which is where every
-     dark tool ends up by default. */
-  --hull: #0E1614;
-  --hull-raised: #16211E;
-  --seam: #24332E;
-  --bone: #E4E7E1;
-  --vapor: #8A9A93;
+  color-scheme: dark;
+  /* Pressure vessel palette, taken directly from the Airlock reference. */
+  --hull: #14181C;
+  --chamber: #1C2228;
+  --hull-active: #232A31;
+  --seam: #2E3841;
+  --seam-strong: #4A5560;
+  --control-seam: #5F7080;
+  --pressure: #E8EDF2;
+  --vapor: #93A1AC;
+  --faint: #8593A0;
 
-  /* Two signal colors, each with one job it never leaves. Amber is always
-     "in transit", green is always "sealed or already held". Neither is ever
-     used for the other's meaning, which is what lets a reader learn the
-     interface once and then read state without reading words. */
+  /* Signal colors keep one meaning each across every view. */
   --sodium: #F0A83C;
   --seal: #4FD1A5;
   --breach: #E8654F;
 
-  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* The reference uses Anybody and Familjen Grotesk. Airlock must also paint
+     without a network request, so installed condensed grotesks lead these
+     stacks and fall back to the platform UI face. */
+  --display: "Arial Narrow", "Aptos Display", "Roboto Condensed", "Helvetica Neue", system-ui, sans-serif;
+  --sans: "Aptos", "Segoe UI", "Helvetica Neue", Arial, system-ui, sans-serif;
+  --utility: "Cascadia Mono", "SFMono-Regular", Consolas, ui-monospace, monospace;
 
-  --label: 11px;
-  --data: 13px;
-  --body: 15px;
-  --title: 20px;
-  --wordmark: 28px;
+  --stencil: 12.5px;
+  --data: 12.5px;
+  --prose: 15.5px;
+  --panel: clamp(2rem, 4.6vw, 3.125rem);
+  --wordmark: 21px;
 
-  --gap: 16px;
-  --radius: 3px;
+  --track-stencil: 0.02em;
+  --track-panel: -0.03em;
+  --track-mark: -0.02em;
+
+  --rail: 212px;
+  --content: 1180px;
+  --strip: clamp(46px, 6vw, 72px);
+  --strip-seam: 3px;
 }

@@ -161,6 +161,9 @@ registerView('send', 'Send', (panel) => {
     class: 'sr-only', role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true',
   });
   const progress = el('div', { 'aria-live': 'off' });
+  // The key to the strip above it. Hidden until a strip has more than one state
+  // to tell apart, because a legend for a single color explains nothing.
+  const key = el('div', { hidden: true });
 
   panel.append(
     el('h2', {}, 'Send'),
@@ -180,10 +183,11 @@ registerView('send', 'Send', (panel) => {
     stagedList,
     sendButton,
     progress,
+    key,
     status,
     announcement);
 
-  controls = { recipient, hold, progress, status, announcement };
+  controls = { recipient, hold, progress, key, status, announcement };
 
   // Rebuilt whole rather than patched, so the index each Remove closes over is
   // the index that row now has. Same row shape the inbox uses: the text block
@@ -466,7 +470,7 @@ function paintStrip(strip, p) {
 
 async function sendNow(files) {
   const {
-    recipient, hold, progress, status, announcement,
+    recipient, hold, progress, key, status, announcement,
   } = requireControls();
   const to = recipient.value ? [recipient.value] : [];
   // Read once for the whole batch, so a stray click mid-send cannot split one
@@ -478,6 +482,8 @@ async function sendNow(files) {
   announcement.textContent = '';
   for (const file of files) {
     progress.replaceChildren();
+    key.replaceChildren();
+    key.hidden = true;
     // Reset the tone as well as the text: a failure earlier in the batch would
     // otherwise leave every later success painted as a breach.
     status.className = 'data muted';
@@ -494,7 +500,7 @@ async function sendNow(files) {
           // the file size. A strip with the wrong number of segments is the one
           // thing this element must never be.
           if (!strip && p.total) strip = renderStrip(progress, p.total);
-          if (strip) paintStrip(strip, p);
+          if (strip) { paintStrip(strip, p); strip.legend(key); }
           // On the direct path nothing is held and nothing is on a wire: the
           // count is chunks sealed onto this device. Until the file has been cut
           // there is no total to count against, so the caption counts alone and
@@ -522,7 +528,10 @@ async function sendNow(files) {
         : await sendImpl.direct(file, { ...opts, openStage });
       // Settle the strip. Nothing is in transit once either path resolves, so no
       // segment may be left pulsing amber.
-      if (strip) paintStrip(strip, { ...r, inflightAt: [], inflight: 0 });
+      if (strip) {
+        paintStrip(strip, { ...r, inflightAt: [], inflight: 0 });
+        strip.legend(key);
+      }
       status.textContent = onServer
         ? `Sent ${file.name} · ${r.held} of ${r.total} chunks were already here`
         // The same words the checkbox promised, so the confirmation reads as
@@ -534,7 +543,10 @@ async function sendNow(files) {
     } catch (err) {
       // A failed send leaves nothing in transit either, and the chunks that
       // never landed are queued, not stored.
-      if (strip && last) strip.setRange(last.held + last.sent, last.total, 'pending');
+      if (strip && last) {
+        strip.setRange(last.held + last.sent, last.total, 'pending');
+        strip.legend(key);
+      }
       status.textContent = `${file.name} did not send. ${err.message}`;
       status.className = 'data bad';
       announcement.textContent = status.textContent;

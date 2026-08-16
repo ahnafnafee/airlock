@@ -1,275 +1,671 @@
 * { box-sizing: border-box; }
 
-html, body {
+html {
+  min-height: 100%;
+  background: var(--hull);
+}
+
+body {
+  min-height: 100vh;
   margin: 0;
   background: var(--hull);
-  color: var(--bone);
-  font: var(--body)/1.5 var(--sans);
+  color: var(--pressure);
+  font: var(--prose)/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
   -webkit-text-size-adjust: 100%;
 }
 
-/* Labels are the identity of this interface: mono, uppercase, tracked wide,
-   small. Machine labeling reads as machine labeling. */
+a { color: var(--seal); }
+a:hover { color: #7FE0C0; }
+
 .label {
-  font: var(--label)/1.2 var(--mono);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--vapor);
+  color: var(--faint);
+  font: 600 var(--stencil)/1.25 var(--sans);
+  letter-spacing: var(--track-stencil);
 }
 
-.data { font: var(--data)/1.4 var(--mono); }
+.data {
+  font: 500 var(--data)/1.5 var(--utility);
+}
+
+.data.key { font-weight: 700; }
 .muted { color: var(--vapor); }
 .bad { color: var(--breach); }
-/* Sealed, in the one sense --seal ever carries: this device holds the key and
-   can read what is on the server. Never used for anything in transit. */
 .sealed { color: var(--seal); }
 
-/* The viewport is covered, so every element that reaches an edge of the screen
-   pays for its own inset. Here that is the sides, which is what a notch eats in
-   landscape. */
 header {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--gap);
+  align-items: center;
+  gap: 14px;
+  min-height: 68px;
   padding:
-    var(--gap)
-    calc(var(--gap) + env(safe-area-inset-right, 0px))
-    var(--gap)
-    calc(var(--gap) + env(safe-area-inset-left, 0px));
+    calc(14px + env(safe-area-inset-top, 0px))
+    calc(16px + env(safe-area-inset-right, 0px))
+    14px
+    calc(16px + env(safe-area-inset-left, 0px));
   border-bottom: 1px solid var(--seam);
+  background: var(--chamber);
 }
 
 .wordmark {
-  font: var(--wordmark)/1 var(--mono);
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 11px;
   margin: 0;
+  color: var(--pressure);
+  font: 800 var(--wordmark)/1 var(--display);
+  font-stretch: condensed;
+  letter-spacing: var(--track-mark);
+  text-transform: uppercase;
 }
 
-/* The bottom padding clears the fixed nav bar, so it has to grow by whatever
-   the bar grew by: the bar carries the home indicator's inset and would
-   otherwise rise into the last line of content. */
+.wordmark::before {
+  content: "";
+  width: 25px;
+  height: 18px;
+  flex: none;
+  background:
+    linear-gradient(var(--pressure), var(--pressure)) 0 0 / 11px 18px no-repeat,
+    linear-gradient(var(--seam-strong), var(--seam-strong)) 14px 0 / 11px 2px no-repeat,
+    linear-gradient(var(--seam-strong), var(--seam-strong)) 14px 16px / 11px 2px no-repeat,
+    linear-gradient(var(--seam-strong), var(--seam-strong)) 14px 0 / 2px 18px no-repeat,
+    linear-gradient(var(--seam-strong), var(--seam-strong)) 23px 0 / 2px 18px no-repeat;
+}
+
+#me {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 main {
-  max-width: 760px;
+  width: 100%;
+  max-width: var(--content);
   margin: 0 auto;
   padding:
-    var(--gap)
-    calc(var(--gap) + env(safe-area-inset-right, 0px))
-    calc(96px + env(safe-area-inset-bottom, 0px))
-    calc(var(--gap) + env(safe-area-inset-left, 0px));
+    clamp(24px, 5vw, 42px)
+    calc(16px + env(safe-area-inset-right, 0px))
+    calc(104px + env(safe-area-inset-bottom, 0px))
+    calc(16px + env(safe-area-inset-left, 0px));
 }
-h2 { font: var(--title)/1.3 var(--sans); margin: 0 0 var(--gap); }
 
-/* The hatch. A bounded chamber you put something into. */
-#drop {
-  border: 1px dashed var(--seam);
-  border-radius: var(--radius);
-  background: var(--hull-raised);
-  padding: 48px var(--gap);
-  text-align: center;
-  color: var(--vapor);
-  transition: border-color 120ms ease, color 120ms ease;
+body > section main { max-width: 632px; }
+
+#views > [data-view="send"] { max-width: 660px; }
+
+h2 {
+  margin: 0 0 clamp(20px, 2.6vw, 30px);
+  color: var(--pressure);
+  font: 800 var(--panel)/1 var(--display);
+  font-stretch: condensed;
+  letter-spacing: var(--track-panel);
+  text-wrap: pretty;
 }
-#drop.over { border-color: var(--sodium); color: var(--bone); }
+
+p { text-wrap: pretty; }
+
+/* The drop target is a pressure chamber, not a dashed upload widget. */
+#drop {
+  padding: clamp(28px, 5vw, 62px) clamp(18px, 3vw, 40px);
+  border: 1px solid var(--control-seam);
+  background: var(--chamber);
+  color: var(--pressure);
+  text-align: center;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+#drop.over {
+  border-color: var(--sodium);
+  background: var(--hull-active);
+}
+
+#drop::before {
+  content: "";
+  display: block;
+  width: 100%;
+  max-width: 520px;
+  height: 56px;
+  margin: 0 auto 18px;
+  border: 1px solid var(--seam);
+  background: var(--hull);
+}
+
+#drop > div {
+  font: 700 clamp(1.3rem, 2.5vw, 1.7rem)/1.2 var(--display);
+  font-stretch: condensed;
+  letter-spacing: -0.025em;
+}
+
 #drop button {
-  background: none;
+  min-height: 48px;
+  margin: 22px auto 0;
+  padding: 14px 24px;
   border: 0;
-  padding: 0;
-  color: var(--sodium);
-  font: inherit;
-  text-decoration: underline;
+  background: var(--pressure);
+  color: var(--hull);
+  font: 700 15px/1.2 var(--sans);
   cursor: pointer;
+}
+
+#drop > div button { display: block; }
+
+#drop > button {
+  min-height: 44px;
+  margin-top: 8px;
+  border: 1px solid var(--control-seam);
+  background: transparent;
+  color: var(--pressure);
+  font-weight: 600;
+}
+
+/* The claim this product rests on, stated where it becomes true. Green is a
+   mark here and not the sentence: the color means sealed, and spending it on a
+   whole line of prose would weaken it everywhere else it appears. */
+#drop + .sealed {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 9px;
+  margin: 11px 0 22px;
+  color: var(--vapor);
+  font: 500 13.5px/1.55 var(--sans);
+  letter-spacing: 0;
+}
+
+#drop + .sealed::before {
+  content: "";
+  width: 11px;
+  height: 11px;
+  flex: none;
+  margin-top: 5px;
+  background: var(--seal);
 }
 
 button.primary {
-  background: var(--sodium);
-  color: var(--hull);
+  min-height: 50px;
+  padding: 15px 24px;
   border: 0;
-  border-radius: var(--radius);
-  padding: 10px 18px;
-  font: 600 var(--body)/1 var(--sans);
+  background: var(--pressure);
+  color: var(--hull);
+  font: 700 15px/1.2 var(--sans);
   cursor: pointer;
 }
-/* One authored declaration of the ghost control, so a link that acts as one
-   sits beside a button without a second set of values drifting from these. */
+
+button.primary:hover:not(:disabled),
+#drop button:hover { background: #FFFFFF; }
+
+button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
 .ghost {
-  background: none;
-  color: var(--bone);
-  border: 1px solid var(--seam);
-  border-radius: var(--radius);
-  padding: 8px 14px;
-  font: var(--data)/1 var(--mono);
+  min-height: 44px;
+  padding: 11px 16px;
+  border: 1px solid var(--control-seam);
+  background: transparent;
+  color: var(--pressure);
+  font: 600 13.5px/1.2 var(--sans);
   cursor: pointer;
 }
 
-/* A choice that carries its consequence under it rather than beside it, so the
-   box, the decision and what it costs read as one control down to 320px. The
-   box keeps its own size and stays level with the first line rather than
-   centering itself against a note several lines tall. */
-.choice { display: flex; align-items: flex-start; gap: 10px; }
-.choice input[type="checkbox"] { flex: none; margin: 3px 0 0; }
-/* The note sits under the decision it explains rather than trailing it on the
-   same line, where a phone would break it wherever the width happened to run
-   out. */
-.choice .data { display: block; margin-top: 2px; }
+.ghost:hover { border-color: var(--pressure); }
 
-input[type="password"], input[type="text"], select {
-  background: var(--hull-raised);
-  color: var(--bone);
+.choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
   border: 1px solid var(--seam);
-  border-radius: var(--radius);
-  padding: 10px 12px;
-  font: var(--body)/1 var(--sans);
-  width: 100%;
+  background: var(--chamber);
+  cursor: pointer;
 }
 
-:focus-visible { outline: 2px solid var(--sodium); outline-offset: 2px; }
+.choice input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  margin: 3px 0 0;
+  accent-color: var(--seal);
+}
 
-/* Navigation is one element that changes position rather than two designs:
-   fixed to the bottom edge where thumbs are, sticky to the side where a
-   cursor is. */
+.choice .data {
+  display: block;
+  margin-top: 4px;
+}
+
+input[type="password"],
+input[type="text"],
+select {
+  width: 100%;
+  min-height: 50px;
+  padding: 13px 15px;
+  border: 1px solid var(--control-seam);
+  border-radius: 0;
+  background: var(--hull);
+  color: var(--pressure);
+  font: 500 15px/1.2 var(--utility);
+}
+
+select { background-color: var(--chamber); }
+
+:focus-visible {
+  outline: 2px solid var(--pressure);
+  outline-offset: 2px;
+}
+
+#unlock-form {
+  margin-top: 28px;
+  padding: clamp(18px, 2.4vw, 26px);
+  border: 1px solid var(--seam);
+  background: var(--chamber);
+}
+
+#unlock-form p { margin: 0 0 14px; }
+#unlock-form p:last-child { margin-bottom: 0; }
+#unlock-form .primary { width: 100%; }
+#unlock-form label { display: block; margin-bottom: 8px; }
+
+#pairing-strip {
+  margin-top: 28px;
+  padding: 4px;
+  border: 1px solid var(--seam);
+  background: var(--chamber);
+}
+
+#pairing-strip > .strip {
+  margin: 0;
+  border: 0;
+}
+
+#install ol {
+  display: grid;
+  gap: 2px;
+  margin: 28px 0 20px;
+  padding: 0;
+  list-style: none;
+  counter-reset: install-step;
+}
+
+#install li {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 20px;
+  border: 1px solid var(--seam);
+  background: var(--chamber);
+  counter-increment: install-step;
+}
+
+#install li::before {
+  content: counter(install-step);
+  flex: none;
+  color: var(--vapor);
+  font: 800 26px/1 var(--display);
+}
+
 nav {
   position: fixed;
-  inset: auto 0 0 0;
+  z-index: 20;
+  inset: auto 0 0;
   display: flex;
-  background: var(--hull-raised);
   border-top: 1px solid var(--seam);
-  /* The bar owns the bottom edge of a covered viewport, so it holds its buttons
-     above the home indicator instead of behind it, and holds them clear of a
-     notch when the phone is on its side. Longhands, because the rail below
-     replaces the shorthand and must not inherit a bottom inset it does not
-     touch. */
+  background: var(--chamber);
+  padding-right: env(safe-area-inset-right, 0px);
   padding-bottom: env(safe-area-inset-bottom, 0px);
   padding-left: env(safe-area-inset-left, 0px);
-  padding-right: env(safe-area-inset-right, 0px);
 }
+
 nav button {
+  min-width: 0;
+  min-height: 54px;
   flex: 1;
-  background: none;
-  border: 0;
-  border-top: 2px solid transparent;
   padding: 14px 4px;
+  border: 0;
+  border-top: 3px solid transparent;
+  background: transparent;
   color: var(--vapor);
-  font: var(--label)/1 var(--mono);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  font: 600 13px/1.2 var(--sans);
   cursor: pointer;
 }
-nav button[aria-current="page"] { color: var(--bone); border-top-color: var(--sodium); }
 
-@media (min-width: 720px) {
-  /* The rail joins the flow beside the column rather than floating over it, so
-     a window only a little wider than the column cannot leave the nav sitting
-     on top of the content. It sticks so it stays reachable down a long view. */
-  #app { display: flex; align-items: flex-start; }
-  main {
-    flex: 1;
-    min-width: 0;
-    padding-bottom: calc(var(--gap) + env(safe-area-inset-bottom, 0px));
-    /* The rail is against the left edge here, not the column, so the column
-       stops paying for that side. */
-    padding-left: var(--gap);
-  }
-  nav {
-    position: sticky;
-    inset: 0 auto auto auto;
-    order: -1;
-    min-height: 100vh;
-    flex-direction: column;
-    /* Aligned to the top, not centered down the rail. Centering reads on a
-       phone, where the bar is the width of the screen, but down the side of a
-       tall window it strands the labels several hundred pixels below the first
-       line they label. */
-    justify-content: flex-start;
-    border-top: 0;
-    border-right: 1px solid var(--seam);
-    /* The shorthand drops the bar's bottom inset, which is right: a rail does
-       not sit on the bottom edge and a gap there would be stray. It does sit on
-       the left one, which a notch eats in landscape. */
-    padding: var(--gap) 4px 0;
-    padding-left: calc(4px + env(safe-area-inset-left, 0px));
-  }
-  nav button {
-    flex: 0;
-    border-top: 0;
-    border-left: 2px solid transparent;
-    padding: 14px 18px;
-    text-align: left;
-  }
-  nav button[aria-current="page"] { border-left-color: var(--sodium); }
+nav button:hover { color: var(--pressure); }
+
+nav button[aria-current="page"] {
+  border-top-color: var(--pressure);
+  background: var(--hull-active);
+  color: var(--pressure);
 }
 
-/* The chunk strip. Held is --seal because the server already had those bytes,
-   sending is --sodium because they are in transit, and the two never trade
-   meanings. A held segment must never render as stored: that distinction is the
-   only thing on screen that explains why a re-send finished instantly. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Chunk state is the visual signature. It reports real transfer state only. */
 .strip {
   display: flex;
+  gap: 2px;
+  height: var(--strip);
+  margin: 18px 0 8px;
+  padding: 4px;
+  border: 1px solid var(--seam);
+  background: var(--hull);
+}
+
+/* A segment holds its own ground rather than collapsing: below about four
+   pixels the gap is wider than the mark it separates and the strip reads as
+   texture instead of as state. flex-basis 0 with a weight is what lets a
+   caller give segments the widths their chunks actually have, since content
+   defined chunks are not equal and drawing them equal is a small lie about
+   where a file's boundaries fall. */
+.seg {
+  min-width: 4px;
+  flex: 1 1 0;
+  background: var(--seam);
+}
+
+.seg.held {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--seal);
+  animation: pressure-in 120ms ease both;
+}
+
+.seg.stored { background: var(--seal); }
+
+.seg.sending {
+  background: linear-gradient(to top, var(--sodium) 0 64%, var(--seam) 64% 100%);
+  animation: pressure 1.9s ease-in-out infinite;
+}
+
+/* The legend, which is where the four states are learned once. It lists only
+   the states actually on screen: a strip with nothing in transit should not
+   explain amber, and a first transfer should not explain dedup before there is
+   any. The pair that matters is solid against outlined, because that is the
+   difference between bytes that moved and bytes that never had to. */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 20px;
+  margin-top: 16px;
+  color: var(--vapor);
+  font: 500 var(--stencil)/1.4 var(--sans);
+}
+
+.legend > span { display: flex; align-items: center; gap: 8px; }
+
+.legend i {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  background: var(--seam);
+}
+
+.legend i.sending { background: var(--sodium); }
+.legend i.stored { background: var(--seal); }
+.legend i.held { background: transparent; box-shadow: inset 0 0 0 1.5px var(--seal); }
+
+.strip.seam {
+  height: var(--strip-seam);
+  flex: 0 0 100%;
   gap: 1px;
-  height: 22px;
-  margin: var(--gap) 0 6px;
-}
-.seg { flex: 1; border-radius: 1px; background: transparent; box-shadow: inset 0 0 0 1px var(--seam); }
-.seg.held { background: var(--seal); box-shadow: none; animation: fade-in 120ms ease both; }
-.seg.sending { background: var(--sodium); box-shadow: none; animation: cycle 1.4s ease-in-out infinite; }
-.seg.stored { background: var(--vapor); box-shadow: none; }
-
-@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-@keyframes cycle { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
-
-@media (prefers-reduced-motion: reduce) {
-  .seg.held, .seg.sending { animation: none; }
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
-.rows { list-style: none; padding: 0; margin: 0; }
-/* A row that cannot fit its text beside its buttons breaks rather than squeezing
-   one of them. Row gap is tighter than column gap so a broken row still reads as
-   one row and not as two. */
+.strip.seam .seg { background: var(--seam); }
+.strip.seam .seg.held { background: transparent; }
+.strip.seam .seg.stored { background: var(--seal); }
+.strip.seam .seg.sending {
+  background: var(--sodium);
+  animation: pressure 1.9s ease-in-out infinite;
+}
+
+@keyframes pressure-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes pressure {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.62; }
+}
+
+#equalize {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  background: var(--hull);
+  transition: opacity 180ms ease;
+}
+
+#equalize .strip {
+  width: min(900px, 88vw);
+  height: 7px;
+  margin: 0 auto;
+  padding: 0;
+  border: 0;
+}
+
+#equalize .seg { background: var(--seam); box-shadow: none; }
+#equalize.running .seg { animation: equalize 300ms ease both; }
+#equalize.done { opacity: 0; pointer-events: none; }
+
+@keyframes equalize {
+  from { background: var(--seam); transform: scaleY(1); }
+  to { background: var(--seal); transform: scaleY(1); }
+}
+
+.rows {
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--seam);
+  list-style: none;
+}
+
 .rows li {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 10px var(--gap);
-  padding: 14px 0;
+  gap: 12px 18px;
+  min-width: 0;
+  padding: 18px 4px;
   border-bottom: 1px solid var(--seam);
 }
-/* A row is space-between, which splits its free space into one gap per pair of
-   items. With a thumbnail present that is three items and two gaps, so the text
-   would detach from the picture it describes and sit in the middle of the row.
-   Letting the text take all the slack leaves exactly one gap, before the
-   actions.
-   The basis is the width a name is worth reading at, and it is what decides
-   where the row breaks: a line that cannot hold both puts the buttons below
-   rather than driving the name toward zero. It is not a floor. Once they are
-   below, min-width: 0 lets the name take whatever the line has and ellipsize
-   instead of forcing the row wider than its column. */
-.rowtext { flex: 1 1 10rem; min-width: 0; }
-.name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The thumbnail is made on the sending device and arrives sealed, so this is
-   the only place it is ever a picture. It sits square and cropped so a row of
-   them reads as a column regardless of what shape the originals were. */
-.thumb {
-  width: 44px;
-  height: 44px;
-  object-fit: cover;
-  border-radius: var(--radius);
-  background: var(--hull-raised);
-  flex: none;
-}
-/* Held against the right edge whether the buttons sit beside the name or on
-   their own line under it, so the row reads the same either way. They wrap among
-   themselves as a last resort, for the case where even a full line is not enough
-   for all of them. */
-.actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-left: auto; }
-.actions a.ghost { text-decoration: none; display: inline-block; }
 
-/* The staging list sits between two controls rather than under a heading, so it
-   needs a rule of its own on top to read as a bounded list. An empty list has no
-   height, so before anything is staged the button sits one gap under the
-   recipient picker and the rule is not drawn at all. */
-.staged li:first-child { border-top: 1px solid var(--seam); }
-.staged + button.primary { margin-top: var(--gap); }
+.rows li:has(.strip.seam) {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.rows li:has(.strip.seam) .strip.seam { margin-top: 14px; }
+
+.rows li:only-child.muted,
+.rows li:only-child.bad {
+  padding: clamp(28px, 5vw, 54px) clamp(18px, 3vw, 32px);
+  border-right: 1px solid var(--seam);
+  border-left: 1px solid var(--seam);
+  background: var(--chamber);
+}
+
+.rowtext {
+  min-width: 0;
+  flex: 1 1 13.75rem;
+}
+
+.name {
+  overflow: hidden;
+  color: var(--pressure);
+  font: 700 19px/1.2 var(--display);
+  font-stretch: condensed;
+  letter-spacing: -0.024em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowtext > .data { margin-top: 5px; }
+
+.thumb {
+  width: 60px;
+  height: 60px;
+  flex: none;
+  border: 1px solid var(--seam);
+  border-radius: 0;
+  background: var(--chamber);
+  object-fit: cover;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.actions a.ghost {
+  display: inline-block;
+  text-decoration: none;
+}
+
+.staged li:first-child { border-top: 0; }
+.staged + button.primary {
+  width: 100%;
+  margin-top: 16px;
+}
+
+[data-view="devices"] > p {
+  max-width: 62ch;
+  margin: -14px 0 26px;
+}
+
+[data-view="devices"] .rows {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(268px, 1fr));
+  gap: 2px;
+  border-top: 0;
+}
+
+[data-view="devices"] .rows li {
+  align-items: stretch;
+  align-content: flex-start;
+  padding: clamp(16px, 2vw, 22px);
+  border: 1px solid var(--seam);
+  background: var(--chamber);
+}
+
+[data-view="devices"] .rowtext { flex-basis: 100%; }
+[data-view="devices"] .name { font-size: clamp(23px, 2.6vw, 30px); }
+[data-view="devices"] .actions {
+  justify-content: flex-start;
+  margin: 6px 0 0;
+}
 
 [hidden] { display: none !important; }
+
+@media (min-width: 900px) {
+  /* The rail runs the full height of the vessel rather than stopping under the
+     mark. Unlock, pairing and the install gate sit outside #app and so have no
+     nav to paint the lower part of that column, which left the rail reading as
+     a box in the corner on exactly the screens a person sees first. The shell
+     paints it instead, behind both the mark and the nav. */
+  body::before {
+    content: "";
+    position: fixed;
+    z-index: 19;
+    inset: 0 auto 0 0;
+    width: var(--rail);
+    border-right: 1px solid var(--seam);
+    background: var(--chamber);
+  }
+
+  header {
+    position: fixed;
+    z-index: 21;
+    inset: 0 auto auto 0;
+    width: var(--rail);
+    min-height: 82px;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 8px;
+    padding: 18px 18px 18px calc(18px + env(safe-area-inset-left, 0px));
+    border-right: 1px solid var(--seam);
+    border-bottom: 0;
+  }
+
+  #me {
+    width: 100%;
+    margin-left: 0;
+    font-size: 11.5px;
+  }
+
+  #app,
+  body > section { margin-left: var(--rail); }
+
+  #views { padding: clamp(34px, 3.4vw, 42px) clamp(24px, 3vw, 40px) 72px; }
+
+  nav {
+    inset: 82px auto 0 0;
+    width: var(--rail);
+    flex-direction: column;
+    justify-content: flex-start;
+    border-top: 0;
+    border-right: 1px solid var(--seam);
+    padding: 0 0 0 env(safe-area-inset-left, 0px);
+  }
+
+  nav button {
+    min-height: 48px;
+    flex: 0;
+    padding: 14px 18px 14px 15px;
+    border-top: 0;
+    border-left: 3px solid transparent;
+    font-size: 15px;
+    text-align: left;
+  }
+
+  nav button[aria-current="page"] {
+    border-top-color: transparent;
+    border-left-color: var(--pressure);
+  }
+}
+
+@media (max-width: 520px) {
+  .wordmark { font-size: 19px; }
+  #me { max-width: 44vw; }
+  nav button { font-size: 11.5px; }
+  .actions { width: 100%; }
+  .actions .ghost { flex: 1 1 auto; }
+  [data-view="devices"] .actions { width: auto; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
+
+  .seg.held,
+  .seg.sending,
+  .strip.seam .seg.sending,
+  #equalize.running .seg { animation: none; }
+
+  #equalize.running .seg { background: var(--seal); }
+}

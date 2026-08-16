@@ -25,12 +25,19 @@ function fakeDom(width) {
     addEventListener() {},
     append(...kids) {
       for (const kid of kids) {
-        kid.clientWidth = this.clientWidth;
+        if (kid && typeof kid === 'object') kid.clientWidth = this.clientWidth;
         this.children.push(kid);
       }
     },
+    replaceChildren(...kids) {
+      this.children = [];
+      this.append(...kids);
+    },
   });
-  globalThis.document = { createElement: make };
+  globalThis.document = {
+    createElement: make,
+    createTextNode: (text) => text,
+  };
   const container = make('div');
   container.clientWidth = width;
   return container;
@@ -108,6 +115,25 @@ test('every chunk reaches a segment whatever count the width chose', () => {
       `a full range over ${total} chunks left ${segments.length} segments unpainted`,
     );
   }
+});
+
+test('the legend names only states that are still visible', () => {
+  const container = fakeDom(288);
+  const legend = fakeDom(288);
+  const strip = renderStrip(container, 4);
+
+  strip.setAll('pending');
+  strip.set(1, 'held');
+  strip.legend(legend);
+  assert.equal(legend.hidden, false);
+  assert.deepEqual(legend.children.map((entry) => entry.children[1]), [
+    'not here yet', 'already held',
+  ]);
+
+  strip.setAll('stored');
+  strip.legend(legend);
+  assert.equal(legend.hidden, true, 'one visible state needs no key');
+  assert.deepEqual(legend.children.map((entry) => entry.children[1]), ['sealed now']);
 });
 
 function renderStripInto(width, total) {

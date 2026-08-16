@@ -5,11 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Airlock</title>
 <link rel="manifest" href="/manifest.webmanifest">
-<meta name="theme-color" content="#0E1614">
+<meta name="theme-color" content="#14181C">
 <link rel="stylesheet" href="/tokens.css">
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
+<!-- The chamber equalizing. Painted over everything for one moment when a
+     passphrase is accepted, so the strip's vocabulary is taught before the
+     first transfer rather than during it. -->
+<div id="equalize" hidden aria-hidden="true"></div>
+
 <header>
   <h1 class="wordmark">Airlock</h1>
   <span id="me" class="data muted"></span>
@@ -17,10 +22,11 @@
 
 <section id="install" hidden>
   <main>
-    <h2>Add Airlock to your Home Screen</h2>
+    <h2>Add to Home Screen</h2>
     <p class="muted">
-      This is a Safari feature, not an App Store app: no Apple developer
-      account, no signing, no review. It is the same tailnet page with an icon.
+      Airlock runs from your Home Screen on iOS. This is a Safari feature, not
+      an App Store app: no Apple developer account, no signing, no review. It is
+      the same tailnet page with an icon.
     </p>
     <p class="muted">
       iOS only lets a web app receive notifications and hold storage reliably
@@ -57,7 +63,10 @@
       It never leaves this device. Every device you set up uses the same one.
     </p>
     <form id="unlock-form">
-      <p><input type="password" id="passphrase" autocomplete="current-password" required></p>
+      <p>
+        <label class="label" for="passphrase">Passphrase</label>
+        <input type="password" id="passphrase" autocomplete="current-password" required>
+      </p>
       <p><button class="primary" type="submit">Unlock</button></p>
     </form>
     <p id="unlock-error" class="bad" role="alert"></p>

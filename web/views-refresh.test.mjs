@@ -393,7 +393,13 @@ test('a successful send refreshes an already-mounted sender inbox locally', asyn
   let refreshes = 0;
   onInbox(() => { refreshes++; });
   sendView.__setSendImpl({
-    server: async () => ({ total: 0, held: 0, sent: 0, inflight: 0 }),
+    server: async (_file, opts) => {
+      opts.onProgress({
+        total: 2, held: 1, sent: 0, inflight: 1,
+        heldAt: [0], storedAt: [], inflightAt: [1],
+      });
+      return { total: 2, held: 1, sent: 1, inflight: 0, heldAt: [0], storedAt: [1] };
+    },
     direct: async () => { throw new Error('the held path was expected'); },
   });
 

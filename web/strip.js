@@ -75,5 +75,32 @@ export function renderStrip(container, total, { seam = false, label = 'Transfer 
       for (let i = segIndex(from); i <= last; i++) apply(segments[i], state);
     },
     setAll(state) { segments.forEach((s) => apply(s, state)); },
+    // Draws the key to whatever is on screen. Solid against outlined is the
+    // pair that carries dedup, and it is the one distinction a reader cannot
+    // guess: without this, a strip of outlines looks like a strip that failed
+    // rather than one that had nothing to move.
+    legend(container) {
+      // Read the painted segments rather than remembering every state ever
+      // applied. A final repaint can replace the last pending segment, and a
+      // legend that retained that old state would contradict the strip above.
+      const showing = new Set(segments.map((seg) => seg.className.slice(4)));
+      const rendered = ORDER.filter((s) => showing.has(s.state));
+      container.replaceChildren(...rendered.map((s) => el(
+        'span',
+        {},
+        el('i', { class: s.state, 'aria-hidden': 'true' }),
+        s.label,
+      )));
+      container.className = 'legend';
+      container.hidden = rendered.length < 2;
+    },
   };
 }
+
+// Canonical order, so the key reads the same on every screen it appears on.
+const ORDER = [
+  { state: 'pending', label: 'not here yet' },
+  { state: 'sending', label: 'in transit' },
+  { state: 'stored', label: 'sealed now' },
+  { state: 'held', label: 'already held' },
+];

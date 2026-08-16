@@ -78,13 +78,38 @@ worker could never register because its script request carries no cookie, an
 unapproved device met a bare error instead of the pairing screen, and the hash
 router ignored the Back gesture.
 
+### Two devices, peer to peer
+
+Two genuinely distinct devices against one server, using the fact that token
+mode names a device by its remote address: `127.0.0.1` and `[::1]` are
+different hosts and, being different origins, hold separate browser storage.
+Not a substitute for two machines on a real network, but it is two identities,
+two stores, two event streams and a real WebRTC session between them.
+
+- The second device met the pairing screen naming itself, and advanced to the
+  passphrase prompt by itself when the first device approved it. No reload.
+- The first device's recipient picker listed the new device although the picker
+  had been built before that device existed.
+- **A direct transfer, the product default, delivered device to device with the
+  server holding none of its chunks.** The recipient's row named the file and
+  offered Save, and the assembled bytes matched the sender's hash exactly.
+- **96 MB in 51 chunks**, same conditions, byte-identical, assembled in 478 ms.
+  The peer path was too fast on loopback to catch in a partial state, which is
+  worth knowing before trying to observe one.
+- **Resume across an outage.** An 8 MB transfer queued to an offline recipient,
+  the server killed for twelve seconds and restarted, the recipient reopened.
+  It completed within two seconds of the recipient returning, with the server
+  still holding none of the five chunks, byte-identical.
+
+That last one failed the first time it was run and is the reason
+`web/app.js` now records a gap on every stream failure rather than only on the
+ones it reopens from. Worth re-running after any change to the event stream or
+the queue drain.
+
 ## Not verified
 
 Nothing below has been run. Do not state any of it as fact in another document.
 
-- [ ] A transfer between **two** devices. Everything observed so far was one
-      device sending to itself. The peer-to-peer path, resume across a network
-      drop, and the recipient's view of a direct transfer are all unobserved.
 - [ ] Web Push actually waking a device whose app is closed.
 - [ ] `tailscale cert <name>` on macOS, for whichever Tailscale variant is
       installed. If it fails, host mode on macOS is not viable and the docs must

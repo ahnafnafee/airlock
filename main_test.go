@@ -51,7 +51,7 @@ func TestDefaultDataDirIsAbsoluteAndPlatformCorrect(t *testing.T) {
 	}
 }
 
-func TestDefaultDataDirHonoursXDGOnUnix(t *testing.T) {
+func TestDefaultDataDirHonorsXDGOnUnix(t *testing.T) {
 	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
 		t.Skip("XDG does not apply here")
 	}

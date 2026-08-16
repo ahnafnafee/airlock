@@ -5,6 +5,7 @@ import {
 import { api, ApiError } from './api.js';
 import { requestPersistence } from './staging.js';
 import { observeCapabilities } from './inbound.js';
+import { needsInstallGate, setBadge } from './ios.js';
 
 export const state = { mk: null, mode: MODE_SEALED, config: null, me: null };
 
@@ -106,6 +107,11 @@ function enterApp() {
     if (views.has(name)) showView(name);
   });
   subscribePush();
+  // The badge is kept current here rather than inside the inbox view, so it
+  // stays right whether or not that view has ever been opened. The nudge says
+  // only that something changed, so the count is re-read rather than adjusted.
+  refreshBadge();
+  onInbox(() => refreshBadge());
   // Like push, a launch is an enhancement and never a gate. A share that cannot
   // be replayed leaves the app open on the send view rather than refusing to
   // start.
@@ -122,6 +128,18 @@ function enterApp() {
   // and takes what is owed to it. Every failure in here is logged: a device that
   // cannot run sessions is still a device that can browse its inbox.
   startSessions().catch((err) => console.warn('session setup failed', err));
+}
+
+// The pending inbound count on the app's own icon. On iOS it is the only rich
+// notification affordance WebKit honors, which is why it is here at all, but it
+// is worth the same on every platform that has the API and none of this asks
+// which platform it is on.
+async function refreshBadge() {
+  try {
+    await setBadge((await api.inbox()).length);
+  } catch (err) {
+    console.warn('the badge was not updated', err);
+  }
 }
 
 // Loaded here rather than imported at the top so the peer connection and the
@@ -142,7 +160,15 @@ async function startSessions() {
   const { drainQueue } = await loading;
   // Asked for before anything is staged, so a queued transfer is not evicted
   // between the two devices being online.
-  await requestPersistence();
+  //
+  // WebKit shows no prompt for this and grants it heuristically, with being
+  // installed to the Home Screen the heuristic that matters. A refusal is not
+  // fatal and does not deserve a screen, but it changes what a queued transfer
+  // is: storage the browser may reclaim under pressure, so one waiting for a
+  // peer that is away can lose its staged chunks and have to start over.
+  if (!await requestPersistence()) {
+    console.warn('storage is not persistent: a queued transfer may be evicted before it is delivered');
+  }
   drainQueue();
   onInbox(() => drainQueue());
 }
@@ -288,6 +314,16 @@ async function waitForApproval() {
 }
 
 async function boot() {
+  // Before the first request, and well before the passphrase. A Home Screen web
+  // app on iOS has its own storage partition and shares no IndexedDB, OPFS or
+  // service worker registration with the same origin in a Safari tab, so a
+  // passphrase set up in the tab would not exist in the installed app. Pairing
+  // here would be setup silently thrown away, which is why this is a gate and
+  // not a suggestion.
+  if (needsInstallGate()) {
+    $('install').hidden = false;
+    return;
+  }
   await loadViews();
   await registerWorker();
 

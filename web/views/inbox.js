@@ -2,6 +2,7 @@ import { registerView, state, el, onInbox } from '../app.js';
 import { api } from '../api.js';
 import { RUNG, exportFile } from '../export.js';
 import { DOMAIN, MODE_SEALED, openRecord, modeOf, b64decode } from '../crypto.js';
+import { isStandalone } from '../ios.js';
 
 // What a row says once a save lands. None of these is a failure: the bytes are
 // on the device and their tags verified during assembly, so the only thing an
@@ -27,9 +28,7 @@ const REPORT = {
 // The decision is made here rather than inside the cascade because a share needs
 // the user gesture this click is part of, and only the click knows it has one.
 function preferShare(file, nav = navigator, win = window) {
-  const standalone = win.matchMedia?.('(display-mode: standalone)').matches
-    || nav.standalone === true;
-  return Boolean(standalone
+  return Boolean(isStandalone(win)
     && typeof win.showSaveFilePicker !== 'function'
     && nav.canShare?.({ files: [file] }));
 }

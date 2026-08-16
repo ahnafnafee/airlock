@@ -332,11 +332,15 @@ Tailnet mode is chosen with `--tailscale-mode`, and the flag defaults to `host`,
 
 **Android, Firefox.** It works, and the picker is all of it. Firefox for Android offers no install, never puts Airlock in the share sheet however the manifest is written, and does not hand a pasted file to a web page. Open Airlock and choose the file. This is the weakest way in of any browser here, so if you would rather start from the other app's share sheet, [Taildrop][taildrop-link] is already on the device with Tailscale and does register there. It puts the file straight into your other device's downloads rather than into Airlock, and it is not encrypted in Airlock's sense, but it covers exactly this gap.
 
-**iOS, Safari.** Open the URL, tap Share, tap **Add to Home Screen**. This is a Safari feature, not an App Store app: no Apple developer account, no signing, no review. It is the same tailnet page with an icon.
+**iOS, Safari.** Open the URL, tap Share, tap **Add to Home Screen**. This is a Safari feature, not an App Store app: no Apple developer account, no signing, no review. It is the same tailnet page with an icon. The floor is iOS 18.4, below which the wake lock does not work in an installed app, Declarative Web Push is absent, and folder selection silently picks nothing.
 
-Do it before setting your passphrase. A Home Screen web app gets its own private storage and cannot see anything set up in the Safari tab, so pairing first means pairing twice.
+Do it before setting your passphrase. A Home Screen web app gets its own private storage and cannot see anything set up in the Safari tab, so pairing first means pairing twice. Airlock does not leave that to memory: opened in a Safari tab on iOS it shows the three install steps and nothing else, and the passphrase field appears only in the installed app.
 
-Safari withholds push notifications, the wake lock and durable storage from a plain tab and grants them to a Home Screen app, which is why Airlock asks for it. iOS also has no Web Share Target, so sending starts inside Airlock rather than from another app's share sheet: tap **Choose files** and pick from Files or Photos. [Taildrop][taildrop-link] is in that share sheet and covers the same gap here that it does on Firefox for Android, on the same terms.
+Safari withholds push notifications, the wake lock and durable storage from a plain tab and grants them to a Home Screen app, which is why Airlock asks for it. What it never grants is a rich notification: buttons, images and coalescing by tag are all ignored, so an arrival on iOS announces the filename, size and sender, and Accept and Decline live in the app the tap opens. The one rich affordance that does work is the count on the Home Screen icon, and that is used on every platform that has it rather than only here.
+
+iOS also has no Web Share Target, so sending starts inside Airlock rather than from another app's share sheet: tap **Choose files** and pick from Files or Photos. [Taildrop][taildrop-link] is in that share sheet and covers the same gap here that it does on Firefox for Android, on the same terms.
+
+**None of the iOS paragraphs above has been run on an iPhone.** [docs/platform-notes.md](./docs/platform-notes.md) lists the six things a device has to answer, receiving a large file in the installed app first among them, and it is the document to trust when the two disagree.
 
 ### Troubleshooting
 
@@ -426,6 +430,7 @@ The server may run anywhere on the tailnet, including a machine that is also a c
 | `web/peer.js`, `web/session.js` | The direct channel, and the queue that drives it |
 | `web/thumb.js` | Sealed thumbnails from a canvas |
 | `web/api.js`, `web/app.js`, `web/strip.js` | Typed API wrapper, shell and routing, the status strip |
+| `web/ios.js` | The install gate, the storage preflight, and the Home Screen badge |
 | `web/views/*.js` | One module per view: send, inbox, history, devices |
 | `web/sw.js` | Decrypt-on-download, push, share target |
 
@@ -526,9 +531,11 @@ Two tasks were cancelled outright rather than deferred.
 
 **The Android shell** existed for one capability a web app cannot provide: writing a received file to disk with the app closed. Its price was a second implementation of the crypto, and drift between two implementations does not fail loudly, it produces files that download successfully and will not open. Notification then tap costs a second and buys exactly one place where encryption happens.
 
-**Designed, not yet built,** tasks 33 to 43: the screen wake lock, parallel connections with fragmentation, parallel sealing in a single pass over the file, the throughput measurement, running with no flags anywhere, Windows file sharing, installing it anywhere, verifying what is still unverified, accepting dropped folders, iOS, and assembling a directly delivered transfer back into a file the browser saves.
+**Designed, not yet built,** tasks 33 to 43: the screen wake lock, parallel connections with fragmentation, parallel sealing in a single pass over the file, the throughput measurement, running with no flags anywhere, Windows file sharing, installing it anywhere, verifying what is still unverified, accepting dropped folders, and assembling a directly delivered transfer back into a file the browser saves.
 
 That last one is the gap worth naming twice. A transfer that crosses directly lands in the recipient's staging area and stops there, so until task 43 lands, **Hold on the server if I go offline** is what actually gets a file onto the other machine.
+
+**iOS is built and unverified.** The install gate, the storage preflight, the announcement-only notification and the Home Screen badge are all written, and not one line of it has been run on an iPhone. [docs/platform-notes.md](./docs/platform-notes.md) holds the six questions a real device has to answer before any of this is stated as fact.
 
 **Deliberately not built:** accounts, sharing outside your own tailnet, public links, and any server-side view of plaintext.
 

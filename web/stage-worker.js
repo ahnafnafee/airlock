@@ -17,7 +17,13 @@ self.addEventListener('message', async (event) => {
   } catch (err) {
     // The message crosses rather than the error, because what a failed write
     // owes the page is a reason, and an Error carrying a DOMException name is
-    // not clonable everywhere.
-    self.postMessage({ ticket, error: String(err?.message || err) });
+    // not clonable everywhere. The name travels beside it because a full disk is
+    // the one failure the caller has to be able to tell from a retryable write,
+    // and the message text for it is different in every engine.
+    self.postMessage({
+      ticket,
+      error: String(err?.message || err),
+      name: String(err?.name || ''),
+    });
   }
 });

@@ -54,6 +54,30 @@ test('a failed write rejects with the reason the worker gave', async () => {
   await assert.rejects(put, /the disk is full/);
 });
 
+test('a quota failure is still recognizable as one after crossing the worker', async () => {
+  // A DOMException is not clonable everywhere, so the reason and the name travel
+  // as strings and the name is put back on this side. The session drops a
+  // partial stage on the strength of that name, and it cannot fall back to
+  // matching the message: every engine words this one differently.
+  const worker = fakeWorker();
+  const write = makeWriter(() => worker);
+  const put = write('f'.repeat(32), 0, new Uint8Array([1]));
+  worker.reply({
+    ticket: worker.posted[0].message.ticket,
+    error: 'The quota has been exceeded.',
+    name: 'QuotaExceededError',
+  });
+  await assert.rejects(put, (err) => err.name === 'QuotaExceededError');
+});
+
+test('a failure the worker did not name stays an ordinary error', async () => {
+  const worker = fakeWorker();
+  const write = makeWriter(() => worker);
+  const put = write('g'.repeat(32), 0, new Uint8Array([1]));
+  worker.reply({ ticket: worker.posted[0].message.ticket, error: 'the handle would not open' });
+  await assert.rejects(put, (err) => err.name === 'Error' && /handle would not open/.test(err.message));
+});
+
 test('a worker that dies fails every write waiting on it', async () => {
   // A write left waiting on a reply that is never coming is a session that
   // neither finishes nor records progress, which is worse than a failed one.

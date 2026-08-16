@@ -4,8 +4,16 @@ import {
 } from './crypto.js';
 import { contentDisposition } from './naming.js';
 import { markCapability } from './inbound.js';
+import { setBadge } from './ios.js';
 
 // Registered with {type:'module'} so these imports work.
+
+// Whether a notification on this browser can carry more than words. WebKit
+// ignores actions, image, icon, badge, renotify, requireInteraction and vibrate,
+// and its tag does not coalesce, so an arrival there announces and the decision
+// happens in the app after a tap. Feature-detected rather than sniffed: the
+// question is what this browser honors and the answer is readable.
+const RICH = typeof Notification !== 'undefined' && 'actions' in Notification.prototype;
 
 const TRANSFER_ID = /^[0-9a-f]{32}$/;
 const CHUNK_ID = /^[0-9a-f]{64}$/;
@@ -152,13 +160,20 @@ async function announce() {
   };
 
   let mk = null;
-  let newest = null;
+  let inbox = [];
   try {
     mk = await loadMaster();
-    [newest] = await (await getOk('/api/inbox')).json();
+    inbox = await (await getOk('/api/inbox')).json();
   } catch {
     return self.registration.showNotification('Airlock', { ...base, body: 'A file is waiting' });
   }
+
+  // Every path below this line has the count, so the badge is set once here
+  // rather than at each of them. It is the one rich affordance WebKit honors and
+  // it needs no key: how many transfers are waiting is not a secret the server
+  // keeps from itself.
+  await setBadge(inbox.length);
+  const [newest] = inbox;
 
   if (!mk) {
     // Reachable but locked. Say so, because "a file is waiting" would leave the
@@ -180,7 +195,12 @@ async function announce() {
   }
 
   const options = {
-    body: `${meta.name}\n${humanSize(meta.size)}`,
+    // Where no button and no image will render, the body is the whole
+    // notification, so it carries the sender too rather than leaving it to a
+    // title the platform may present as the app's name.
+    body: RICH
+      ? `${meta.name}\n${humanSize(meta.size)}`
+      : `${meta.name}\n${humanSize(meta.size)}\nfrom ${newest.sender}`,
     icon: '/icon-192.png',
     badge: '/icon-badge.png',
     // One tag per transfer, so several arrivals stack. A shared tag would
@@ -188,15 +208,19 @@ async function announce() {
     tag: `airlock-${newest.id}`,
     timestamp: new Date(newest.createdAt).getTime(),
     data: { id: newest.id, name: meta.name },
+  };
+  if (RICH) {
     // Two is the practical maximum Android renders. Dismissing is already a
     // swipe, so neither button is spent on it.
-    actions: [
+    options.actions = [
       { action: 'accept', title: 'Accept' },
       { action: 'decline', title: 'Decline' },
-    ],
-    requireInteraction: true,
-  };
-  if (newest.thumb) options.image = `/thumb/${newest.id}`;
+    ];
+    options.requireInteraction = true;
+    // The thumbnail is not lost where this is skipped: it moves to the arrival
+    // screen, which is where the tap lands and where Accept and Decline live.
+    if (newest.thumb) options.image = `/thumb/${newest.id}`;
+  }
 
   // The title is the sending device, because on a personal tailnet the useful
   // question is which of my machines this came from.

@@ -136,6 +136,7 @@ function harness(overrides = {}) {
     receive: overrides.receive || (async () => ({ accepted: true, received: 0 })),
     loadMaster: async () => (overrides.locked ? null : key),
     identity: async () => ME,
+    hasRoom: overrides.hasRoom,
     handshakeMs: overrides.handshakeMs ?? 200,
     flushMs: 50,
     cooldownMs: overrides.cooldownMs ?? 0,
@@ -456,6 +457,91 @@ test('an offer for a transfer this device already declined is refused', async ()
   await h.sessions.handleSignal(offerFrom());
   const decision = await handlers.onOffer({ cids: CIDS });
   assert.equal(decision.accept, false);
+});
+
+test('an offer this device has no room for is refused before a chunk is staged', async () => {
+  // The disk is the constraint the quota does not describe, so a transfer that
+  // cannot fit is refused up front rather than failing at ninety percent.
+  const stage = fakeStage();
+  const asked = [];
+  let handlers = null;
+  const h = harness({
+    stage,
+    hasRoom: async (bytes) => { asked.push(bytes); return false; },
+    receive: async (channel, given) => {
+      handlers = given;
+      return { accepted: false, received: 0 };
+    },
+  });
+
+  await h.sessions.handleSignal(offerFrom());
+  const decision = await handlers.onOffer({ cids: CIDS, size: 9e12 });
+  assert.equal(decision.accept, false);
+  // The reason travels back in the decline frame, so the sending device can say
+  // why rather than reporting a refusal with nothing behind it.
+  assert.match(decision.reason, /room/);
+  assert.deepEqual(asked, [9e12]);
+  assert.equal(stage.store.size, 0);
+});
+
+test('an offer that fits is accepted, so the preflight is a bound and not a refusal', async () => {
+  let handlers = null;
+  const h = harness({
+    hasRoom: async () => true,
+    receive: async (channel, given) => {
+      handlers = given;
+      return { accepted: true, received: 0 };
+    },
+  });
+
+  await h.sessions.handleSignal(offerFrom());
+  assert.deepEqual(await handlers.onOffer({ cids: CIDS, size: 9 }), { accept: true });
+});
+
+test('a staged write refused for quota drops the partial stage and records nothing', async () => {
+  // A stage that can never be completed holds exactly the disk that ran out, and
+  // a bitmap written over it would claim positions this device no longer has.
+  // Held from an earlier session, so the bitmap below has something to lose and
+  // the order of the clear and the write is actually under test.
+  const stage = fakeStage([0]);
+  const quota = new Error('the quota has been exceeded');
+  quota.name = 'QuotaExceededError';
+  stage.put = async () => { throw quota; };
+
+  let handlers = null;
+  const h = harness({
+    stage,
+    receive: async (channel, given) => {
+      handlers = given;
+      // The write rejects, which is what ends the session in production too.
+      await assert.rejects(handlers.onChunk(1, new Uint8Array([1])), /quota/);
+      throw new Error('the connection dropped mid-transfer');
+    },
+  });
+
+  await h.sessions.handleSignal(offerFrom());
+  assert.equal(stage.cleared, 1);
+  // Written after the stage was emptied, so it reports what is actually held.
+  assert.equal(h.log.progress.length, 1);
+  assert.deepEqual([...h.log.progress[0].bitmap], [0]);
+});
+
+test('a staged write that failed for any other reason keeps the stage to resume from', async () => {
+  const stage = fakeStage();
+  stage.put = async () => { throw new Error('the staging worker stopped'); };
+
+  let handlers = null;
+  const h = harness({
+    stage,
+    receive: async (channel, given) => {
+      handlers = given;
+      await assert.rejects(handlers.onChunk(0, new Uint8Array([1])), /worker/);
+      throw new Error('the connection dropped mid-transfer');
+    },
+  });
+
+  await h.sessions.handleSignal(offerFrom());
+  assert.equal(stage.cleared, 0);
 });
 
 test('a chunk index outside the transfer is not staged', async () => {

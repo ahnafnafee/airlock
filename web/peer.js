@@ -27,6 +27,8 @@
 // approaches it; on 10 GbE no browser tab will saturate the wire. Lift it only
 // with a native peer, at the cost of a second implementation of the crypto.
 
+import { isIOS } from './ios.js';
+
 export const WIRE = {
   OFFER: 'offer',
   DECLINE: 'decline',
@@ -135,10 +137,7 @@ export function openChannels(pc, count = CHANNELS_PER_LINK) {
 // connections at once. Opening four there risks trading a working transfer for
 // throughput that a phone's link cannot use anyway.
 export function linkCountFor(navigatorLike = navigator) {
-  const ua = navigatorLike.userAgent || '';
-  const iOS = /iPad|iPhone|iPod/.test(ua)
-    || (ua.includes('Macintosh') && navigatorLike.maxTouchPoints > 1);
-  return iOS ? 1 : LINK_COUNT;
+  return isIOS(navigatorLike) ? 1 : LINK_COUNT;
 }
 
 // Chunk i belongs to link i % linkCount, which is what spreads the transfer

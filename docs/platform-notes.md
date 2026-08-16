@@ -103,6 +103,45 @@ Nothing below has been run. Do not state any of it as fact in another document.
 - [ ] Embedded mode once, on any platform, with no `TS_AUTHKEY`. If it blocks
       printing an interactive login URL, it is unusable as a service and the
       docs must not recommend it.
-- [ ] iOS, on any version. The floor is 18.4 and the app must be installed to
-      the Home Screen. Install before pairing: the storage partition changes.
 - [ ] Android install, and whether the share sheet entry appears.
+
+## iOS, not run on any device
+
+The code is written and none of it has been run on an iPhone or an iPad. The
+floor is 18.4 and the app must be added to the Home Screen: install before
+pairing, because the storage partition changes and a passphrase set in a Safari
+tab does not exist in the installed app.
+
+Six questions, in the order they matter. Record the device and the exact iOS
+version beside each answer, and correct every document that assumed otherwise.
+
+- [ ] **V1, the blocker. Receive a 200 MB file in the installed app and save
+      it.** Service-worker-synthesized downloads have regressed twice in a year
+      and the standalone-mode case traces to a WebKit bug closed to a private
+      radar. The export cascade has three rungs under that one, so a failure
+      here is not automatically send-only any more, but it is the difference
+      between saving with one tap and saving through the share sheet. There is
+      no fallback through Safari either way: the tab is a different partition.
+- [ ] **V2. Start a transfer, lock the screen for two minutes, unlock.** Does it
+      continue, resume, or die? If it dies, the wake lock and a visible "keep
+      this screen on" state become required UI rather than polish.
+- [ ] **V3. Whether Declarative Web Push renders action buttons on 18.4 or
+      later.** Assume no until seen. The code assumes no and feature-detects
+      `actions` on `Notification.prototype`, so a yes only widens what renders.
+- [ ] **V4. Send a 2 GB file from an iPhone** and watch for an iOS-only memory
+      crash, which would point at buffer retention on worker-to-main transfer
+      rather than at the transfer itself.
+- [ ] **V5. Confirm the file picker reaches Photos, Files and iCloud Drive,**
+      and that a file with no extension survives it.
+- [ ] **V6. Whether the save streams to disk or buffers in memory.** If it
+      buffers, iOS gains a hard file-size cap the other platforms do not have,
+      and `PREFLIGHT_FACTOR` in `web/ios.js` must rise from 1.15 to 2.15.
+
+Two more that cost nothing to check while the device is in hand:
+
+- [ ] The install gate itself: a Safari tab shows the Add to Home Screen screen
+      and no passphrase field, and the installed app shows the passphrase field
+      and not the gate.
+- [ ] `navigator.storage.persist()` returning true in the installed app. WebKit
+      shows no prompt and grants it heuristically, and being installed is
+      supposed to be the heuristic.

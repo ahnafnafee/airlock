@@ -97,14 +97,20 @@ export function makeWriter(spawn) {
     if (worker) return worker;
     worker = spawn();
     worker.addEventListener('message', (event) => {
-      const { ticket, error } = event.data || {};
+      const { ticket, error, name } = event.data || {};
       const waiting = pending.get(ticket);
       // A reply to a write nobody is waiting on is not an error. It is a ticket
       // whose caller was already failed by a worker that has since recovered.
       if (!waiting) return;
       pending.delete(ticket);
-      if (error) waiting.reject(new Error(error));
-      else waiting.resolve();
+      if (error) {
+        const failure = new Error(error);
+        // Put back on this side, because a DOMException does not survive the
+        // message. A quota failure has to stay recognizable as one all the way
+        // up to the session, which drops the partial stage on the strength of it.
+        if (name) failure.name = name;
+        waiting.reject(failure);
+      } else waiting.resolve();
     });
     // A worker that failed to load or died mid write leaves every write waiting
     // on a reply that is never coming, and a caller that never settles is a

@@ -15,6 +15,7 @@ import {
 } from './peer.js';
 import { openStage, indexesFrom } from './staging.js';
 import { transfersActive } from './wake.js';
+import { hasRoomFor } from './ios.js';
 import {
   DOMAIN, MODE_SEALED, modeOf, openRecord, unpackHashes, loadMaster, b64decode, b64encode,
 } from './crypto.js';
@@ -418,6 +419,7 @@ export async function assembleTransfer(transferId, { spawn = spawnAssembler } = 
 export function makeSessions(deps) {
   const {
     api, openStage, transport, negotiate, receive, loadMaster, identity,
+    hasRoom = hasRoomFor,
     handshakeMs = HANDSHAKE_MS,
     flushMs = FLUSH_MS,
     cooldownMs = COOLDOWN_MS,
@@ -654,6 +656,12 @@ export function makeSessions(deps) {
       transport.accept(msg, controller.signal),
       handshakeMs, 'the peer never opened a channel', () => controller.abort());
 
+    // Set by a write the disk had no room for, and read once the session has
+    // ended. A partial stage that can never be completed holds exactly the disk
+    // that ran out, so it goes rather than waiting for a resume that would fail
+    // at the same byte.
+    let outOfRoom = false;
+
     try {
       await untilClosed(channelsOf(links), receive(links, {
         onOffer: async (frame) => {
@@ -663,6 +671,15 @@ export function makeSessions(deps) {
           // device stage bytes belonging to nothing it agreed to take.
           if (!sameList(frame.cids, info.cids)) {
             return { accept: false, reason: 'that is not this transfer' };
+          }
+          // Refused up front rather than at ninety percent. The reason travels
+          // back in the decline frame so the sending device can say why, and it
+          // is logged here as well, because this is the device whose disk it is
+          // and the person who can free space is sitting in front of it.
+          if (!await hasRoom(frame.size)) {
+            const reason = `this device has no room for ${frame.size} bytes`;
+            console.warn(`refusing ${info.id}: ${reason}`);
+            return { accept: false, reason };
           }
           return { accept: true };
         },
@@ -675,11 +692,27 @@ export function makeSessions(deps) {
           // file system. The stage answers it from a dedicated worker, since
           // createSyncAccessHandle is not callable from the page, so the bytes
           // are handed over here and the write is done by the time it resolves.
-          await stage.put(i, bytes);
+          try {
+            await stage.put(i, bytes);
+          } catch (err) {
+            // A full disk is not a retryable write, and it is the one failure
+            // the browser reports with no prompt and no way for the owner to
+            // grant more. Failing the session here is what turns it into a
+            // transfer that stopped rather than one that silently held nothing.
+            if (err?.name === 'QuotaExceededError') outOfRoom = true;
+            throw err;
+          }
         },
       }), 'the connection dropped mid-transfer');
     } finally {
       close();
+      // Emptied before the bitmap is written, so what is recorded is what this
+      // device actually still holds. The other order would tell the sender that
+      // positions are landed and then delete them.
+      if (outOfRoom) {
+        await stage.clear().catch(
+          (err) => console.warn('the partial stage was not cleared', err));
+      }
       await writeProgress(info, stage);
     }
   }

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -116,6 +117,33 @@ type Transfers struct {
 	recMu sync.Mutex
 }
 
+// chunkListBytes is what a transfer's sealed chunk list costs on the wire: one
+// 32 byte hash per chunk, wrapped in the record framing the client applies.
+//
+// The 32 is web/crypto.js HASH_LEN and the 29 is its record header, a mode byte
+// plus a 12 byte IV plus a 16 byte tag. They are restated here because the two
+// halves cannot share a constant across the language boundary, and the test
+// beside this pins the relationship so a change on one side fails on the other
+// rather than being discovered by a transfer that dies after it was sealed.
+const (
+	chunkHashBytes   = 32
+	recordFrameBytes = 1 + 12 + 16
+)
+
+func chunkListBytes(chunks int) int64 {
+	return int64(chunks)*chunkHashBytes + recordFrameBytes
+}
+
+// chunksFittingRecord is the largest chunk count whose sealed list the record
+// cap will still accept.
+func chunksFittingRecord(maxRecord int) int {
+	room := (int64(maxRecord) - recordFrameBytes) / chunkHashBytes
+	if room < 1 {
+		return 1
+	}
+	return int(room)
+}
+
 func NewTransfers(dir string, chunks *ChunkStore, ttl time.Duration, maxChunksPerTransfer, maxRecordBytes int) (*Transfers, error) {
 	root := filepath.Join(dir, "transfers")
 	if err := os.MkdirAll(root, 0o700); err != nil {
@@ -126,6 +154,17 @@ func NewTransfers(dir string, chunks *ChunkStore, ttl time.Duration, maxChunksPe
 	used, err := walkBytes(root)
 	if err != nil {
 		return nil, err
+	}
+	// A transfer is named by its chunk list, and that list is one sealed record.
+	// Admitting more chunks than the record cap can carry accepts a transfer whose
+	// list can never be written, so every chunk is cut, sealed and staged and the
+	// failure arrives at the last step, after all the work. The two limits are
+	// configured independently, so the smaller one wins here rather than being
+	// left for a large file to discover.
+	if fits := chunksFittingRecord(maxRecordBytes); maxChunksPerTransfer > fits {
+		log.Printf("max-chunks-per-transfer %d exceeds what max-record %d can list; using %d",
+			maxChunksPerTransfer, maxRecordBytes, fits)
+		maxChunksPerTransfer = fits
 	}
 	t := &Transfers{
 		dir: root, chunks: chunks, ttl: ttl,

@@ -66,14 +66,22 @@ export async function exportFile(file, {
   }
 
   if (typeof win.showSaveFilePicker === 'function') {
+    let writable = null;
     try {
       const handle = await win.showSaveFilePicker({ suggestedName: file.name });
-      const writable = await handle.createWritable();
+      writable = await handle.createWritable();
       // Streamed rather than written whole, so the file's size never becomes a
       // memory cost on this side either.
       await file.stream().pipeTo(writable);
       return RUNG.SAVE_PICKER;
     } catch (err) {
+      // The write is abandoned explicitly, because opening it already replaced
+      // whatever was at the chosen path. A write that failed part way and was
+      // simply dropped would leave a truncated file exactly where the person
+      // asked for a whole one, and the rung below would then report a save that
+      // had in fact damaged their file. Aborting discards the attempt and
+      // leaves the original alone.
+      if (writable) await writable.abort?.().catch(() => {});
       // A dismissed picker is the same decision a canceled share is.
       if (err && err.name === 'AbortError') return RUNG.KEEP;
     }

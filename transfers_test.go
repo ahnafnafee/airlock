@@ -1301,3 +1301,62 @@ func TestAFullyDeliveredTransferLeavesTheQueue(t *testing.T) {
 		t.Fatalf("queue = %v, want empty once every recipient has every chunk", transferIDs(queue))
 	}
 }
+
+// A transfer is named by its chunk list, and that list is one sealed record. If
+// more chunks are admitted than the record cap can carry, the transfer is
+// accepted, every chunk is cut, sealed and staged, and the failure lands on the
+// last write, after all the work and with nothing to show for it. The two
+// limits are configured independently, so the constructor has to reconcile
+// them.
+func TestChunkLimitCannotExceedWhatTheRecordCapCanList(t *testing.T) {
+	dir := t.TempDir()
+	chunks, err := NewChunkStore(dir, 64, 1<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Room for exactly 10 hashes plus the frame, against a limit asking for far
+	// more.
+	maxRecord := 10*chunkHashBytes + recordFrameBytes
+	tr, err := NewTransfers(dir, chunks, time.Hour, 200000, maxRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.maxChunks != 10 {
+		t.Fatalf("maxChunks = %d, want 10: the record cap is the binding limit", tr.maxChunks)
+	}
+
+	// And the reconciled limit is one a real list actually fits inside.
+	if got := chunkListBytes(tr.maxChunks); got > int64(maxRecord) {
+		t.Fatalf("a full chunk list is %d bytes against a %d cap", got, maxRecord)
+	}
+
+	// A transfer at the limit is admitted; one past it is refused up front,
+	// before anything has been sealed.
+	cids := make([]string, tr.maxChunks)
+	for i := range cids {
+		cids[i] = cid(byte(i%9 + 1))
+	}
+	if _, _, err := tr.Create("pixel", nil, cids); err != nil {
+		t.Fatalf("a transfer at the limit was refused: %v", err)
+	}
+	if _, _, err := tr.Create("pixel", nil, append(cids, cid(1))); !errors.Is(err, ErrQuota) {
+		t.Fatalf("one chunk past the limit = %v, want ErrQuota", err)
+	}
+}
+
+// The lower limit is left alone: a record cap with room to spare must not raise
+// a deliberately small chunk limit.
+func TestChunkLimitIsNotRaisedByARoomyRecordCap(t *testing.T) {
+	dir := t.TempDir()
+	chunks, err := NewChunkStore(dir, 64, 1<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, err := NewTransfers(dir, chunks, time.Hour, 5, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.maxChunks != 5 {
+		t.Fatalf("maxChunks = %d, want the configured 5", tr.maxChunks)
+	}
+}

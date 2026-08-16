@@ -527,3 +527,40 @@ test('a stage is never pruned by a caller that did not ask', async () => {
   await source.commit();
   assert.equal(dir.files.has('0'), true);
 });
+
+// Opening a writable already replaced whatever was at the path the person
+// chose. A write that then fails part way and is simply dropped leaves a
+// truncated file exactly where a whole one was asked for, and the rung below
+// goes on to report a save. The attempt has to be abandoned explicitly.
+test('a write that fails part way is abandoned, not left at the chosen path', async () => {
+  let aborted = false;
+  let closed = false;
+  const win = {
+    showSaveFilePicker: async () => ({
+      createWritable: async () => ({
+        // pipeTo writes into this, and the disk gives out half way.
+        getWriter: () => ({
+          write: async () => { throw new Error('no space left on device'); },
+          close: async () => { closed = true; },
+          abort: async () => { aborted = true; },
+          releaseLock: () => {},
+          get closed() { return Promise.resolve(); },
+          get ready() { return Promise.resolve(); },
+        }),
+        abort: async () => { aborted = true; },
+        close: async () => { closed = true; },
+      }),
+    }),
+    URL: { createObjectURL: () => 'blob:x', revokeObjectURL: () => {} },
+  };
+  const { doc } = fakeDom();
+  const file = new File([new Uint8Array(64)], 'report.pdf');
+
+  const rung = await exportFile(file, { nav: {}, doc, win, urls: win.URL });
+
+  assert.equal(aborted, true, 'the half-written file was left at the path the person chose');
+  assert.equal(closed, false, 'a failed write must never be committed');
+  // The bytes still reach the person by the rung below, which is the point of
+  // the cascade.
+  assert.equal(rung, RUNG.DOWNLOAD);
+});

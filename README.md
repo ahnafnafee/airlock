@@ -35,7 +35,14 @@ One Go binary and an installable web app. No accounts, no cloud, no public port.
   - [`4` Deduplicated, delta-synced, resumable](#4-deduplicated-delta-synced-resumable)
   - [`5` Installs like an app](#5-installs-like-an-app)
 - [📦 Installation](#-installation)
+  - [Where to run it](#where-to-run-it)
+  - [Linux, systemd](#linux-systemd)
+  - [macOS, launchd](#macos-launchd)
+  - [Windows, a logon task](#windows-a-logon-task)
+  - [Embedded mode](#embedded-mode)
+  - [Flags](#flags)
   - [Per device](#per-device)
+  - [Troubleshooting](#troubleshooting)
 - [⌨️ Local development](#️-local-development)
 - [🏗 Architecture](#-architecture)
 - [📊 Measured](#-measured)
@@ -160,20 +167,46 @@ Two things must be enabled in the Tailscale admin console, under Settings then F
 - **MagicDNS**, or the server's hostname does not resolve.
 - **HTTPS Certificates**, or there is no trusted certificate, therefore no secure context, therefore no install, push, share target, or download. Airlock does not work without this one.
 
+### Where to run it
+
+**A small VPS is the recommendation, for one reason: a queue is only useful while it is reachable.** A laptop that sleeps is a queue that stops, and the whole point of the server is to hold what one device owes another while that other device is asleep. CPU and memory are not the sizing question. The server moves ciphertext and never decrypts anything, so the smallest instance on offer is enough of both. Disk is the sizing question, because a queued transfer's sealed chunks sit on the server until the recipient collects them or `--ttl-hours` sweeps them. Set `--max-total` under whatever the volume actually holds, and size the volume for the largest thing you expect to have in flight at once.
+
+Nothing in the design needs a VPS, though. **Any always-on machine works**, identically: a home server, a desktop that stays powered, a spare Mac, a small board on the same tailnet. It may even be a machine that is also one of the clients. Pick by uptime, not by hardware.
+
+There is nothing to expose either way. The server joins your tailnet as a node and listens only on its tailnet addresses, so there is no public port to forward and no DNS record to publish. A host firewall that filters per interface still has to admit the tailnet interface, which is the one rule you may need.
+
 ```bash
 go build -o airlock .
-scp airlock your-server:/usr/local/bin/
-scp deploy/airlock.service your-server:/etc/systemd/system/
-scp deploy/sysctl-airlock.conf your-server:/etc/sysctl.d/
+
+# Or cross-compile for the host from wherever you are. Note the .exe: with an
+# explicit -o, the Go toolchain writes exactly the name you give it and does
+# not add the suffix for you.
+GOOS=linux   GOARCH=amd64 go build -o airlock .
+GOOS=darwin  GOARCH=arm64 go build -o airlock .
+GOOS=windows GOARCH=amd64 go build -o airlock.exe .
+```
+
+Then follow the section for the host's operating system.
+
+### Linux, systemd
+
+```bash
+scp airlock your-server:/tmp/
+scp deploy/airlock.service your-server:/tmp/
+scp deploy/sysctl-airlock.conf your-server:/tmp/
 ```
 
 On the server:
 
 ```bash
 sudo useradd --system --home /var/lib/airlock --shell /usr/sbin/nologin airlock
+sudo install -m 0755 /tmp/airlock /usr/local/bin/
+sudo install -m 0644 /tmp/airlock.service /etc/systemd/system/
+sudo install -m 0644 /tmp/sysctl-airlock.conf /etc/sysctl.d/
 
-# Host mode reads the tailscaled local API socket, which is root-owned by
-# default. This is the supported way to hand it to one non-root user.
+# Host mode reads the tailscaled local API socket. Reading it needs no grant at
+# all. Fetching the TLS certificate does, and this is the supported way to hand
+# that to one non-root user.
 sudo tailscale set --operator=airlock
 
 sudo sysctl --system          # UDP buffer sizes, see deploy/sysctl-airlock.conf
@@ -184,7 +217,57 @@ journalctl -u airlock -f
 
 The unit's `StateDirectory=` creates `/var/lib/airlock` at mode 0700 owned by that user, so there is no directory to make by hand. The startup line names the mode and the allowed tailnet users, which is worth reading once: it is the only place the server reports which mode answered.
 
-In `host` mode Airlock answers on the server machine's own tailnet name, `https://<that-machine>.<your-tailnet>.ts.net`. The two modes do not share a URL. `embedded` joins as its own node named by `--hostname`, so it answers on `https://airlock.<your-tailnet>.ts.net` instead, and it needs `TS_AUTHKEY` in the environment the first time it starts:
+A narrower grant than `--operator` exists. Certificate fetching is the single call that needs more than read access, and `TS_PERMIT_CERT_UID=airlock` in `/etc/default/tailscaled`, followed by `sudo systemctl restart tailscaled`, permits exactly that and nothing else. **Unverified:** that was read out of the daemon's source rather than run. Check it on your own machine with `sudo -u airlock tailscale cert <node>.<tailnet>.ts.net` before relying on it, and fall back to `--operator` if it is refused.
+
+The unit carries `AmbientCapabilities=CAP_NET_BIND_SERVICE` only because port 443 is below 1024. Run with `--port 4443`, or any port above 1024, and both capability lines can be deleted.
+
+In `host` mode Airlock answers on the server machine's own tailnet name, `https://<that-machine>.<your-tailnet>.ts.net`.
+
+### macOS, launchd
+
+`deploy/com.airlock.server.plist` is a LaunchDaemon: `RunAtLoad`, `KeepAlive`, an absolute data path, and no forking, because launchd supervises the process it starts and a program that daemonizes is a program launchd believes has died.
+
+```bash
+sudo mkdir -p /usr/local/bin /usr/local/var/airlock
+sudo chmod 700 /usr/local/var/airlock
+sudo install -m 0755 airlock /usr/local/bin/
+sudo install -o root -g wheel -m 0600 deploy/com.airlock.server.plist /Library/LaunchDaemons/
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.airlock.server.plist
+
+tail -f /var/log/airlock.log /var/log/airlock.err.log
+```
+
+Remove it with `sudo launchctl bootout system/com.airlock.server`.
+
+**Nothing in this section was run on macOS.** Two things are worth checking before you count on it, and both are stated as open questions rather than as instructions:
+
+- **Whether your Tailscale build serves the certificate endpoint at all.** The App Store and Standalone variants may not. If they do not, host mode has no TLS on that Mac, therefore no secure context, therefore no installed app, push, share target or download. The check is one command, run as the user Airlock will run as: `tailscale cert <node>.<tailnet>.ts.net`. If it is refused, use a Tailscale package that does serve it, or run in embedded mode, which carries its own node and its own certificate.
+- **Whether a specific-address bind on port 443 still needs root.** Mojave lifted the reserved-port restriction for wildcard binds, and Airlock binds the machine's own tailnet addresses on purpose so the listener is never reachable from the LAN. Do not switch to a wildcard bind to dodge this: that gives away the property the specific bind exists for. A LaunchDaemon runs as root, so the question does not arise for the shipped file, and `--port 4443` retires it entirely.
+
+**App Store Tailscale needs a LaunchAgent instead of a daemon.** That build discovers its API token per GUI user, and root cannot see it, so a daemon cannot reach the local API at all. Put the same file in `~/Library/LaunchAgents`, point the data path somewhere the user owns, and load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.airlock.server.plist`. An agent runs only while that user is logged in, which is the price of the variant.
+
+### Windows, a logon task
+
+```powershell
+go build -o airlock.exe .
+.\deploy\windows\install-service.ps1            # add -Port 4443 if 443 is taken
+```
+
+The script looks for `airlock.exe` beside the repository root and refuses if it is not there. Pass `-ExePath` to run it from anywhere else, `-DataDir` to put the store somewhere other than `%LOCALAPPDATA%\Airlock`, and `-TaskName` to name the task something other than `Airlock`.
+
+No elevation, and no Windows service. `Register-ScheduledTask -AtLogOn` succeeds from an ordinary prompt where `schtasks /sc onlogon` is refused, and a real service would need both elevation and the Service Control Manager protocol implemented inside the binary. A plain console program registered as a service starts, never reports back to the SCM, and is killed with error 1053. Airlock does not speak that protocol, so it is not offered as one.
+
+The script bind-tests the port before it registers anything, and refuses with the port number and the reason if something already holds it. That check is a real bind rather than a look at `netsh`, because the failure that actually bites on Windows is a holder using exclusive addressing, which Winsock reports as access denied rather than as address in use, and the listener table does not distinguish them.
+
+**The limitation to expect:** an Interactive principal is what lets the task register without elevation, and it ties Airlock to your logged-on session. It starts at logon, and it is not expected to survive logoff, so the queue would be unreachable while nobody is signed in. That behavior was not measured, so verify it on your own machine if uptime across logoff matters. Running before anyone logs in is a different install: one elevated registration against a service account, which the script deliberately does not do. This is the strongest argument for the VPS.
+
+Remove it with `.\deploy\windows\uninstall-service.ps1`, which stops and unregisters the task and leaves the data directory alone.
+
+### Embedded mode
+
+The two modes do not share a URL. `host` answers on the machine's own tailnet name; `embedded` joins as its own node named by `--hostname`, so it answers on `https://airlock.<your-tailnet>.ts.net` instead.
+
+`TS_AUTHKEY` belongs to embedded mode and to nothing else. Host mode never reads it, so setting it alongside the default `--tailscale-mode=host` does nothing at all. On systemd the two changes travel together:
 
 ```bash
 sudo systemctl edit airlock
@@ -199,13 +282,18 @@ ExecStart=
 ExecStart=/usr/local/bin/airlock --data /var/lib/airlock --tailscale-mode=embedded
 ```
 
+The key is needed only the first time the node comes up. After that the node's own state lives under `<data>/tsnet`.
+
 Open the URL on any device and choose a passphrase. Every other device enters the same one. It is never sent to the server: it derives a key that stays in that device's IndexedDB, and the server holds only a verifier sealed under it, so a wrong passphrase fails loudly on the next device instead of quietly filling an inbox with records nothing can open.
+
+### Flags
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--auth` | `tailscale` | `tailscale` or `token` |
-| `--data` | `./data` | data directory |
+| `--data` | per platform | data directory. `%LOCALAPPDATA%\Airlock`, `~/Library/Application Support/Airlock`, or `$XDG_DATA_HOME/airlock` falling back to `~/.local/share/airlock` |
 | `--tailscale-mode` | `host` | `host` serves through the machine's tailscaled, `embedded` joins as its own tsnet node |
+| `--port` | `443` | HTTPS port on the tailnet address. Raise it when something else holds 443 |
 | `--hostname` | `airlock` | node name, embedded mode only |
 | `--addr` | `127.0.0.1:8080` | listen address, token mode only |
 | `--allow-users` | node owner | comma-separated tailnet logins |
@@ -218,7 +306,7 @@ Open the URL on any device and choose a passphrase. Every other device enters th
 | `--ttl-hours` | 24 | hours of inactivity before a transfer is swept |
 | `--vapid-subject` | `mailto:airlock@invalid` | contact address carried in the VAPID token sent to push services |
 
-Tailnet mode is chosen with `--tailscale-mode`, and the flag defaults to `host`, so a server started without it is a host-mode server.
+Tailnet mode is chosen with `--tailscale-mode`, and the flag defaults to `host`, so a server started without it is a host-mode server. Every deploy file here passes an absolute `--data`, because a service manager hands the process no useful working directory: a scheduled task starts in System32 and a launch daemon starts in `/`, and a relative path there creates a fresh salt and an empty store, which reads as data loss rather than as a path mistake.
 
 ### Per device
 
@@ -231,6 +319,18 @@ Tailnet mode is chosen with `--tailscale-mode`, and the flag defaults to `host`,
 Do it before setting your passphrase. A Home Screen web app gets its own private storage and cannot see anything set up in the Safari tab, so pairing first means pairing twice.
 
 Safari withholds push notifications, the wake lock and durable storage from a plain tab and grants them to a Home Screen app, which is why Airlock asks for it. iOS also has no Web Share Target, so sending starts inside Airlock rather than from another app's share sheet.
+
+### Troubleshooting
+
+The failures that have actually been hit, and what each one means.
+
+| Symptom | Cause |
+| --- | --- |
+| Bind fails on 443 | Something else holds it, commonly `tailscale serve`. Use `--port 4443` |
+| Bind fails with a permission error on a port that looks free | On Windows another process holds it with exclusive use, which Winsock reports as access denied. Bind-test rather than trusting `netsh` |
+| Every request returns 403, including static files | The request arrived over loopback. Reach Airlock by its tailnet name, not through a local proxy |
+| TLS fails on every connection | HTTPS Certificates is off in the admin console |
+| The host cannot resolve its own name | `tailscale set --accept-dns=true` |
 
 <div align="right">
 
@@ -287,7 +387,7 @@ The three checks that matter most, because these are the ones whose failure look
         data/transfers/<id>/         records and the sealed list
 ```
 
-One Go process joined to the tailnet, with the static assets embedded in the binary. Deploy is one binary plus a systemd unit. No database: records are JSON files and directory scans, with a `ponytail:` note naming SQLite as the upgrade if an inbox ever holds tens of thousands of rows.
+One Go process joined to the tailnet, with the static assets embedded in the binary. Deploy is one binary plus whichever of a systemd unit, a launchd plist or a Windows logon task the host uses. No database: records are JSON files and directory scans, with a `ponytail:` note naming SQLite as the upgrade if an inbox ever holds tens of thousands of rows.
 
 The server may run anywhere on the tailnet, including a machine that is also a client. An always-on box is still the recommendation, because a queue is only useful when it is reachable.
 

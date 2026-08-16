@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Airlock as a macOS LaunchDaemon.
+
+  Install:
+
+    sudo cp deploy/com.airlock.server.plist /Library/LaunchDaemons/
+    sudo chown root:wheel /Library/LaunchDaemons/com.airlock.server.plist
+    sudo chmod 600 /Library/LaunchDaemons/com.airlock.server.plist
+    sudo mkdir -p /usr/local/var/airlock
+    sudo chmod 700 /usr/local/var/airlock
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.airlock.server.plist
+
+  Remove:
+
+    sudo launchctl bootout system/com.airlock.server
+
+  Logs:
+
+    tail -f /var/log/airlock.log /var/log/airlock.err.log
+
+  Airlock never forks. launchd supervises the process it starts, so a program
+  that daemonizes and exits is a program launchd believes has died, and
+  KeepAlive then restarts a corpse in a loop. The binary stays in the
+  foreground and that is the whole arrangement.
+
+  The data directory is given as an absolute path because launchd hands a
+  daemon no useful working directory. WorkingDirectory is set as well, so
+  neither answer depends on the other. A relative path here would create a
+  fresh salt and an empty store somewhere unexpected, which reads as data loss
+  rather than as a path mistake.
+
+  UNVERIFIED, and the first thing to check on a Mac: whether the App Store and
+  Standalone builds of Tailscale serve the certificate endpoint at all. If they
+  do not, host mode has no TLS on this machine, therefore no secure context,
+  therefore no install, push, share target or download. Nothing here was run on
+  macOS. The check is one command, run as the user Airlock will run as:
+
+    tailscale cert your-node.your-tailnet.ts.net
+
+  If that is refused, use the Tailscale package that does serve it, or run
+  Airlock in embedded mode, where it carries its own node and its own
+  certificate and needs no daemon.
+
+  UNVERIFIED, and the second thing to check: whether binding one specific
+  address on port 443 still requires root on macOS. Mojave lifted the reserved
+  port restriction for wildcard binds, and Airlock binds the machine's own
+  tailnet addresses on purpose so the listener is never reachable from the LAN.
+  Do not switch to a wildcard bind to dodge this, because that throws away the
+  property the specific bind exists to give. A LaunchDaemon runs as root, which
+  makes the question moot for this file; it becomes live the moment you add a
+  UserName below. Any port above 1024, passed with the port flag, retires it
+  entirely.
+
+  App Store Tailscale is the case this file does not cover. That build
+  discovers its API token per GUI user and root cannot see it, so a daemon
+  cannot reach the local API at all. Use the same file as a LaunchAgent
+  instead: put it in ~/Library/LaunchAgents, point the data path at somewhere
+  the user owns, and load it with
+
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.airlock.server.plist
+
+  An agent runs only while that user is logged in, which is the price.
+
+  ponytail: this daemon runs as root, which is the default for anything in
+  /Library/LaunchDaemons and is what keeps certificate fetching working with no
+  extra grant. The ceiling is that the whole server has root on the box rather
+  than only what it needs. Upgrade by creating a dedicated user, adding
+  UserName and GroupName keys here, chowning the data directory to it, and
+  granting that user the local API with `sudo tailscale set` and the operator
+  flag. Verify certificates still issue afterwards, since that is the call that
+  needs more than read.
+
+  (XML comments cannot contain two hyphens in a row, which is why flags are
+  named in prose here rather than written out. They appear verbatim in
+  ProgramArguments below, and in full in the README.)
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.airlock.server</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/airlock</string>
+		<string>--data</string>
+		<string>/usr/local/var/airlock</string>
+		<string>--port</string>
+		<string>443</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>/usr/local/var/airlock</string>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>KeepAlive</key>
+	<true/>
+
+	<key>StandardOutPath</key>
+	<string>/var/log/airlock.log</string>
+
+	<key>StandardErrorPath</key>
+	<string>/var/log/airlock.err.log</string>
+</dict>
+</plist>

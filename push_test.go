@@ -65,6 +65,30 @@ func TestSubscribeRejectsMissingEndpoint(t *testing.T) {
 	}
 }
 
+// The server later makes a request to whatever endpoint it stored, so an
+// endpoint that names something other than a push service over https is a way
+// to aim the server at a host of the caller's choosing.
+func TestSubscribeRejectsNonHTTPSEndpoints(t *testing.T) {
+	p, err := NewPusher(t.TempDir(), "mailto:test@invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, endpoint := range []string{
+		"http://192.168.1.1/admin",
+		"file:///etc/passwd",
+		"https:///no-host",
+		"push.example/abc",
+	} {
+		raw := []byte(`{"endpoint":"` + endpoint + `","keys":{"p256dh":"k","auth":"a"}}`)
+		if err := p.Subscribe("pixel", raw); err == nil {
+			t.Fatalf("endpoint %q should be refused", endpoint)
+		}
+	}
+	if p.Count() != 0 {
+		t.Fatalf("count = %d, want 0", p.Count())
+	}
+}
+
 func TestTargetsExcludeTheSenderAndRespectAddressing(t *testing.T) {
 	p, err := NewPusher(t.TempDir(), "mailto:test@invalid")
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -88,6 +89,12 @@ func (p *Pusher) Count() int {
 // Subscribe records one device's push endpoint. The endpoint is the identity: a
 // browser hands back the same one every time until it rotates, so a repeat
 // subscription replaces its predecessor instead of growing the list.
+//
+// The endpoint is the one field here the server later makes a request to, and it
+// arrives from the caller, so it is checked rather than trusted. Requiring https
+// keeps a device that has been taken over from pointing the server at a plain
+// http address on the network it happens to sit on; every real push service
+// speaks https anyway.
 func (p *Pusher) Subscribe(node string, raw []byte) error {
 	var sub webpush.Subscription
 	if err := json.Unmarshal(raw, &sub); err != nil {
@@ -95,6 +102,10 @@ func (p *Pusher) Subscribe(node string, raw []byte) error {
 	}
 	if sub.Endpoint == "" {
 		return errors.New("subscription has no endpoint")
+	}
+	u, err := url.Parse(sub.Endpoint)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return errors.New("subscription endpoint is not an https url")
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()

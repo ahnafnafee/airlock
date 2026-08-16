@@ -93,6 +93,13 @@ function enterApp() {
   // be replayed leaves the app open on the send view rather than refusing to
   // start.
   handleLaunch().catch((err) => console.warn('launch handling failed', err));
+  // A notification tapped on its body rather than on a button lands here, so a
+  // window that was already open moves to the view the worker asked for. An
+  // unknown name is ignored: showView hides every panel it is not given, so
+  // acting on one would leave a blank app.
+  navigator.serviceWorker?.addEventListener('message', (event) => {
+    if (event.data?.type === 'show' && views.has(event.data.view)) showView(event.data.view);
+  });
   listen();
 }
 

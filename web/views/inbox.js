@@ -127,6 +127,23 @@ registerView('inbox', 'Inbox', (panel) => {
     if (openable) {
       actions.append(el('a', { class: 'ghost', href: `/dl/${t.id}`, download: '' }, 'Save'));
     }
+    // Delete removes a transfer for everyone. Decline removes it for you, and
+    // the server deletes it once every addressee has refused. Both are offered,
+    // because a refusal available only from a notification would be missing
+    // wherever the notification was dismissed.
+    actions.append(el('button', {
+      class: 'ghost', type: 'button',
+      onclick: async () => {
+        try {
+          await api.decline(t.id);
+        } catch (err) {
+          detailNode.textContent = `Could not decline. ${err.message}`;
+          detailNode.className = 'data bad';
+          return;
+        }
+        await refresh();
+      },
+    }, 'Decline'));
     actions.append(el('button', {
       class: 'ghost', type: 'button',
       onclick: async () => {

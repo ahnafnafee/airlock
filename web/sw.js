@@ -20,6 +20,10 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(download(url.pathname.slice(4)));
     return;
   }
+  if (event.request.method === 'GET' && url.pathname.startsWith('/thumb/')) {
+    event.respondWith(thumbnail(url.pathname.slice(7)));
+    return;
+  }
   if (event.request.method === 'POST' && url.pathname === '/share') {
     event.respondWith(stashShare(event.request));
   }
@@ -63,11 +67,34 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
+  const id = event.notification.data && event.notification.data.id;
+
   event.waitUntil((async () => {
-    for (const client of await self.clients.matchAll({ type: 'window' })) {
-      if (client.url.startsWith(self.location.origin)) return client.focus();
+    // Decline completes entirely in here. No window opens, and the server stops
+    // holding a file nobody wanted.
+    if (event.action === 'decline' && id) {
+      try {
+        await fetch(`/api/transfer/${id}/decline`, { method: 'POST' });
+      } catch {
+        // The tailnet is down. The transfer simply stays in the inbox, which is
+        // the same place it would have been anyway.
+      }
+      return;
     }
-    return self.clients.openWindow('/');
+    // Accept downloads without opening the app first: this worker answers /dl/,
+    // so the navigation returns an attachment and the browser saves it with its
+    // own progress UI.
+    if (event.action === 'accept' && id) {
+      return self.clients.openWindow(`/dl/${id}`);
+    }
+    for (const client of await self.clients.matchAll({ type: 'window' })) {
+      if (client.url.startsWith(self.location.origin)) {
+        await client.focus();
+        client.postMessage({ type: 'show', view: 'inbox' });
+        return;
+      }
+    }
+    return self.clients.openWindow('/#inbox');
   })());
 });
 
@@ -91,26 +118,105 @@ async function openSealed(mk, domain, id, record) {
   return openRecord(mk, domain, id, record);
 }
 
-// The push itself carries nothing. Everything shown here is decrypted on this
-// device, which is the only place the filename exists in the clear. An unsealed
-// meta record is refused for the same reason a download refuses one: its name
-// would be whatever the writer chose, and a notification is a very good place
-// to put a name nobody can vouch for.
+function humanSize(bytes) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let n = bytes, i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
+}
+
+// The push that woke us says nothing, by design. Everything below is read from
+// the inbox and decrypted on this device, which is the only place a filename
+// exists in the clear. An unsealed meta record is refused for the same reason a
+// download refuses one: its name would be whatever the writer chose, and a
+// notification is a very good place to put a name nobody can vouch for.
 async function announce() {
-  let body = 'A file is waiting';
+  const base = {
+    icon: '/icon-192.png',
+    badge: '/icon-badge.png',
+    tag: 'airlock-generic',
+  };
+
+  let mk = null;
+  let newest = null;
   try {
-    const mk = await loadMaster();
-    const [newest] = await (await getOk('/api/inbox')).json();
-    if (mk && newest && newest.complete) {
-      const meta = JSON.parse(new TextDecoder().decode(
-        await openSealed(mk, DOMAIN.META, newest.id, b64decode(newest.meta))));
-      body = meta.name;
-    }
+    mk = await loadMaster();
+    [newest] = await (await getOk('/api/inbox')).json();
   } catch {
-    // Locked device, or a fetch that failed because Tailscale is down. The
-    // generic line still tells the owner something arrived.
+    return self.registration.showNotification('Airlock', { ...base, body: 'A file is waiting' });
   }
-  return self.registration.showNotification('Airlock', { body, tag: 'inbox' });
+
+  if (!mk) {
+    // Reachable but locked. Say so, because "a file is waiting" would leave the
+    // owner wondering why tapping it shows nothing.
+    return self.registration.showNotification('Airlock', {
+      ...base, body: 'A file is waiting. Unlock this device to open it.',
+    });
+  }
+  if (!newest || !newest.complete) {
+    return self.registration.showNotification('Airlock', { ...base, body: 'A file is waiting' });
+  }
+
+  let meta;
+  try {
+    meta = JSON.parse(new TextDecoder().decode(
+      await openSealed(mk, DOMAIN.META, newest.id, b64decode(newest.meta))));
+  } catch {
+    return self.registration.showNotification('Airlock', { ...base, body: 'A file is waiting' });
+  }
+
+  const options = {
+    body: `${meta.name}\n${humanSize(meta.size)}`,
+    icon: '/icon-192.png',
+    badge: '/icon-badge.png',
+    // One tag per transfer, so several arrivals stack. A shared tag would
+    // silently hide everything but the last file.
+    tag: `airlock-${newest.id}`,
+    timestamp: new Date(newest.createdAt).getTime(),
+    data: { id: newest.id, name: meta.name },
+    // Two is the practical maximum Android renders. Dismissing is already a
+    // swipe, so neither button is spent on it.
+    actions: [
+      { action: 'accept', title: 'Accept' },
+      { action: 'decline', title: 'Decline' },
+    ],
+    requireInteraction: true,
+  };
+  if (newest.thumb) options.image = `/thumb/${newest.id}`;
+
+  // The title is the sending device, because on a personal tailnet the useful
+  // question is which of my machines this came from.
+  return self.registration.showNotification(newest.sender, options);
+}
+
+// Notification images are fetched by the browser process rather than by script,
+// so a blob URL minted here is not reliably reachable from there. An ordinary
+// same-origin URL this worker answers keeps the bytes decrypted on demand and
+// the URL boring.
+async function thumbnail(id) {
+  // This id comes from whatever asked for the image, so it is checked before it
+  // reaches a URL, exactly as a download's is.
+  if (!TRANSFER_ID.test(id)) return new Response('malformed id', { status: 400 });
+  const mk = await loadMaster();
+  if (!mk) return new Response('locked', { status: 403 });
+  try {
+    const info = await (await getOk(`/api/transfer/${id}`)).json();
+    if (!info.thumb) return new Response('no thumbnail', { status: 404 });
+    // Sealed only, for the reason openSealed gives. A plaintext record carries
+    // no authentication tag, so a forged one would be shown as this transfer's
+    // own picture.
+    const bytes = await openSealed(mk, DOMAIN.THUMB, id, b64decode(info.thumb));
+    return new Response(bytes, {
+      headers: {
+        'Content-Type': 'image/jpeg',
+        // A transfer's thumbnail never changes, and the id is derived from the
+        // transfer.
+        'Cache-Control': 'private, max-age=86400',
+      },
+    });
+  } catch {
+    return new Response('cannot open', { status: 500 });
+  }
 }
 
 async function download(id) {

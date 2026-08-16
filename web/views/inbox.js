@@ -285,6 +285,15 @@ registerView('inbox', 'Inbox', (panel) => {
   // than appending it under a newer one's. Two triggers can now land in the same
   // turn, and the interleaved alternative shows every row twice.
   let generation = 0;
+  // The object URLs currently attached to rows on screen. Released when the rows
+  // they belong to are replaced, and never before, because revoking a URL an
+  // <img> is still using can blank it.
+  let showing = [];
+  const release = (urls) => {
+    for (const url of urls) {
+      try { URL.revokeObjectURL(url); } catch { /* already gone */ }
+    }
+  };
 
   refresh();
   // The nudge says only that something changed, so the list is re-read rather
@@ -343,15 +352,29 @@ registerView('inbox', 'Inbox', (panel) => {
       console.warn('the storage note was not read', err);
     }
 
+    // Every thumbnail is a fresh object URL, and this view repaints on every
+    // nudge. Without releasing them the decoded image behind each one is held
+    // for the life of the page, once per repaint per row.
+    const minted = [];
     const rows = [];
     for (const t of transfers) {
-      rows.push(await row(t, shortfallFor));
+      rows.push(await row(t, shortfallFor, minted));
     }
-    if (mine !== generation) return;
+    if (mine !== generation) {
+      // This run lost the race and its rows will never be attached, so nothing
+      // else will ever release what it minted.
+      release(minted);
+      return;
+    }
+    const outgoing = showing;
+    showing = minted;
     list.replaceChildren(...rows);
+    // After the swap: revoking a URL still attached to an <img> in the document
+    // can blank it on some engines.
+    release(outgoing);
   }
 
-  async function row(t, shortfallFor = () => 0) {
+  async function row(t, shortfallFor = () => 0, minted = []) {
     const presentation = await readRow(t, state.mk, openStage, state.me?.node);
     const { name, detail, meta, saveable, note, reach, total, heldAt } = presentation;
     const allowedActions = new Set(rowActions(presentation));
@@ -368,6 +391,7 @@ registerView('inbox', 'Inbox', (panel) => {
         if (modeOf(record) === MODE_SEALED) {
           const bytes = await openRecord(state.mk, DOMAIN.THUMB, t.id, record);
           const url = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
+          minted.push(url);
           thumbEl = el('img', { class: 'thumb', src: url, alt: '', loading: 'lazy' });
         }
       } catch {

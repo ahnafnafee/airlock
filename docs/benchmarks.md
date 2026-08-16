@@ -1314,3 +1314,45 @@ either side of the edit rather than shifting every boundary after it.
 - Chrome only. Firefox and Safari data channel throughput is unmeasured, and
   Safari's is the one most likely to differ.
 - No mobile device, so nothing about a phone's crypto rate or radio.
+
+## The other transfer mode, and a result worth acting on
+
+The section above measured the direct peer path, which is the product default.
+The hold-on-server path had never been measured at all. It is:
+
+| Size | Seal and upload to the server | Fetch, decrypt and assemble |
+| --- | --- | --- |
+| 8 MB | 42 MB/s | 66 MB/s |
+| 32 MB | 53 MB/s | 97 MB/s |
+| 128 MB | 43 MB/s | 109 MB/s |
+
+Set beside the direct path, on the same machine, in the same session:
+
+| Path | Rate |
+| --- | --- |
+| Sealing alone, no transport | 304 MB/s |
+| Hold on the server, upload leg, sealing included | 43 to 53 MB/s |
+| Hold on the server, download leg, decrypt included | 66 to 109 MB/s |
+| Direct, peer to peer | 11.2 MB/s |
+| A raw data channel with no Airlock in it | about 20 MB/s |
+
+**The server path is roughly four times faster than the peer path here.** Both
+legs of it beat the direct transfer, and the download leg beats it by nearly ten
+times. The reason is not Airlock: an HTTP body over TCP is simply a faster way to
+move bytes in a browser than SCTP over DTLS in a data channel, and the raw
+measurement above puts the data channel ceiling near 20 MB/s before any of this
+project's code runs.
+
+That inverts how the two modes are presented. The checkbox reads as a
+convenience for going offline, and the direct path reads as the better one
+because it keeps bytes off the server. On this hardware the direct path is the
+slower choice, and by a wide margin.
+
+**Do not change the default on the strength of this.** The comparison is between
+two tabs in one browser, which is the configuration least favourable to the peer
+path, since both ends contend for the same cores while the server path has a
+whole separate process doing its share. The same table taken between two
+machines could look completely different, and that is the measurement that
+should decide it. What this does establish is that the direct path is not free,
+that its cost is the transport rather than the encryption, and that the
+comparison is worth taking properly.

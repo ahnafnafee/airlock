@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { makeSessions } from './session.js';
+import { liveTransport, makeSessions } from './session.js';
+import { api } from './api.js';
+import { LINK_COUNT } from './peer.js';
 import { bitmapOf } from './staging.js';
 import { DOMAIN, MODE_SEALED, b64encode, sealRecord } from './crypto.js';
 
@@ -499,4 +501,63 @@ test('a malformed transfer id never reaches a URL', async () => {
   await assert.rejects(() => h.sessions.startSend('../../etc/passwd'));
   await assert.rejects(() => h.sessions.startSend('A'.repeat(32)));
   await assert.rejects(() => h.sessions.startSend(''));
+});
+
+// The smallest connection the handshake can talk to. Everything below the
+// channels is answered flatly, because what this is here to exercise is which
+// links survive, not what WebRTC does with a session description.
+function fakeConnection(opens) {
+  const channels = [];
+  return {
+    channels,
+    closed: false,
+    iceGatheringState: 'complete',
+    localDescription: { sdp: 'v=0' },
+    createDataChannel(label) {
+      // A channel that is not going to open stays in 'connecting' and never
+      // fires anything, which is how a browser reports a connection whose
+      // candidates never paired: silence, until it gives up far later.
+      const channel = { label, readyState: opens ? 'open' : 'connecting', addEventListener() {} };
+      channels.push(channel);
+      return channel;
+    },
+    createOffer: async () => ({ type: 'offer', sdp: 'v=0' }),
+    setLocalDescription: async () => {},
+    setRemoteDescription: async () => {},
+    addEventListener() {},
+    removeEventListener() {},
+    close() { this.closed = true; },
+  };
+}
+
+// The timeout is the assertion. Before the per-link deadline existed this hung
+// on Promise.allSettled until the session's handshake deadline took the whole
+// transfer down with it, which is the failure the link deadline exists to stop.
+test('a link that never opens is dropped, and the rest of the transfer goes', { timeout: 5000 }, async () => {
+  const made = [];
+  const realConnection = globalThis.RTCPeerConnection;
+  const realSignal = api.signal;
+  globalThis.RTCPeerConnection = function RTCPeerConnectionStub() {
+    // The first connection stalls; the others open normally.
+    const pc = fakeConnection(made.length > 0);
+    made.push(pc);
+    return pc;
+  };
+  api.signal = async () => {};
+
+  try {
+    const transport = liveTransport({ identity: async () => ME, gatherMs: 0, linkMs: 20 });
+    const opening = transport.open(PEER, ID);
+    await settle();
+    assert.equal(made.length, LINK_COUNT);
+    await transport.answer({ from: PEER, transfer: ID, sdps: made.map(() => 'v=0') });
+
+    const { links } = await opening;
+    assert.equal(links.length, LINK_COUNT - 1, 'the stalled link was not dropped');
+    assert.ok(made[0].closed, 'the dropped link was left holding a connection');
+    for (const pc of made.slice(1)) assert.ok(!pc.closed, 'a working link was closed');
+  } finally {
+    globalThis.RTCPeerConnection = realConnection;
+    api.signal = realSignal;
+  }
 });

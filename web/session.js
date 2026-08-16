@@ -27,6 +27,14 @@ const TRANSFER_ID = /^[0-9a-f]{32}$/;
 // A peer that answered the signal but never opened a channel must not hold the
 // queue behind it.
 const HANDSHAKE_MS = 20000;
+// One link's own deadline, deliberately well inside the handshake's. A browser
+// reports a failed connection as a channel close on the order of thirty
+// seconds, so a link whose candidates never pair up neither opens nor errors in
+// time to be dropped by its own rejection. Without a bound here the slowest link
+// decides the whole handshake, and opening four connections instead of one would
+// make a stalled transfer four times as likely rather than degrading to three
+// working links.
+const LINK_MS = 8000;
 // On a tailnet ICE has nothing to ask a STUN server about, so gathering ends
 // almost at once. This only bounds the wait for the case where it does not.
 const GATHER_MS = 4000;
@@ -90,14 +98,31 @@ function flushed(channel) {
 
 const channelsOf = (links) => links.flatMap((link) => link.channels);
 
+// A link that has not opened by its deadline is treated exactly as one that
+// rejected: dropped from the array, its connection closed. Waiting on the link
+// itself rather than on the whole handshake is the point, because the failure
+// this guards against is a connection that stays silent rather than one that
+// says no.
+function withinDeadline(ready, linkMs) {
+  if (!(linkMs > 0)) return ready;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('the link never opened')), linkMs);
+    ready.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (err) => { clearTimeout(timer); reject(err); });
+  });
+}
+
 // A link whose channels failed to open is dropped rather than failing the whole
 // transfer, so a device that manages two of its four connections still sends at
 // two connections' worth instead of not sending at all. The pcs behind the
-// dropped ones are closed here because nothing else will. A link that neither
-// opens nor fails is a different case and is not distinguishable from a slow
-// one here: the session's handshake deadline is what bounds that.
-async function usableLinks(opening) {
-  const settled = await Promise.allSettled(opening.map((link) => link.ready));
+// dropped ones are closed here because nothing else will, and closing one is
+// also what tells the far side to drop the same link: its channels for that
+// connection close, their whenOpen rejects, and both sides reach negotiate and
+// receive holding link arrays that agree.
+async function usableLinks(opening, linkMs) {
+  const settled = await Promise.allSettled(
+    opening.map((link) => withinDeadline(link.ready, linkMs)));
   const links = [];
   opening.forEach((link, i) => {
     if (settled[i].status === 'fulfilled') links.push({ pc: link.pc, channels: [...link.channels] });
@@ -120,7 +145,7 @@ async function usableLinks(opening) {
 // session descriptions rather than one. The two sides pair them by position,
 // which is why they travel together: one relay round trip and no way for two
 // halves of the same handshake to be matched up wrongly.
-export function liveTransport({ identity, gatherMs = GATHER_MS } = {}) {
+export function liveTransport({ identity, gatherMs = GATHER_MS, linkMs = LINK_MS } = {}) {
   const encoder = new TextEncoder();
   // One outstanding answer per peer, which is all one session per peer allows.
   const awaiting = new Map();
@@ -163,7 +188,7 @@ export function liveTransport({ identity, gatherMs = GATHER_MS } = {}) {
         sdps,
       });
       await answered;
-      return { links: await usableLinks(opening), close: closeAll };
+      return { links: await usableLinks(opening, linkMs), close: closeAll };
     } catch (err) {
       closeAll();
       throw err;
@@ -217,7 +242,7 @@ export function liveTransport({ identity, gatherMs = GATHER_MS } = {}) {
         transfer: msg.transfer,
         sdps: answers,
       });
-      return { links: await usableLinks(opening), close: closeAll };
+      return { links: await usableLinks(opening, linkMs), close: closeAll };
     } catch (err) {
       closeAll();
       throw err;

@@ -258,6 +258,25 @@ devices can read.
 
 History is capped at 1000 entries and 90 days, whichever binds first.
 
+### Declining
+
+A recipient can decline a transfer, from the notification without opening the
+app, or from a button in the inbox.
+
+Declining is a server-side record, not a dismissed notification. A Decline button
+that only closed a notification would be a dismiss wearing a stronger word: the
+file would still occupy the quota and still reappear next time the inbox opened.
+
+It hides the transfer from the declining device. If the transfer named its
+recipients and every one of them has declined, it is deleted outright, because
+nobody is left who could collect it, and the tombstone records who declined so
+the sender can see what happened. An unaddressed transfer is not deleted by one
+refusal, since every device was equally its destination; it stops appearing for
+whoever declined and expires on the usual clock.
+
+Decline and delete are different actions and keep different labels. Delete
+removes a transfer for everyone. Decline removes it for you.
+
 ### One visibility rule, everywhere
 
 A device may see and delete exactly the transfers that were its own: the ones it
@@ -327,6 +346,8 @@ GET    /api/transfer/{id}                 -> {cids[], to[], sender, have[], comp
 GET    /api/transfer/{id}/chunklist       -> sealed bytes
 GET    /api/inbox                         -> [transfers this node sent or received]
 DELETE /api/transfer/{id}                 -> 204, or 404 if not this node's transfer
+POST   /api/transfer/{id}/decline         -> 204, hides it here and deletes it
+                                             once every addressee has declined
 GET    /api/history                       -> [tombstones this node sent or received]
 
 POST   /api/push/subscribe {sub}          -> 204
@@ -380,6 +401,25 @@ with its own progress UI. A 20 GB file never sits in memory on either end.
 available, a push wakes the worker, which fetches the transfer's chunks in the
 background and caches them, so opening the app afterward is instant rather than
 a fresh download. Where it is not available, push plus tap remains the path.
+
+**Notifications carry everything the device can decrypt.** The sending machine as
+the title, the filename and size as the body, the transfer's own thumbnail as the
+large image, and two buttons: Accept downloads without opening the app, Decline
+tells the server and completes inside the worker with no window at all. The
+thumbnail is served from a worker-intercepted route rather than a blob URL,
+because notification images are fetched by the browser process and a blob minted
+in a worker is not reliably reachable from there. One tag per transfer, so
+several arrivals stack rather than replacing one another. A locked device says so
+instead of showing a name it cannot read.
+
+**Nothing sends without a chosen destination.** Files arriving from the drop
+zone, the Android share sheet, or the Windows context menu are staged in the Send
+view with the recipient picker in reach. Sending is an explicit action. On
+Windows a per-user registry entry adds "Send with Airlock" to the right-click
+menu for every file type, pointing at the launcher the browser already created
+for the installed app. It ships as an optional script, not a binary, because a
+helper that uploaded straight from the shell would need the passphrase and would
+become a second implementation of the encryption.
 
 **PWA integration:** installable, with `share_target` for the Android share
 sheet, `file_handlers` for the Windows Open with menu, drag and drop, launch at

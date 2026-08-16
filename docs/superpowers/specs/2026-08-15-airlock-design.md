@@ -548,10 +548,21 @@ deterministically and resumes from whatever the server already holds.
 
 ### iOS
 
-A supported platform, with a narrower shape than the others. **Installed to the
-Home Screen only, floor iOS 18.4.**
+A supported platform, with a narrower shape than the others. **Added to the Home
+Screen only, floor iOS 18.4.**
 
-**Why installed-only.** A Home Screen web app has its own storage partition: it
+**This is not an App Store app and needs no Apple developer account.** Add to
+Home Screen is a Safari feature: open the tailnet URL, tap Share, tap Add to
+Home Screen. Same page, same server, no signing, no review, no subscription. It
+is the tailnet website with an icon.
+
+What it changes is only how Safari treats that page. A plain tab cannot register
+for push at all, its wake lock does not work, and its storage can be evicted
+after seven days without interaction. Those four capabilities are withheld from a
+tab and granted to a Home Screen app, which is the entire reason for the
+requirement.
+
+**Why Home Screen only.** A Home Screen web app has its own storage partition: it
 shares no cookies, IndexedDB, OPFS or service worker registration with the same
 origin open in a Safari tab. So a passphrase set up in a tab does not exist in
 the installed app. Installing must come before pairing in the onboarding order,

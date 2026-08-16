@@ -226,7 +226,11 @@ Tailnet mode is chosen with `--tailscale-mode`, and the flag defaults to `host`,
 
 **Android, Chrome.** Add to Home screen. Share to it from any app's share sheet.
 
-**iOS, Safari.** Add to Home Screen. Notifications require the Home Screen install, not a browser tab. iOS has no Web Share Target, so sending starts from inside Airlock rather than from another app's share sheet.
+**iOS, Safari.** Open the URL, tap Share, tap **Add to Home Screen**. This is a Safari feature, not an App Store app: no Apple developer account, no signing, no review. It is the same tailnet page with an icon.
+
+Do it before setting your passphrase. A Home Screen web app gets its own private storage and cannot see anything set up in the Safari tab, so pairing first means pairing twice.
+
+Safari withholds push notifications, the wake lock and durable storage from a plain tab and grants them to a Home Screen app, which is why Airlock asks for it. iOS also has no Web Share Target, so sending starts inside Airlock rather than from another app's share sheet.
 
 <div align="right">
 

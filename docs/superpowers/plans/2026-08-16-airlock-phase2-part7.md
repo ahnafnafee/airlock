@@ -543,7 +543,7 @@ git commit -m "feat(send): accept dropped folders and cover unusual names and ty
 - Modify: `web/app.js`, `web/index.html`, `web/sw.js`, `web/session.js`, `web/manifest.webmanifest`
 - Modify: `README.md`
 
-**iOS is a supported platform with a narrower shape: installed to the Home Screen only, floor iOS 18.4.** Read section 8 of the design spec for the reasoning before starting. The short version is that three things are broken below 18.4 and two capabilities are cut outright.
+**iOS is a supported platform with a narrower shape: added to the Home Screen only, floor iOS 18.4.** This is Safari's Add to Home Screen, not an App Store app: no Apple developer account, no signing, no review. Say so in any copy you write, because "installed" reads as a native app to most people and this is the same tailnet page with an icon. Read section 8 of the design spec for the reasoning before starting. The short version is that three things are broken below 18.4 and two capabilities are cut outright.
 
 **Nothing here is a second code path where one shape can serve everywhere.** Two of the iOS constraints are already global in the plan, deliberately: OPFS writes go through a worker's sync access handle because Safari had no alternative before 26.0, and the service worker constructs its own download stream because no Safari can transfer one. Do not add an iOS branch for either.
 

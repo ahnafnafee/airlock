@@ -130,6 +130,15 @@ function queued(stage, pool = fakePool(stage)) {
   return { pool, opts: { openStage: stage.open, newPool: () => pool } };
 }
 
+// The sealed metadata record, opened. It is the only description of the file
+// that ever leaves this device, so it is where a claim about a name or a type
+// surviving the send has to be settled.
+async function sealedMeta(api) {
+  const record = api.calls.records.find((x) => x.kind === 'meta');
+  return JSON.parse(new TextDecoder().decode(
+    await openRecord(await mkP, DOMAIN.META, TRANSFER, record.bytes)));
+}
+
 function pseudoRandom(n, seed = 5) {
   const out = new Uint8Array(n);
   let x = seed >>> 0 || 1;
@@ -345,9 +354,7 @@ test('the stage is named by the id the sealed metadata carries', async () => {
   assert.match(stage.keys[0], /^[0-9a-f]{32}$/, 'the stage id must be a well formed id');
   assert.notEqual(stage.keys[0], TRANSFER, 'the stage cannot be named by an id it predates');
 
-  const record = api.calls.records.find((x) => x.kind === 'meta');
-  const meta = JSON.parse(new TextDecoder().decode(
-    await openRecord(await mkP, DOMAIN.META, TRANSFER, record.bytes)));
+  const meta = await sealedMeta(api);
   assert.equal(meta.stage, stage.keys[0]);
   assert.equal(meta.name, 'f.bin', 'the rest of the record must be unchanged');
 });
@@ -360,9 +367,7 @@ test('a transfer sent through the server names no staging directory', async () =
   await uploadThroughServer(fakeFile(pseudoRandom(5000, 71)), {
     mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api,
   });
-  const record = api.calls.records.find((x) => x.kind === 'meta');
-  const meta = JSON.parse(new TextDecoder().decode(
-    await openRecord(await mkP, DOMAIN.META, TRANSFER, record.bytes)));
+  const meta = await sealedMeta(api);
   assert.equal('stage' in meta, false);
 });
 
@@ -462,6 +467,53 @@ test('cleanup failing over a record failure still reports the record failure', a
   assert.equal(api.calls.created.length, 1, 'the transfer must exist, or this test asserts nothing');
   assert.equal(stage.clears.length, 1, 'the stage is still cleared when the delete fails');
   assert.equal(stage.staged.size, 0);
+});
+
+test('a file with no extension and no detected type transfers', async () => {
+  // Common for archives, disk images, and anything from a unix machine. The
+  // browser reports an empty type and there is nothing to infer from the name.
+  const api = fakeApi();
+  const file = fakeFile(pseudoRandom(9000, 31), 'Makefile', '');
+  const r = await uploadThroughServer(file, {
+    mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api,
+  });
+  assert.ok(r.total > 0);
+  assert.equal(r.sent, r.total);
+
+  const meta = await sealedMeta(api);
+  assert.equal(meta.name, 'Makefile');
+  // An empty type reaches the other side as a blob with no type at all, which
+  // is a worse answer than the honest one for bytes nothing could identify.
+  assert.equal(meta.mime, 'application/octet-stream');
+});
+
+test('unusual names and types reach the sealed metadata unchanged', async () => {
+  // Nothing between the picker and the record may normalize, transliterate or
+  // percent-encode a name. The record is the only description of the file that
+  // ever leaves this device, so whatever it says is what the recipient saves.
+  for (const [name, type] of [
+    ['日本語のファイル.txt', 'text/plain'],
+    ['🎉 party.gif', 'image/gif'],
+    ['a.b.c.d.tar.zst', 'application/zstd'],
+    ["it's a file, isn't it.bin", ''],
+    ['.hidden', ''],
+    // Reserved on Windows and a filename anywhere else. Renaming it would be
+    // the wrong layer: the browser writing the file is what knows the rules of
+    // the disk it is writing to.
+    ['CON', ''],
+    ['x'.repeat(200) + '.dat', 'application/octet-stream'],
+  ]) {
+    const api = fakeApi();
+    const r = await uploadThroughServer(fakeFile(pseudoRandom(3000, 7), name, type), {
+      mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api,
+    });
+    assert.ok(r.total > 0, `no chunks for ${name}`);
+    assert.equal(r.sent, r.total, `not everything sent for ${name}`);
+
+    const meta = await sealedMeta(api);
+    assert.equal(meta.name, name, `the name was altered for ${name}`);
+    assert.equal(meta.mime, type || 'application/octet-stream', `the type was altered for ${name}`);
+  }
 });
 
 test('a queued empty file is refused before the server hears about it', async () => {

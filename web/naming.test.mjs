@@ -84,6 +84,20 @@ test('unusual but legitimate names are preserved', () => {
   }
 });
 
+test('a reserved windows device name is carried, not renamed', () => {
+  // CON, PRN, AUX, NUL and the COM and LPT series cannot be filenames on
+  // Windows, with or without an extension, and are ordinary filenames
+  // everywhere else. Rewriting one here would decide for every platform on
+  // behalf of the one it is a problem on, and would mean a file that arrives
+  // under a name nobody chose. The browser's download manager is what knows
+  // the rules of the disk it is writing to.
+  for (const name of ['CON', 'NUL', 'PRN', 'AUX', 'COM1', 'LPT1', 'con.txt']) {
+    const { plain, starred } = parts(contentDisposition(name));
+    assert.equal(plain, name, `mangled ${name}`);
+    assert.equal(decodeURIComponent(starred), name, `starred lost ${name}`);
+  }
+});
+
 test('every parameter stays on one line', () => {
   const header = contentDisposition('perfectly normal.txt');
   assert.equal(header.split('\n').length, 1);

@@ -394,13 +394,32 @@ throughput the link never reached. It gets faster the more of the file the
 receiver already has, which is the failure mode that looks like a finding.
 
 The web assets are compiled into the binary by `//go:embed`, so every constant
-change needs a rebuild and a reinstall on the sending device:
+change needs a rebuild and a reinstall on **both** devices, not just the sender:
 
 ```bash
-# On the sending device, once per row of the table.
+# On EACH device, once per row of the table.
 # Edit LINK_COUNT in web/peer.js, then:
 go build -o airlock . && ./airlock      # airlock.exe on Windows
 ```
+
+**Rebuilding only the sender loses three of the six rows, silently.** The
+receiver's copy of the same constants gates the handshake. In `web/session.js`,
+`decode` drops an offer outright when its list of descriptions is longer than the
+receiving device's own `LINK_COUNT`, and `accept` further clamps what survives to
+`sdps.slice(0, LINK_COUNT)` connections and `Math.min(msg.channels,
+CHANNELS_PER_LINK * 2)` channels each. Against a stock receiver still at 4, the
+6, 8 and 12 rows produce a discarded offer, no answer, and a sender that sits
+until its handshake deadline expires. The symptom is an empty row rather than a
+slow one, and taking it as data would read the knee at 4 for a reason that has
+nothing to do with throughput. If a row hangs at the handshake instead of
+transferring, check the receiver's build before believing anything about the
+link.
+
+The `CHANNELS_PER_LINK` table below is not exposed to the `decode` rejection, and
+the `accept` clamp leaves values up to 4 intact because the answerer takes
+`min(msg.channels, CHANNELS_PER_LINK * 2)`. Rebuild both devices for it anyway.
+One rule for both tables is easier to follow than one rule with an exception, and
+a value above 4 would hit the clamp.
 
 Prepare the same 2 GB file for the other device once per row, let the direct
 transfer run, and read the line off the sender's console. Take three runs per row

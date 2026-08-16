@@ -200,7 +200,7 @@ git commit -m "feat(pwa): install, android share target and windows file handler
   - `func (e *Events) Count() int`
   - route `GET /api/events` streaming `text/event-stream`
 
-**Why this and not just push.** Web Push works but is a round trip through a third-party service and needs a permission prompt. An open stream over the tailnet is immediate, needs no permission, and costs one idle connection. It also gives the Android shell in task 21 its wake-up signal without a Firebase project, which removes an entire external dependency from the product.
+**Why this and not just push.** Web Push works but is a round trip through a third-party service and needs a permission prompt. An open stream over the tailnet is immediate, needs no permission, and costs one idle connection. It also gives every client an immediate arrival signal without a push permission prompt or a third-party push service in the path.
 
 Push stays for the case the stream cannot cover: an app that is not running at all.
 
@@ -908,6 +908,5 @@ git commit -m "feat(relay): mirror completed transfers to peer instances by dedu
 
 ---
 
-Tasks 21 through 23, covering the Android shell, the throughput benchmark and
-deployment, are in
+Tasks 22 and 23, covering the throughput benchmark and deployment, are in
 `docs/superpowers/plans/2026-08-16-airlock-phase2-part3.md`.

@@ -1083,10 +1083,8 @@ This is the only path by which content reaches the server, and even then it is c
 
 ---
 
-### Task 33: Relays, replanned
+### Task 33: Relays, CANCELLED
 
-**Deferred until tasks 27 through 32 are complete.** Relays were originally specified as mirroring transfers to a peer instance, and there is no longer content on a server to mirror.
+**Not built, and not deferred.** A relay was specified as a second instance that whole transfers are mirrored to. File content no longer rests on a server, so there is nothing to mirror, and presence plus signalling already let two devices talking to different instances find each other and then connect directly. The feature has no remaining content.
 
-A relay is now a second instance that shares the queue and the signalling relay, so devices talking to different instances can still find each other and then connect **directly**. That is a smaller and different feature: it forwards pending transfer records, progress bitmaps, presence, and session descriptions, and never any file content.
-
-Write this task's plan once the queue exists, so it is specified against the real shapes rather than guessed at.
+The task number is retired here to avoid colliding with task 33 in part 6, the screen wake lock, which is the only task 33 in this plan set.

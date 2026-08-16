@@ -1184,6 +1184,5 @@ and resume, behind a Tailscale identity gate, with the server holding nothing bu
 ciphertext.
 
 Phase 2 adds: device pairing and the recipient picker UI, transfer history,
-thumbnails, Web Push, PWA install and share target, relays, the Android shell for
-silent background receive, and the throughput benchmark that settles the
+thumbnails, Web Push, PWA install and share target, and the throughput benchmark that settles the
 `tailscale-mode` default.

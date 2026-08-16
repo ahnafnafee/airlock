@@ -35,7 +35,7 @@ One Go binary and an installable web app. No accounts, no cloud, no public port.
   - [`4` Deduplicated, delta-synced, resumable](#4-deduplicated-delta-synced-resumable)
   - [`5` Installs like an app](#5-installs-like-an-app)
 - [📦 Installation](#-installation)
-  - [Android](#android)
+  - [Per device](#per-device)
 - [⌨️ Local development](#️-local-development)
 - [🏗 Architecture](#-architecture)
 - [📊 Measured](#-measured)
@@ -220,23 +220,13 @@ Open the URL on any device and choose a passphrase. Every other device enters th
 
 Tailnet mode is chosen with `--tailscale-mode`, and the flag defaults to `host`, so a server started without it is a host-mode server.
 
-### Android
+### Per device
 
-The web app already covers most of Android: install it from Chrome, use the share sheet, get notifications. The one thing a service worker cannot do is write a received file to disk with the app closed, and that single capability is the only reason a native shell exists. [Status](#-status) is the authority on whether the shell has landed; this is how it is built and installed.
+**Windows and macOS, Chrome or Edge.** Open the URL and install from the address bar. It gets its own window and icon. Right-click any file and choose **Send with Airlock**, or drag it onto the window.
 
-```bash
-node web/vectors.mjs
-cd android
-./gradlew :app:testDebugUnitTest
-./gradlew :app:assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
+**Android, Chrome.** Add to Home screen. Share to it from any app's share sheet.
 
-The shell hosts the same web UI in a WebView, so there is one implementation of every screen. Its own code is a foreground service that holds the event stream open over the tailnet and saves what arrives into Downloads, plus the Kotlin half of the crypto.
-
-That second crypto implementation is the module's real cost, and it is contained rather than trusted. Two implementations of a cipher drift, and drift here does not fail loudly: it produces files that download successfully and will not open. So `web/vectors.mjs` generates test vectors from the JavaScript implementation, which is the authority, and the Kotlin suite asserts against them. Run the vector test before the assemble step, never after, and regenerate the vectors rather than adjusting an expectation to match.
-
-There is no Firebase. The wake-up signal is the same server-sent event stream the web client uses, so no push service sits in the path and no third-party dependency comes with it.
+**iOS, Safari.** Add to Home Screen. Notifications require the Home Screen install, not a browser tab. iOS has no Web Share Target, so sending starts from inside Airlock rather than from another app's share sheet.
 
 <div align="right">
 
@@ -282,7 +272,7 @@ The three checks that matter most, because these are the ones whose failure look
 
 ```
   Phone (PWA)               Server                Desktop (PWA)
-  Android shell             airlock               Windows / Linux
+  iOS / Android             airlock               Windows / macOS / Linux
       |                (tailnet node, Go)                |
       |         https://<node>.<tailnet>.ts.net          |
       +---------------- WireGuard / TLS -----------------+
@@ -315,7 +305,7 @@ The server may run anywhere on the tailnet, including a machine that is also a c
 | `web/views/*.js` | One module per view: send, inbox, history, devices |
 | `web/sw.js` | Decrypt-on-download, push, share target |
 
-Exactly two Go dependencies, `tailscale.com` and `webpush-go`. Everything else is the standard library. The frontend has zero dependencies and no build step. The Android module has its own dependency set, and its crypto uses only the JDK.
+Exactly two Go dependencies, `tailscale.com` and `webpush-go`. Everything else is the standard library. The frontend has zero dependencies and no build step.
 
 The identity gate is a seam, `func(*http.Request) (Identity, bool)`. Production supplies a `WhoIs` implementation, tests supply a fake, and the whole HTTP surface is testable without a tailnet.
 
@@ -392,14 +382,18 @@ Built task by task from [the implementation plans](./docs/superpowers/plans/), a
 | 17 | History view | ✅ Done |
 | 18 | PWA install, share target and file handlers | ✅ Done |
 | 19 | Server-sent events and a live inbox | ✅ Done |
-| 20 | Relays | 🔁 Superseded, replanned as task 33 |
-| 21 | Android shell with background receive | 🟡 In progress |
+| 20 | Relays | ❌ Cancelled |
+| 21 | Android shell | ❌ Cancelled |
 | 22 | Throughput benchmark and the plaintext toggle | ✅ Done |
 | 23 | Deployment and hardening | ✅ Done |
 
-Relays were superseded, not canceled. The original task specified mirroring whole transfers to a second instance, and that shape is obsolete now that content does not rest on a server for a second instance to mirror. The replanned relay is a second instance sharing the queue and the signaling relay, so devices talking to different instances can still find each other and then connect directly to each other. It forwards pending transfer records, progress bitmaps, presence and session descriptions, and never a byte of file content. It is deferred behind tasks 27 to 32, and its plan gets written once the queue exists, so it is specified against the real shapes rather than guessed at.
+Two tasks were cancelled outright rather than deferred.
 
-**Designed, not yet built,** tasks 24 to 40. Declining a transfer, rich notifications with accept and decline, staged send and the Windows context menu, presence and signaling, the queue and the progress bitmap, local staging, the direct channel, session orchestration, hold-for-me as the one server-storage path, the replanned relay, the screen wake lock, parallel connections with unordered channels, parallel sealing in a single pass over the file, the throughput measurement, running with no flags anywhere, Windows file sharing, installing it anywhere, and verifying what is still unverified. That is eighteen items over seventeen numbers, because parts 5 and 6 of the plan each number a task 33: the replanned relay in one, the wake lock in the other.
+**Relays** were specified as mirroring whole transfers to a second instance. Content no longer rests on a server, so there is nothing to mirror, and presence plus signalling already let devices on different instances find each other and connect directly. Nothing is lost by dropping it.
+
+**The Android shell** existed for one capability a web app cannot provide: writing a received file to disk with the app closed. Its price was a second implementation of the crypto, and drift between two implementations does not fail loudly, it produces files that download successfully and will not open. Notification then tap costs a second and buys exactly one place where encryption happens.
+
+**Designed, not yet built,** tasks 24 to 41: declining a transfer, rich notifications with accept and decline, staged send and the Windows context menu, presence and signalling, the queue and the progress bitmap, local staging, the direct channel, session orchestration, hold-for-me as the one server-storage path, the screen wake lock, parallel connections with fragmentation, parallel sealing in a single pass over the file, the throughput measurement, running with no flags anywhere, Windows file sharing, installing it anywhere, verifying what is still unverified, and accepting dropped folders.
 
 **Deliberately not built:** accounts, sharing outside your own tailnet, public links, and any server-side view of plaintext.
 

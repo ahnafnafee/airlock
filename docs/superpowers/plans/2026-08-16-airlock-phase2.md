@@ -1053,6 +1053,6 @@ git commit -m "feat(web): history view over sealed tombstones"
 
 ---
 
-Tasks 18 through 22, covering PWA integration, relays, the Android shell, the
+Tasks 18 through 22, covering PWA integration, the
 throughput benchmark and deployment, are in
 `docs/superpowers/plans/2026-08-16-airlock-phase2-part2.md`.

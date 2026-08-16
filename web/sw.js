@@ -2,6 +2,7 @@ import {
   DOMAIN, MODE_SEALED, openChunk, openRecord, unpackHashes, modeOf, loadMaster,
   b64decode, kvPut,
 } from './crypto.js';
+import { contentDisposition } from './naming.js';
 
 // Registered with {type:'module'} so these imports work.
 
@@ -157,7 +158,6 @@ async function download(id) {
       },
     });
 
-    const filename = encodeURIComponent(meta.name);
     // ponytail: a Range request is answered with the whole file, so a paused
     // download restarts from zero and media cannot be seeked. The ceiling is
     // the chunk list itself, which carries hashes and no lengths, so nothing
@@ -168,8 +168,7 @@ async function download(id) {
       headers: {
         'Content-Type': 'application/octet-stream',
         'Content-Length': String(meta.size),
-        'Content-Disposition':
-          `attachment; filename="${filename}"; filename*=UTF-8''${filename}`,
+        'Content-Disposition': contentDisposition(meta.name),
       },
     });
   } catch (err) {

@@ -71,6 +71,8 @@ The honest cost is that some overlap must eventually happen. If the sender never
 
 Leave it alone, which is the default, and the sealed chunks are written to this device's own staging area instead. The server is told what the transfer is made of and is given the sealed records the recipient needs to read it, and not one byte of content.
 
+A direct transfer has to name a device. It is offered to the devices in **To** and to nobody else, so **All my devices** is a choice only the held path can honor: there the transfer sits in the queue and every device sees it in its own inbox. Ask for both at once and the Send view refuses before anything is sealed, and says which of the two controls to change.
+
 > **Where the code actually is.** The sending half of the direct channel is built: presence, the opaque signalling relay, the per-recipient progress bitmaps, local staging, the data channel, the session orchestration, and the checkbox that routes between the two. The receiving half stops one step short. A directly delivered transfer lands in the recipient's staging area, and assembling it back into a file the browser can save is task 43, so until that lands, receiving still means holding the transfer on the server.
 
 <div align="right">

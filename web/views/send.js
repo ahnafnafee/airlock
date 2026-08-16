@@ -161,6 +161,17 @@ registerView('send', 'Send', (panel) => {
       status.className = 'data bad';
       return;
     }
+    // A direct transfer is offered to the devices it names and to nobody else,
+    // so one addressed to all devices names no device and would never be
+    // offered at all. It would also never leave the queue, because a transfer
+    // with no addressee can never be delivered to every addressee. Held on the
+    // server the same choice is meaningful: every device sees it in its inbox.
+    if (!hold.checked && !recipient.value) {
+      status.textContent = 'A file sent directly needs a device to send it to.'
+        + ' Choose one, or hold it on the server.';
+      status.className = 'data bad';
+      return;
+    }
     // Taken off the list before the first byte moves, so a second press cannot
     // send the same files twice and anything staged while this runs is left for
     // the next press.

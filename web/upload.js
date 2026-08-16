@@ -168,17 +168,30 @@ export async function queueForDelivery(file, opts) {
   await uploadRecords(api, mk, mode, id, file, ids);
 
   const stage = await openStage(id);
-  let index = 0;
-  for await (const plain of chunkFile(file, cdc)) {
-    const { h, cid } = ids[index];
-    // Written under its position, not its id, and every position is written.
-    // The peer asks for chunk 7 of this transfer by position, so a file that
-    // repeats a chunk has to answer for each place it appears, and a position
-    // left empty because the server happened to hold that id is a chunk this
-    // device could never hand over.
-    await stage.put(index, await sealChunk(mk, mode, h, cid, plain));
-    progress.sent = ++index;
-    onProgress({ ...progress });
+  try {
+    let index = 0;
+    for await (const plain of chunkFile(file, cdc)) {
+      const { h, cid } = ids[index];
+      // Written under its position, not its id, and every position is written.
+      // The peer asks for chunk 7 of this transfer by position, so a file that
+      // repeats a chunk has to answer for each place it appears, and a position
+      // left empty because the server happened to hold that id is a chunk this
+      // device could never hand over.
+      await stage.put(index, await sealChunk(mk, mode, h, cid, plain));
+      progress.sent = ++index;
+      onProgress({ ...progress });
+    }
+  } catch (err) {
+    // The transfer was created before the first chunk was staged, so a staging
+    // failure part way through leaves a transfer on the queue whose stage has
+    // holes in it. Every later drain would offer it, reach a position with no
+    // file behind it, fail the session, cool the peer off and come back for it
+    // forever, and nothing sweeps the partial stage. Undone here so a staging
+    // failure is a transfer that simply did not send. Both steps are best
+    // effort, because the reason the caller needs is the original one.
+    await api.deleteTransfer(id).catch(() => {});
+    await stage.clear().catch(() => {});
+    throw err;
   }
 
   return progress;

@@ -23,7 +23,7 @@ function fakeFile(bytes, name = 'f.bin', type = 'application/octet-stream') {
 }
 
 function fakeApi(held = new Set()) {
-  const calls = { chunks: [], records: [], created: [] };
+  const calls = { chunks: [], records: [], created: [], deleted: [] };
   return {
     calls,
     async createTransfer(cids, to) {
@@ -35,6 +35,7 @@ function fakeApi(held = new Set()) {
       return { id: 'a'.repeat(32), missing: cids.filter((c) => !held.has(c)) };
     },
     async putRecord(id, kind, bytes) { calls.records.push({ kind, length: bytes.length }); },
+    async deleteTransfer(id) { calls.deleted.push(id); },
     async putChunk(cid, transferId, bytes) {
       // The transfer id is not optional: the server refuses a chunk without it,
       // because that is what refreshes the transfer's inactivity clock.
@@ -50,12 +51,22 @@ function fakeApi(held = new Set()) {
 // The direct path writes into this device's own staging area, keyed by the
 // chunk's position in the transfer, which is the only key the peer protocol
 // ever asks for.
-function fakeStage() {
+// failAt makes one position's write reject, the way a dead staging worker or an
+// exhausted origin quota does.
+function fakeStage(failAt = -1) {
   const staged = new Map();
+  const clears = [];
   return {
     staged,
+    clears,
     async open() {
-      return { put: async (index, bytes) => { staged.set(index, bytes); } };
+      return {
+        put: async (index, bytes) => {
+          if (index === failAt) throw new Error('the staging worker stopped');
+          staged.set(index, bytes);
+        },
+        clear: async () => { clears.push(staged.size); staged.clear(); },
+      };
     },
   };
 }
@@ -278,6 +289,45 @@ test('a queued transfer stages chunks the server already holds', async () => {
     api.calls.created[0].cids.filter((cid) => !held.has(cid)).length, 0,
     'the server must already hold every chunk, or this test asserts nothing');
   assert.equal(stage.staged.size, r.total);
+});
+
+test('a staging failure takes the transfer and the partial stage back down', async () => {
+  // The transfer is created before the first chunk is staged, so a write that
+  // fails part way leaves a transfer on the queue whose stage has holes in it.
+  // Left alone, every later drain offers it, reaches a position with nothing
+  // behind it, fails the session and cools the peer off, forever, and nothing
+  // ever sweeps the chunks it did write. The failure has to undo both.
+  const api = fakeApi();
+  const stage = fakeStage(2);
+  await assert.rejects(
+    queueForDelivery(fakeFile(pseudoRandom(20000, 47)), {
+      mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api,
+      openStage: stage.open,
+    }),
+    // Rethrown as it was, so the caption names the reason the write failed
+    // rather than the cleanup that followed it.
+    /staging worker stopped/,
+  );
+  assert.equal(api.calls.created.length, 1, 'the transfer must have been created, or this test asserts nothing');
+  assert.deepEqual(api.calls.deleted, ['a'.repeat(32)], 'the transfer must not stay on the queue');
+  assert.deepEqual(stage.clears, [2], 'the two chunks that did land must be cleared');
+  assert.equal(stage.staged.size, 0);
+});
+
+test('cleanup failing over a staging failure still reports the staging failure', async () => {
+  // A device offline enough to fail a stage write is a device whose DELETE may
+  // fail too. Neither best-effort step may replace the reason the send failed.
+  const api = fakeApi();
+  api.deleteTransfer = async () => { throw new Error('503: unreachable'); };
+  const stage = fakeStage(1);
+  await assert.rejects(
+    queueForDelivery(fakeFile(pseudoRandom(20000, 53)), {
+      mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api,
+      openStage: stage.open,
+    }),
+    /staging worker stopped/,
+  );
+  assert.deepEqual(stage.clears, [1], 'the stage is still cleared when the delete fails');
 });
 
 test('a queued empty file is refused before the server hears about it', async () => {

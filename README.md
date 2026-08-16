@@ -151,10 +151,14 @@ The honest cost is stated in full under [what this does not protect against](#wh
 
 Because the Tailscale certificate makes the page a genuine secure context, the web client is not a compromise. It installs, it gets its own icon and window, and it does the things people actually want from a transfer app:
 
-- **Android share sheet.** Share a photo from Gallery, pick Airlock, and it is staged in the Send view with the recipient picker in reach. Sending stays an explicit action, because a share target that uploaded on arrival would let any page choose what you sent.
+- **The Chromium share sheet.** On Chrome for Android and on ChromeOS, share a photo from Gallery, pick Airlock, and it is staged in the Send view with the recipient picker in reach. Sending stays an explicit action, because a share target that uploaded on arrival would let any page choose what you sent.
 - **Web Push.** A file lands and your desktop notifies you with the real filename, decrypted locally, because the push itself carries no payload to leak.
 - **Windows file handling.** Right-click any file and choose **Send with Airlock**. The app opens with the file staged, so you pick the destination before anything leaves the machine. **Open with** reaches Airlock too, for the types the manifest names.
 - **A live inbox.** An open app is nudged by a server-sent event stream rather than by polling, so an arrival appears without a refresh.
+
+Getting a file *in* is where browsers stop agreeing, so this is stated plainly rather than sold. Airlock accepts files everywhere through the in-app picker, plus drag and drop and paste on desktop browsers. "Share to Airlock" from the OS share sheet is a Chromium-only bonus, available on Chrome for Android and ChromeOS, and as "Open with Airlock" on installed Chrome or Edge desktop. It does not exist in Firefox or on iOS, where you open Airlock and pick the file.
+
+None of those extras is offered on screen until this device has been seen doing it. Firefox for Android reads `share_target` out of the manifest and then ignores it, with no error and nothing a script can test for, so a screen that promised a share menu entry on the strength of the manifest would be lying and nothing would say so. Instead the drop zone appears on the first drag that carries a file, the paste hint on the first paste that carries one, and the share menu is claimed only after a share has actually arrived. Until then the install card says installing *may* add Airlock to the share menu.
 
 The context-menu entry is installed once, on each Windows machine, after installing the app itself:
 
@@ -326,11 +330,13 @@ Tailnet mode is chosen with `--tailscale-mode`, and the flag defaults to `host`,
 
 **Android, Chrome.** Add to Home screen. Share to it from any app's share sheet.
 
+**Android, Firefox.** It works, and the picker is all of it. Firefox for Android offers no install, never puts Airlock in the share sheet however the manifest is written, and does not hand a pasted file to a web page. Open Airlock and choose the file. This is the weakest way in of any browser here, so if you would rather start from the other app's share sheet, [Taildrop][taildrop-link] is already on the device with Tailscale and does register there. It puts the file straight into your other device's downloads rather than into Airlock, and it is not encrypted in Airlock's sense, but it covers exactly this gap.
+
 **iOS, Safari.** Open the URL, tap Share, tap **Add to Home Screen**. This is a Safari feature, not an App Store app: no Apple developer account, no signing, no review. It is the same tailnet page with an icon.
 
 Do it before setting your passphrase. A Home Screen web app gets its own private storage and cannot see anything set up in the Safari tab, so pairing first means pairing twice.
 
-Safari withholds push notifications, the wake lock and durable storage from a plain tab and grants them to a Home Screen app, which is why Airlock asks for it. iOS also has no Web Share Target, so sending starts inside Airlock rather than from another app's share sheet.
+Safari withholds push notifications, the wake lock and durable storage from a plain tab and grants them to a Home Screen app, which is why Airlock asks for it. iOS also has no Web Share Target, so sending starts inside Airlock rather than from another app's share sheet: tap **Choose files** and pick from Files or Photos. [Taildrop][taildrop-link] is in that share sheet and covers the same gap here that it does on Firefox for Android, on the same terms.
 
 ### Troubleshooting
 
@@ -541,6 +547,7 @@ That last one is the gap worth naming twice. A transfer that crosses directly la
 - [Tailscale HTTPS certificates](https://tailscale.com/kb/1153/enabling-https) - the prerequisite everything depends on
 - [Web Share Target](https://developer.mozilla.org/en-US/docs/Web/Manifest/share_target) - how the Android share sheet entry works
 - [File Handling API](https://developer.mozilla.org/en-US/docs/Web/API/Window/launchQueue) - how the Windows Open with entry works
+- [Taildrop][taildrop-link] - already on every one of these devices, and in the share sheets Airlock cannot reach
 
 <div align="right">
 
@@ -559,5 +566,6 @@ That last one is the gap worth naming twice. A transfer that crosses directly la
 [deps-shield]: https://img.shields.io/badge/go%20deps-2-8A9A93?labelColor=black&style=flat-square
 [go-link]: https://go.dev
 [go-shield]: https://img.shields.io/badge/go-1.26-00ADD8?labelColor=black&logo=go&logoColor=white&style=flat-square
+[taildrop-link]: https://tailscale.com/kb/1106/taildrop
 [tailscale-link]: https://tailscale.com/kb/1244/tsnet
 [tailscale-shield]: https://img.shields.io/badge/tailscale-tsnet-242424?labelColor=black&logo=tailscale&logoColor=white&style=flat-square

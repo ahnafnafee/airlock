@@ -4,6 +4,7 @@ import {
 } from './crypto.js';
 import { api, ApiError } from './api.js';
 import { requestPersistence } from './staging.js';
+import { observeCapabilities } from './inbound.js';
 
 export const state = { mk: null, mode: MODE_SEALED, config: null, me: null };
 
@@ -89,6 +90,11 @@ async function unlock(passphrase) {
 function enterApp() {
   $('unlock').hidden = true;
   $('app').hidden = false;
+  // Before the first view is shown, so a drag already under way when the app
+  // opens is the one that draws the drop zone. These listeners only record what
+  // this browser turns out to be able to do; the send view attaches its own to
+  // act on it.
+  observeCapabilities();
   const first = location.hash.slice(1);
   showView(views.has(first) ? first : views.keys().next().value);
   // The hash is a view's address, so it has to be read as well as written.

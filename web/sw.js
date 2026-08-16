@@ -3,6 +3,7 @@ import {
   b64decode, kvPut,
 } from './crypto.js';
 import { contentDisposition } from './naming.js';
+import { markCapability } from './inbound.js';
 
 // Registered with {type:'module'} so these imports work.
 
@@ -54,6 +55,19 @@ async function stashShare(request) {
     const text = [form.get('title'), form.get('text'), form.get('url')]
       .filter(Boolean).join('\n');
     await kvPut('pending-share', { files, text });
+    // The only honest evidence a share target works. Firefox on Android parses
+    // share_target from the manifest and then ignores it, with no error and
+    // nothing to feature-detect, so until a share actually arrives here the app
+    // says installing may put Airlock in the share menu and never that it will.
+    // A payload with nothing in it is not that evidence: this route is a
+    // navigation any page can start, and an empty POST proves only that
+    // something reached it.
+    // Caught here rather than left to the handler below, so a receipt that
+    // could not be written does not report a stash that worked as a failure.
+    if (files.length || text) {
+      await markCapability('shareTarget').catch(
+        (err) => console.warn('the share receipt was not recorded', err));
+    }
   } catch (err) {
     console.warn('share stash failed', err);
   }

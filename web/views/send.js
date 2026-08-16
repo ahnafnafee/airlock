@@ -1,9 +1,10 @@
-import { registerView, state, el } from '../app.js';
+import { registerView, showView, state, el } from '../app.js';
 import { api } from '../api.js';
 import { uploadThroughServer, queueForDelivery } from '../upload.js';
 import { openStage } from '../staging.js';
 import { renderStrip } from '../strip.js';
 import { MODE_SEALED, MODE_PLAIN } from '../crypto.js';
+import { capabilities, onCapabilities, installCard, filesFromDrop } from '../inbound.js';
 
 function humanSize(bytes) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -63,12 +64,58 @@ function noteName(text) {
   return `${/^\.*$/.test(stem) ? 'note' : stem}.txt`;
 }
 
+// A name the owner typed over one the device chose. Control characters and the
+// separators Windows refuses are dropped; the forward slash is not, because a
+// dropped folder puts one in the name on purpose and an edit may well mean to
+// keep it. A name that is empty, or nothing but dots and slashes, is not a name
+// any platform accepts, so the one it had stands.
+function renamed(text, previous) {
+  const chosen = String(text)
+    .replace(/[\\:*?"<>|\x00-\x1f\x7f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+  return /^[.\s/]*$/.test(chosen) ? previous : chosen;
+}
+
 registerView('send', 'Send', (panel) => {
+  // No accept attribute, on either picker. iOS variously ignores it or
+  // over-filters, and the files it breaks on are exactly the ones this product
+  // is for: .bin, .enc, anything with no recognized extension. A picker that
+  // silently refuses to show a file is worse than one that shows everything.
   const picker = el('input', { type: 'file', multiple: true, hidden: true });
+  const folder = el('input', {
+    type: 'file', multiple: true, hidden: true, webkitdirectory: true,
+  });
+
+  // The hatch says only what this browser has been seen to do. The drop line is
+  // drawn on the first drag that carries files and not before, so on a phone it
+  // never appears and the picker is the whole hatch, which is the honest shape
+  // of the weakest inbound story any engine has.
+  const dropLine = el('span', { hidden: true }, 'Drop files here, ');
+  const choose = el('button', { type: 'button', onclick: () => picker.click() }, 'Choose files');
+  // Detected rather than assumed, and verified again after a pick: Firefox on
+  // Android accepts this attribute and then returns an empty relative path for
+  // every file.
+  const folderButton = el('button', {
+    type: 'button',
+    hidden: !('webkitdirectory' in HTMLInputElement.prototype),
+    onclick: () => folder.click(),
+  }, 'or a folder');
+  // The folder button sits on its own line rather than trailing the first one,
+  // so the sentence above it reads the same whether or not the drop line is
+  // there. Chained on one line it would say "or choose or a folder".
   const drop = el('div', { id: 'drop' },
-    'Drop files here, ',
-    el('button', { type: 'button', onclick: () => picker.click() }, 'or choose'),
-    picker);
+    el('div', {}, dropLine, choose),
+    folderButton,
+    picker, folder);
+
+  // Both are receipts, so both start hidden on every browser and stay hidden
+  // forever on the ones that never deliver. Nothing here is read from the
+  // manifest or from a user agent string.
+  const pasteHint = el('p', { class: 'data muted', hidden: true },
+    'You can also paste a file into this window.');
+  const installNote = el('p', { class: 'data muted', hidden: true });
 
   // The sealing state is a control rather than a caption, because it is the one
   // decision on this screen that cannot be undone after the fact. The note is
@@ -110,6 +157,8 @@ registerView('send', 'Send', (panel) => {
   panel.append(
     el('h2', {}, 'Send'),
     drop,
+    pasteHint,
+    installNote,
     el('p', {}, el('label', { for: 'sealed' }, sealed, ' ', sealNote)),
     el('p', {}, el('label', { class: 'choice', for: 'hold' },
       hold,
@@ -129,14 +178,28 @@ registerView('send', 'Send', (panel) => {
 
   // Rebuilt whole rather than patched, so the index each Remove closes over is
   // the index that row now has. Same row shape the inbox uses: the text block
-  // takes the free space so a long name ellipsizes instead of pushing the size
-  // off a narrow screen.
+  // takes the free space so a long name stays inside its own field instead of
+  // pushing the size off a narrow screen.
   renderStaged = () => {
     stagedList.replaceChildren();
     staged.forEach((file, i) => {
+      // The name is a field rather than a caption because it is not
+      // trustworthy. A pasted screenshot arrives as image.png, and a pick from
+      // the iOS photo library arrives as image.jpg under a name its owner has
+      // never seen. This is the one chance to fix it, and nothing in the app
+      // keys on it.
+      const name = el('input', {
+        type: 'text', class: 'name', value: file.name,
+        'aria-label': `Name for ${file.name}`,
+      });
+      name.addEventListener('change', () => {
+        if (name.value === file.name) return;
+        staged[i] = new File([file], renamed(name.value, file.name), { type: file.type });
+        renderStaged();
+      });
       stagedList.append(el('li', {},
         el('div', { class: 'rowtext' },
-          el('div', { class: 'name' }, file.name),
+          name,
           el('div', { class: 'data muted' }, humanSize(file.size))),
         el('div', { class: 'actions' },
           el('button', {
@@ -188,13 +251,97 @@ registerView('send', 'Send', (panel) => {
   }).catch(() => {});
 
   for (const type of ['dragenter', 'dragover']) {
-    drop.addEventListener(type, (e) => { e.preventDefault(); drop.classList.add('over'); });
+    drop.addEventListener(type, () => drop.classList.add('over'));
   }
   for (const type of ['dragleave', 'drop']) {
     drop.addEventListener(type, () => drop.classList.remove('over'));
   }
-  drop.addEventListener('drop', (e) => { e.preventDefault(); stageFiles([...e.dataTransfer.files]); });
-  picker.addEventListener('change', (e) => stageFiles([...e.target.files]));
+
+  // Both events are canceled, and document wide. Without dragover the browser
+  // refuses the drop outright; without drop it navigates this window at the
+  // file, which takes the staging list with it. Canceling only over the hatch
+  // is the same loss with a smaller target, so a near miss stages too.
+  document.addEventListener('dragover', (e) => e.preventDefault());
+  document.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    if (!e.dataTransfer) return;
+    try {
+      // The entry handles are taken before this yields, because the transfer
+      // and its items stop being readable once the handler returns.
+      const files = await filesFromDrop(e.dataTransfer);
+      if (!files.length) return;
+      showView('send');
+      stageFiles(files);
+    } catch (err) {
+      status.className = 'data bad';
+      status.textContent = `Those files could not be read. ${err.message}`;
+    }
+  });
+
+  picker.addEventListener('change', (e) => {
+    stageFiles([...e.target.files]);
+    // Cleared so the same file can be chosen again. Without this, a file
+    // removed from the list cannot be put back, because the input's value has
+    // not changed and no event fires.
+    e.target.value = '';
+  });
+
+  folder.addEventListener('change', (e) => {
+    const picked = [...e.target.files];
+    e.target.value = '';
+    if (!picked.length) return;
+    // The result is checked rather than the attribute. Firefox on Android
+    // accepts webkitdirectory and returns an empty relative path for every
+    // file, and what was actually delivered is what gets said: reconstructing a
+    // hierarchy that never arrived would be an invention.
+    const layered = picked.some((f) => f.webkitRelativePath);
+    stageFiles(layered
+      ? picked.map((f) => new File([f], f.webkitRelativePath, { type: f.type }))
+      : picked);
+    status.className = 'data muted';
+    status.textContent = layered ? ''
+      : 'This browser did not report the folder layout, so those files were added as a flat list.';
+  });
+
+  // Attached rather than advertised. Firefox on Android does not implement
+  // clipboardData.files at all and simply never reaches the line below, which
+  // is why the hint above it waits for a delivery instead of a version check.
+  document.addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData?.files || [])];
+    if (!files.length) return;
+    e.preventDefault();
+    showView('send');
+    stageFiles(files);
+  });
+
+  // The shell gesture for opening a file, where the modern spelling of the
+  // picker exists to hang it on. Elsewhere the key keeps whatever meaning the
+  // browser already gave it rather than being handed a broken one.
+  if (typeof HTMLInputElement.prototype.showPicker === 'function') {
+    document.addEventListener('keydown', (e) => {
+      if (panel.hidden || e.altKey || e.shiftKey || !(e.ctrlKey || e.metaKey)) return;
+      if (e.key?.toLowerCase() !== 'o') return;
+      e.preventDefault();
+      // showPicker refuses in contexts click() still works in, so a refusal
+      // falls back instead of eating the keystroke.
+      try { picker.showPicker(); } catch { picker.click(); }
+    });
+  }
+
+  // What this browser has proved it can do, and nothing else. The first read is
+  // asynchronous, so the screen starts at the floor every engine has and grows
+  // from there, which is the correct order: an affordance that appears late is
+  // an affordance, and one that appears wrongly is a lie.
+  const paintInbound = (caps) => {
+    dropLine.hidden = !caps.drop;
+    choose.textContent = caps.drop ? 'or choose' : 'Choose files';
+    pasteHint.hidden = !caps.paste;
+    const card = installCard(caps);
+    installNote.hidden = card === null;
+    installNote.textContent = card || '';
+  };
+  onCapabilities(paintInbound);
+  capabilities().then(paintInbound).catch(() => {});
 
   // Last, so a share or a launch that staged before this panel existed is on
   // screen the moment it does.

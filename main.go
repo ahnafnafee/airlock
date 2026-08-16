@@ -26,7 +26,7 @@ import (
 //go:embed web/index.html web/tokens.css web/app.css web/api.js web/app.js web/crypto.js web/cdc.js web/upload.js web/strip.js web/thumb.js web/sw.js web/naming.js web/views
 //go:embed web/peer.js web/staging.js web/stage-worker.js web/session.js web/wake.js
 //go:embed web/sealpool.js web/seal-worker.js
-//go:embed web/assemble.js web/assemble-worker.js web/export.js
+//go:embed web/assemble.js web/assemble-worker.js web/export.js web/inbound.js
 //go:embed web/manifest.webmanifest web/icon-192.png web/icon-512.png web/icon-maskable.png web/icon-badge.png
 var webFS embed.FS
 

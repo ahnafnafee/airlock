@@ -12,7 +12,7 @@ func TestSeenRegistersAndUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := d.Seen("pixel", "owner@example.com")
+	first := d.Seen("pixel", "owner@example.com", "")
 	if first.Node != "pixel" || first.User != "owner@example.com" {
 		t.Fatalf("device = %+v", first)
 	}
@@ -24,7 +24,7 @@ func TestSeenRegistersAndUpdates(t *testing.T) {
 	}
 
 	time.Sleep(2 * time.Millisecond)
-	second := d.Seen("pixel", "owner@example.com")
+	second := d.Seen("pixel", "owner@example.com", "")
 	if !second.FirstSeen.Equal(first.FirstSeen) {
 		t.Fatal("FirstSeen must not move")
 	}
@@ -40,8 +40,8 @@ func TestDefaultAllowAdmitsDevicesAfterTheFirst(t *testing.T) {
 	d, _ := NewDevices(t.TempDir(), true)
 	// The first device is admitted by the bootstrap rule whatever the policy
 	// says, so only a second device can show that defaultAllow is consulted.
-	d.Seen("first", "owner@example.com")
-	if !d.Seen("pixel", "owner@example.com").Allowed {
+	d.Seen("first", "owner@example.com", "")
+	if !d.Seen("pixel", "owner@example.com", "").Allowed {
 		t.Fatal("defaultAllow true should admit a device that is not the bootstrap one")
 	}
 	if !d.Allowed("pixel") {
@@ -53,10 +53,10 @@ func TestDefaultDenyHoldsNewDevices(t *testing.T) {
 	d, _ := NewDevices(t.TempDir(), false)
 	// The very first device bootstraps in, otherwise nobody could ever approve
 	// anybody and the server would be permanently unreachable.
-	if !d.Seen("first", "owner@example.com").Allowed {
+	if !d.Seen("first", "owner@example.com", "").Allowed {
 		t.Fatal("the first device ever seen must bootstrap in")
 	}
-	if d.Seen("pixel", "owner@example.com").Allowed {
+	if d.Seen("pixel", "owner@example.com", "").Allowed {
 		t.Fatal("defaultAllow false should hold a later device pending approval")
 	}
 	if d.Allowed("pixel") {
@@ -66,7 +66,7 @@ func TestDefaultDenyHoldsNewDevices(t *testing.T) {
 
 func TestRevokeTakesEffectImmediately(t *testing.T) {
 	d, _ := NewDevices(t.TempDir(), true)
-	d.Seen("pixel", "owner@example.com")
+	d.Seen("pixel", "owner@example.com", "")
 	if !d.Allowed("pixel") {
 		t.Fatal("should start allowed")
 	}
@@ -79,7 +79,7 @@ func TestRevokeTakesEffectImmediately(t *testing.T) {
 	}
 	// The identity gate runs Seen then Allowed on every request, so a later
 	// sighting must never recompute Allowed from policy and undo the revocation.
-	if d.Seen("pixel", "owner@example.com").Allowed || d.Allowed("pixel") {
+	if d.Seen("pixel", "owner@example.com", "").Allowed || d.Allowed("pixel") {
 		t.Fatal("a later sighting must not readmit a revoked device")
 	}
 	if err := d.SetAllowed("pixel", true); err != nil {
@@ -100,7 +100,7 @@ func TestAllowedIsFalseForUnknownDevice(t *testing.T) {
 func TestPairedFlagPersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
 	d, _ := NewDevices(dir, true)
-	d.Seen("pixel", "owner@example.com")
+	d.Seen("pixel", "owner@example.com", "")
 	if err := d.SetPaired("pixel"); err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestNewDevicesCreatesItsDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.Seen("pixel", "owner@example.com")
+	d.Seen("pixel", "owner@example.com", "")
 	if err := d.SaveErr(); err != nil {
 		t.Fatalf("registration was not persisted: %v", err)
 	}
@@ -140,8 +140,8 @@ func TestNewDevicesCreatesItsDirectory(t *testing.T) {
 
 func TestListIsSortedByNode(t *testing.T) {
 	d, _ := NewDevices(t.TempDir(), true)
-	d.Seen("zeta", "o@e.com")
-	d.Seen("alpha", "o@e.com")
+	d.Seen("zeta", "o@e.com", "")
+	d.Seen("alpha", "o@e.com", "")
 	got := d.List()
 	if len(got) != 2 || got[0].Node != "alpha" || got[1].Node != "zeta" {
 		t.Fatalf("order = %v", got)

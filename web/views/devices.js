@@ -9,13 +9,22 @@ function ago(iso) {
   return `${Math.round(mins / 1440)}d ago`;
 }
 
+// What proved these devices is not the same claim on every server, and printing
+// the Tailscale one on a server not using Tailscale is simply false. The mode
+// comes from the server rather than from anything this device can observe.
+function provenance() {
+  return state.config?.auth === 'token'
+    ? 'Every device that has reached this server. A shared access token is what '
+      + 'let them in; the passphrase is what lets them read anything.'
+    : 'Every device that has reached this server. Tailscale proves they are '
+      + 'yours; the passphrase is what lets them read anything.';
+}
+
 registerView('devices', 'Devices', (panel) => {
   const list = el('ul', { class: 'rows' });
   panel.append(
     el('h2', {}, 'Devices'),
-    el('p', { class: 'muted' },
-      'Every device that has reached this server. Tailscale proves they are yours; '
-      + 'the passphrase is what lets them read anything.'),
+    el('p', { class: 'muted' }, provenance()),
     list);
   refresh();
 
@@ -79,7 +88,8 @@ registerView('devices', 'Devices', (panel) => {
       el('div', { class: 'rowtext' },
         el('div', { class: 'name data' }, d.node, isMe ? ' (this device)' : ''),
         statusNode,
-        el('div', { class: 'data muted' }, `${d.user} · seen ${ago(d.lastSeen)}`)),
+        el('div', { class: 'data muted' },
+          [d.addr, d.user, `seen ${ago(d.lastSeen)}`].filter(Boolean).join(' · '))),
       actions);
   }
 });

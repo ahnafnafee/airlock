@@ -16,6 +16,7 @@ import (
 	"tailscale.com/client/local"
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 )
 
@@ -154,7 +155,7 @@ func identityFromWhoIs(lc whoIser, users map[string]bool) IdentityFunc {
 		if len(nodes) > 0 && !nodes[node] {
 			return Identity{}, false
 		}
-		return Identity{Node: node, User: user}, true
+		return Identity{Node: node, User: user, Addr: tailnetAddr(whois.Node)}, true
 	}
 }
 
@@ -203,3 +204,23 @@ func sortedKeys(m map[string]bool) []string {
 // API socket. Isolated into its own function because this package path has moved
 // between Tailscale releases.
 func newLocalClient() *local.Client { return &local.Client{} }
+
+// tailnetAddr is the node's own address on the tailnet, preferring IPv4 because
+// that is the form a person recognizes and types. It is informational only:
+// nothing authorizes on it, WhoIs having already proved the caller.
+func tailnetAddr(node *tailcfg.Node) string {
+	if node == nil {
+		return ""
+	}
+	var v6 string
+	for _, p := range node.Addresses {
+		ip := p.Addr()
+		if ip.Is4() {
+			return ip.String()
+		}
+		if v6 == "" {
+			v6 = ip.String()
+		}
+	}
+	return v6
+}

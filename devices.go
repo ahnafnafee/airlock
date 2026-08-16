@@ -17,6 +17,7 @@ import (
 type Device struct {
 	Node      string    `json:"node"`
 	User      string    `json:"user"`
+	Addr      string    `json:"addr,omitempty"`
 	FirstSeen time.Time `json:"firstSeen"`
 	LastSeen  time.Time `json:"lastSeen"`
 	Paired    bool      `json:"paired"`
@@ -65,7 +66,7 @@ func NewDevices(dir string, defaultAllow bool) (*Devices, error) {
 // Seen records a node's authentication. Registration is not authorization: a
 // device is recorded whether or not it is allowed, so the pairing screen can
 // offer it for approval.
-func (d *Devices) Seen(node, user string) Device {
+func (d *Devices) Seen(node, user, addr string) Device {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -79,6 +80,9 @@ func (d *Devices) Seen(node, user string) Device {
 		dev = Device{Node: node, FirstSeen: now, Allowed: allowed}
 	}
 	dev.User = user
+	if addr != "" {
+		dev.Addr = addr
+	}
 	dev.LastSeen = now
 	d.byNode[node] = dev
 	// The signature returns only a Device, so a persistence failure cannot reach

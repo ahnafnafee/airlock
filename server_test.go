@@ -191,7 +191,7 @@ func TestDevicesListAllowAndRevoke(t *testing.T) {
 // there the only observable effect is the caller losing access either way.
 func TestAllowRestoresARevokedDevice(t *testing.T) {
 	s, devices := newTestServer(t, true)
-	devices.Seen("laptop", "owner@example.com")
+	devices.Seen("laptop", "owner@example.com", "")
 
 	if code := do(t, s, "POST", "/api/devices/laptop/revoke", "").Code; code != http.StatusNoContent {
 		t.Fatalf("revoke = %d, want 204", code)
@@ -870,7 +870,7 @@ func TestPresenceAndSignalRoutes(t *testing.T) {
 	if code := do(t, s, "POST", "/api/signal", `{"to":"desktop","payload":"x"}`).Code; code != http.StatusNotFound {
 		t.Fatalf("signal to a device this server has never seen = %d, want 404", code)
 	}
-	devices.Seen("desktop", "owner@example.com")
+	devices.Seen("desktop", "owner@example.com", "")
 
 	// No stream for the target, so the sender is told to leave it queued.
 	if code := do(t, s, "POST", "/api/signal", `{"to":"desktop","payload":"x"}`).Code; code != http.StatusServiceUnavailable {
@@ -891,7 +891,7 @@ func TestSignalRejectsAPayloadThatWouldBreakTheStreamFraming(t *testing.T) {
 	// first newline. The encoding that keeps that true is the client's, so the
 	// server has to hold the caller to it rather than trust it.
 	s, devices := newTestServer(t, true)
-	devices.Seen("desktop", "owner@example.com")
+	devices.Seen("desktop", "owner@example.com", "")
 	if code := do(t, s, "POST", "/api/signal", `{"to":"desktop","payload":"a\nevent: inbox\ndata: 1\n\n"}`).Code; code != http.StatusBadRequest {
 		t.Fatalf("code = %d, want 400", code)
 	}
@@ -958,5 +958,40 @@ func TestProgressRejectsAWrongSizedBitmapOverHTTP(t *testing.T) {
 	}
 	if got := do(t, s, "PUT", "/api/transfer/"+created.ID+"/progress", "\x00\x00").Code; got != http.StatusBadRequest {
 		t.Fatalf("put oversized bitmap = %d, want 400", got)
+	}
+}
+
+// The tailnet address is the thing a person actually recognizes a machine by,
+// and it reaches the device list only if every hop carries it: the identity, the
+// registry, and both read endpoints.
+func TestTailnetAddressReachesTheDeviceList(t *testing.T) {
+	s, _ := newTestServerWithLimits(t, true, 4096, 1<<20)
+	s.cfg.Ident = func(*http.Request) (Identity, bool) {
+		return Identity{Node: "pixel", User: "owner@example.com", Addr: "100.101.102.103"}, true
+	}
+
+	var me map[string]any
+	json.Unmarshal(do(t, s, "GET", "/api/whoami", "").Body.Bytes(), &me)
+	if me["addr"] != "100.101.102.103" {
+		t.Fatalf("whoami addr = %v", me["addr"])
+	}
+
+	var list []map[string]any
+	json.Unmarshal(do(t, s, "GET", "/api/devices", "").Body.Bytes(), &list)
+	if len(list) != 1 || list[0]["addr"] != "100.101.102.103" {
+		t.Fatalf("devices = %v", list)
+	}
+}
+
+// The client says who vouched for a device, so it has to be told rather than
+// guess. A server running on a token would otherwise print a claim about
+// Tailscale that is not true of it.
+func TestConfigNamesTheAuthenticationMode(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	s.cfg.Auth = "token"
+	var got map[string]any
+	json.Unmarshal(do(t, s, "GET", "/api/config", "").Body.Bytes(), &got)
+	if got["auth"] != "token" {
+		t.Fatalf("auth = %v, want token", got["auth"])
 	}
 }

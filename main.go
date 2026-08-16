@@ -292,7 +292,7 @@ func run() error {
 	root.Handle("/", NewServer(ServerConfig{
 		Chunks: chunks, Transfers: transfers, Devices: devices, Push: pusher,
 		Events: events, Ident: ident, DataDir: *dataDir, CDC: cdcDefaults,
-		TTLHours: *ttlHours, Salt: salt, Static: static,
+		TTLHours: *ttlHours, Salt: salt, Static: static, Auth: *authMode,
 	}))
 
 	go sweepLoop(transfers, chunks)

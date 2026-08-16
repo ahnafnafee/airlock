@@ -18,6 +18,10 @@ import (
 type Identity struct {
 	Node string `json:"node"`
 	User string `json:"user"`
+	// Addr is the caller's tailnet address, when the tailnet is what proved
+	// them. It is empty under token auth, where the node name is already the
+	// address the request came from and repeating it would say nothing.
+	Addr string `json:"addr,omitempty"`
 }
 
 // IdentityFunc resolves the verified caller behind a request. Returning false
@@ -50,6 +54,10 @@ type ServerConfig struct {
 	TTLHours  int
 	Salt      string
 	Static    fs.FS
+	// Auth names what proves a caller: "tailscale" or "token". The client says
+	// different things about who a device belongs to depending on the answer,
+	// and a claim about Tailscale on a server not using it is simply false.
+	Auth string
 }
 
 type Server struct {
@@ -149,7 +157,7 @@ func crossSiteBlocked(r *http.Request) bool {
 func (s *Server) gate(h http.HandlerFunc) http.HandlerFunc {
 	return s.identified(func(w http.ResponseWriter, r *http.Request) {
 		id := who(r)
-		if !s.cfg.Devices.Seen(id.Node, id.User).Allowed {
+		if !s.cfg.Devices.Seen(id.Node, id.User, id.Addr).Allowed {
 			http.Error(w, "device not approved", http.StatusForbidden)
 			return
 		}
@@ -170,7 +178,7 @@ func (s *Server) identified(h http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "not authorized", http.StatusForbidden)
 			return
 		}
-		s.cfg.Devices.Seen(id.Node, id.User)
+		s.cfg.Devices.Seen(id.Node, id.User, id.Addr)
 		h(w, r.WithContext(context.WithValue(r.Context(), identKey{}, id)))
 	})
 }
@@ -241,12 +249,14 @@ func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"node": id.Node, "user": id.User, "allowed": allowed, "paired": paired,
+		"node": id.Node, "user": id.User, "addr": id.Addr,
+		"allowed": allowed, "paired": paired,
 	})
 }
 
 func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
+		"auth":     s.cfg.Auth,
 		"salt":     s.cfg.Salt,
 		"cdc":      s.cfg.CDC,
 		"ttlHours": s.cfg.TTLHours,

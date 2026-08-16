@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
@@ -262,5 +263,54 @@ func TestSortedKeys(t *testing.T) {
 	}
 	if got := sortedKeys(map[string]bool{}); len(got) != 0 {
 		t.Fatalf("sortedKeys of an empty map = %v, want empty", got)
+	}
+}
+
+// A tailnet node holds both families and the person reading the screen knows the
+// IPv4 one. Order in the node's own list is not guaranteed to put it first.
+func TestTailnetAddrPrefersIPv4(t *testing.T) {
+	node := func(addrs ...string) *tailcfg.Node {
+		n := &tailcfg.Node{}
+		for _, a := range addrs {
+			n.Addresses = append(n.Addresses, netip.MustParsePrefix(a))
+		}
+		return n
+	}
+	cases := map[string]struct {
+		node *tailcfg.Node
+		want string
+	}{
+		"v6 listed first": {node("fd7a:115c:a1e0::1/128", "100.64.0.1/32"), "100.64.0.1"},
+		"v4 only":         {node("100.64.0.1/32"), "100.64.0.1"},
+		"v6 only":         {node("fd7a:115c:a1e0::1/128"), "fd7a:115c:a1e0::1"},
+		"no addresses":    {node(), ""},
+		"no node at all":  {nil, ""},
+	}
+	for name, c := range cases {
+		if got := tailnetAddr(c.node); got != c.want {
+			t.Fatalf("%s: got %q, want %q", name, got, c.want)
+		}
+	}
+}
+
+// tailnetAddr being correct is worth nothing if nothing calls it. This drives
+// the whole path, from the WhoIs response to the Identity the gate hands on,
+// which is the seam where a helper can sit finished and unwired.
+func TestIdentityFromWhoIsCarriesTheTailnetAddress(t *testing.T) {
+	setFlag(t, allowNodes, "")
+	resp := whois("alice@example.com", "laptop")
+	resp.Node.Addresses = []netip.Prefix{
+		netip.MustParsePrefix("fd7a:115c:a1e0::1/128"),
+		netip.MustParsePrefix("100.64.0.7/32"),
+	}
+	ident := identityFromWhoIs(&fakeWhoIs{resp: resp}, map[string]bool{"alice@example.com": true})
+
+	got, ok := ident(request("100.64.0.7:51234"))
+	if !ok {
+		t.Fatal("allowed user was refused")
+	}
+	want := Identity{Node: "laptop", User: "alice@example.com", Addr: "100.64.0.7"}
+	if got != want {
+		t.Fatalf("identity = %+v, want %+v", got, want)
 	}
 }

@@ -99,21 +99,26 @@ function enterApp() {
 // in the send view's own upload loop, never in a copy of it.
 async function handleLaunch() {
   // Android share sheet: the worker stashed the payload before redirecting here,
-  // because the plaintext POST could not be allowed to reach the server. The
-  // stash is cleared before the upload starts, so a share that fails is not
-  // replayed on every later visit.
+  // because the plaintext POST could not be allowed to reach the server. That
+  // POST is a navigation, and any page can navigate this browser, so what was
+  // stashed is staged for confirmation rather than sent: a forged share reaches
+  // a list of names and a Send button nobody presses. The stash is cleared
+  // first, so the plaintext is not left at rest and a share is offered once
+  // rather than on every later visit.
   if (new URLSearchParams(location.search).has('share')) {
     const pending = await kvGet('pending-share');
     await kvPut('pending-share', null);
     history.replaceState(null, '', '/');
     if (pending) {
       showView('send');
-      const { sendFiles, sendText } = await import('./views/send.js');
-      if (pending.files?.length) await sendFiles(pending.files);
-      else if (pending.text) await sendText(pending.text);
+      const { stageShare } = await import('./views/send.js');
+      stageShare(pending);
     }
   }
-  // Windows Open with: Chrome hands the app the files it was launched on.
+  // Windows Open with: Chrome hands the app the files it was launched on. This
+  // one needs no confirmation of its own, because it is the confirmation: the
+  // browser only fills the launch queue when the person picked this app for
+  // those files in the shell, and no page can reach it.
   if ('launchQueue' in window) {
     window.launchQueue.setConsumer(async (params) => {
       if (!params.files?.length) return;

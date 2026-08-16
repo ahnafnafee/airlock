@@ -29,6 +29,19 @@ self.addEventListener('fetch', (event) => {
 // never reach the network: it is answered here whatever happens, including when
 // the stash fails, because a POST that falls through to the server would hand it
 // the very bytes the design exists to keep from it.
+//
+// A stash is not consent. A worker intercepts every in-scope navigation whoever
+// started it, so an auto-submitting form on a hostile page can reach this with a
+// payload of its choosing. The page therefore stages what it finds here and
+// waits for a Send, which is the gate the server's own Sec-Fetch-Site check is
+// for the routes that do reach the mux.
+//
+// ponytail: the stash itself is unauthenticated, so a hostile page can spend one
+// database write and put a list of names it chose in front of the owner. The
+// ceiling is that nothing about the request is checked. Lift it by refusing the
+// stash when Sec-Fetch-Site is neither 'none' nor 'same-origin', once the value
+// a genuine Android share carries has been read off real hardware. It is not
+// checked on faith, because guessing wrong makes every real share vanish.
 async function stashShare(request) {
   try {
     const form = await request.formData();

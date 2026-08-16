@@ -15,6 +15,10 @@ function humanSize(bytes) {
 // synchronously, so anything that has shown this view can send.
 let controls = null;
 
+// One authored name for the file a shared link or note travels as, so the row
+// the staging list shows is the row the inbox will show.
+const SHARED_TEXT_NAME = 'shared.txt';
+
 function requireControls() {
   if (!controls) throw new Error('the send view has not been shown yet');
   return controls;
@@ -28,6 +32,7 @@ registerView('send', 'Send', (panel) => {
     picker);
 
   const recipient = el('select', { id: 'to' }, el('option', { value: '' }, 'All my devices'));
+  const staging = el('div', { hidden: true });
   const status = el('div', { class: 'data muted' });
   const progress = el('div');
 
@@ -36,10 +41,11 @@ registerView('send', 'Send', (panel) => {
     drop,
     el('p', { class: 'label' }, 'To'),
     recipient,
+    staging,
     progress,
     status);
 
-  controls = { recipient, progress, status };
+  controls = { recipient, staging, progress, status };
 
   api.devices().then((devices) => {
     for (const d of devices) {
@@ -111,5 +117,41 @@ export async function sendFiles(files) {
 // travels as a file like everything else, so the inbox has one kind of row and
 // the sealing path has one shape.
 export function sendText(text) {
-  return sendFiles([new File([text], 'shared.txt', { type: 'text/plain' })]);
+  return sendFiles([new File([text], SHARED_TEXT_NAME, { type: 'text/plain' })]);
+}
+
+// A launch is not a click. The share sheet delivers its payload through a
+// navigation, and a navigation is something any page the browser is pointed at
+// can start, so a share arriving here is only a proposal: it is listed by name
+// and waits for the same Send a dropped file would have needed. That is what
+// keeps a forged POST from turning into an upload nobody asked for, and it
+// works whatever the request claimed about where it came from.
+function stage(items, run) {
+  const { staging } = requireControls();
+  const send = el('button', { class: 'primary', type: 'button' }, 'Send');
+  send.addEventListener('click', () => {
+    staging.hidden = true;
+    staging.replaceChildren();
+    run();
+  });
+  staging.replaceChildren(
+    el('p', { class: 'label' }, 'Shared'),
+    // Same row shape the inbox uses: the text block takes the free space so a
+    // long name ellipsizes instead of pushing the size off a narrow screen.
+    el('ul', { class: 'rows' }, items.map((item) => el('li', {},
+      el('div', { class: 'rowtext' }, el('div', { class: 'data name' }, item.name)),
+      el('span', { class: 'data muted' }, humanSize(item.size))))),
+    el('p', {}, send));
+  staging.hidden = false;
+  send.focus();
+}
+
+// The one entry point for a stashed share. Files and text converge on the same
+// staged confirmation and then on the same upload loop, so neither can acquire
+// a second path to the network.
+export function stageShare({ files, text }) {
+  if (files?.length) stage(files, () => sendFiles(files));
+  // Blob measures the encoded bytes, which is the size the row would otherwise
+  // report wrong for anything outside ASCII.
+  else if (text) stage([{ name: SHARED_TEXT_NAME, size: new Blob([text]).size }], () => sendText(text));
 }

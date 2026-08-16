@@ -123,3 +123,33 @@ func TestManifestLaunchTargetsHaveHandlers(t *testing.T) {
 		t.Errorf("share_target method = %q, want POST; a GET share would put the payload in a URL", man.ShareTarget.Method)
 	}
 }
+
+// The share POST is the one entry point that does not reach the mux, so the
+// gate's cross-site check never runs on it. A service worker intercepts an
+// in-scope navigation whoever started it, which means a hostile page can post a
+// payload of its choosing to /share and land the browser back on the app. What
+// keeps that from becoming an upload is that the page stages the stash and waits
+// for a Send. Uploading it on arrival instead is a one-line change that reads
+// like a convenience, so the shape is pinned here.
+func TestASharedPayloadIsStagedRatherThanUploaded(t *testing.T) {
+	app, err := webFS.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	send, err := webFS.ReadFile("web/views/send.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(string(app), "stageShare(pending)") {
+		t.Error("web/app.js does not hand the stashed share to stageShare, so nothing confirms it before it uploads")
+	}
+	if !strings.Contains(string(send), "export function stageShare") {
+		t.Error("web/views/send.js does not export stageShare, so the launch path has no staged confirmation to reach")
+	}
+	for _, call := range []string{"sendFiles(pending", "sendText(pending"} {
+		if strings.Contains(string(app), call) {
+			t.Errorf("web/app.js calls %s...), which uploads a share nobody confirmed", call)
+		}
+	}
+}

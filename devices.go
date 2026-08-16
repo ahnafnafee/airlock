@@ -87,18 +87,29 @@ func (d *Devices) seen(node, user, addr string) (Device, bool) {
 		allowed := d.defaultAllow || len(d.byNode) == 0
 		dev = Device{Node: node, FirstSeen: now, Allowed: allowed}
 	}
+	// What has to survive a restart is who is admitted, not when they were last
+	// here. Writing the whole registry for a timestamp put a disk write on every
+	// request, under the lock every request takes, which is the one place a
+	// per-request cost is paid by every other request as well.
+	//
+	// The cost of not writing it is that "seen 3h ago" can be wrong after a
+	// restart. The cost of writing it was that four parallel chunk uploads
+	// serialized behind eight rewrites of the file.
+	durable := !ok || dev.User != user || (addr != "" && dev.Addr != addr)
 	dev.User = user
 	if addr != "" {
 		dev.Addr = addr
 	}
 	dev.LastSeen = now
 	d.byNode[node] = dev
-	// The signature returns only a Device, so a persistence failure cannot reach
-	// the caller. It must not vanish either: an unrecorded registration means the
-	// on-disk allowlist is stale, and after a restart an empty registry bootstraps
-	// the next node straight in.
-	if err := d.saveLocked(); err != nil {
-		log.Printf("devices: persisting %s failed: %v", node, err)
+	// A persistence failure cannot reach the caller through this signature. It
+	// must not vanish either: an unrecorded registration means the on-disk
+	// allowlist is stale, and after a restart an empty registry bootstraps the
+	// next node straight in.
+	if durable {
+		if err := d.saveLocked(); err != nil {
+			log.Printf("devices: persisting %s failed: %v", node, err)
+		}
 	}
 	return dev, !ok
 }

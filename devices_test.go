@@ -147,3 +147,61 @@ func TestListIsSortedByNode(t *testing.T) {
 		t.Fatalf("order = %v", got)
 	}
 }
+
+// A sighting used to rewrite the whole registry, so every request paid a disk
+// write under the lock every other request takes. What has to survive a restart
+// is who is admitted, not when they were last here.
+func TestRepeatSightingsDoNotRewriteTheRegistry(t *testing.T) {
+	dir := t.TempDir()
+	d, err := NewDevices(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "devices.json")
+
+	// The first sighting is a registration and must reach disk, or a restart
+	// bootstraps the next node straight in.
+	d.Seen("pixel", "owner@example.com", "100.64.0.1")
+	first, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("a registration did not reach disk: %v", err)
+	}
+
+	// Repeat sightings of an unchanged device change nothing that has to last.
+	for i := 0; i < 20; i++ {
+		d.Seen("pixel", "owner@example.com", "100.64.0.1")
+	}
+	again, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again.ModTime().Equal(first.ModTime()) {
+		t.Fatal("repeat sightings rewrote the registry")
+	}
+
+	// Anything that has to survive still does. A device that changes address is
+	// a different device to reach.
+	d.Seen("pixel", "owner@example.com", "100.64.0.9")
+	moved, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.ModTime().Equal(first.ModTime()) {
+		t.Fatal("a changed address was not persisted")
+	}
+
+	// And it is the new value that survives a reload, not the old one.
+	reloaded, err := NewDevices(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	for _, dev := range reloaded.List() {
+		if dev.Node == "pixel" {
+			got = dev.Addr
+		}
+	}
+	if got != "100.64.0.9" {
+		t.Fatalf("reloaded addr = %q, want 100.64.0.9", got)
+	}
+}

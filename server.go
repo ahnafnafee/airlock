@@ -159,7 +159,10 @@ func crossSiteBlocked(r *http.Request) bool {
 func (s *Server) gate(h http.HandlerFunc) http.HandlerFunc {
 	return s.identified(func(w http.ResponseWriter, r *http.Request) {
 		id := who(r)
-		if !s.cfg.Devices.Seen(id.Node, id.User, id.Addr).Allowed {
+		// A read, not a second registration. identified has already recorded this
+		// device on the way in, and asking again wrote the whole registry to disk
+		// a second time for every gated request.
+		if !s.cfg.Devices.Allowed(id.Node) {
 			http.Error(w, "device not approved", http.StatusForbidden)
 			return
 		}

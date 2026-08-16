@@ -1,0 +1,38 @@
+[Unit]
+Description=Airlock encrypted transfer
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=airlock
+Group=airlock
+ExecStart=/usr/local/bin/airlock --data /var/lib/airlock
+Restart=on-failure
+RestartSec=5
+
+StateDirectory=airlock
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=/var/lib/airlock
+
+# Host mode reaches the tailscaled local API socket, which is root-owned on a
+# default install. Grant this one user rather than running the whole service as
+# root, with:
+#
+#   sudo tailscale set --operator=airlock
+#
+# That is the supported grant: it hands the socket to the named user, so no
+# group has to be invented and no capability has to be widened. Embedded mode
+# talks to no daemon and needs none of it.
+
+# Binding 443 without privilege. Host mode listens on the machine's tailnet
+# address, embedded mode on its own tsnet node; both use 443.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

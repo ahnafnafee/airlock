@@ -189,27 +189,97 @@ export function onInbox(fn) { listeners.add(fn); }
 // description has nowhere else to be read from.
 export function onSignal(fn) { signalListeners.add(fn); }
 
+// EventSource readyState CLOSED, per the HTML standard. Written out rather than
+// read off the global so this module also loads in a runtime that has no
+// EventSource at all.
+const STREAM_CLOSED = 2;
+
+export const RETRY_BASE_MS = 1000;
+export const RETRY_CAP_MS = 30000;
+
+// How long to wait before reopening a stream the browser gave up on. The
+// ceiling doubles with each consecutive failure up to a cap, and the wait lands
+// somewhere in the upper half of that ceiling.
+//
+// The jitter is the reason for the half. Every device on one tailnet loses the
+// same server in the same instant, so an unjittered backoff has all of them
+// knock on the door together in the second it comes back, and a server that
+// just restarted is the least able to answer them all at once.
+export function retryDelay(attempt, random = Math.random) {
+  const ceiling = Math.min(RETRY_CAP_MS, RETRY_BASE_MS * 2 ** attempt);
+  return Math.round(ceiling / 2 + random() * (ceiling / 2));
+}
+
+// Test seam. Production never calls this.
+let stream = {
+  open: (path) => new EventSource(path),
+  wait: (fn, ms) => setTimeout(fn, ms),
+};
+export function __setStreamImpl(impl) { stream = impl; }
+
 // The open stream is what makes the inbox live without asking for a
 // notification permission. Push stays for the case this cannot cover: an app
 // that is not running at all.
-function listen() {
-  const source = new EventSource('/api/events');
-  source.addEventListener('inbox', () => {
-    for (const fn of listeners) fn();
-  });
-  // The payload is base64 because an SSE data field ends at the first newline
-  // and a session description is full of them. It is passed on untouched: the
-  // encoding is the stream's problem and the contents are the session's.
-  source.addEventListener('signal', (event) => {
-    for (const fn of signalListeners) fn(event.data);
-  });
-  // EventSource reconnects on its own after a drop, so there is nothing to
-  // schedule here. This only reports a stream the browser gave up on.
-  source.addEventListener('error', () => {
-    if (source.readyState === EventSource.CLOSED) {
-      console.warn('event stream closed');
-    }
-  });
+//
+// A stream that stays closed makes the device deaf. EventSource retries a
+// transient drop by itself, but an HTTP error, or a server that went away and
+// came back, leaves it CLOSED for good, and from then on every inbox nudge and
+// every peer offer is lost until a person reloads the page. So a closed stream
+// is reopened, and a reopened one begins by re-running the work an inbox nudge
+// does, because the nudge that fired while it was down does not come again.
+//
+// ponytail: the reopen is silent. A device that has been deaf for half a minute
+// looks exactly like one whose inbox is genuinely empty, and telling those apart
+// wants a visible reconnecting state on the shell, which is a surface this file
+// does not own.
+export function listen() {
+  let attempt = 0;
+  let missed = false;
+
+  const open = () => {
+    const source = stream.open('/api/events');
+    // A source that has handed off to a successor is finished. Without this, a
+    // source reporting its failure more than once would start a second chain of
+    // reopens racing the first, and each chain would carry its own backoff.
+    let retired = false;
+
+    source.addEventListener('open', () => {
+      attempt = 0;
+      if (!missed) return;
+      missed = false;
+      // Exactly what an inbox nudge does. A nudge carries no payload and its
+      // listeners re-read whatever they need, so running them with no event in
+      // hand is a catch-up rather than a lie about something having arrived.
+      for (const fn of listeners) fn();
+    });
+
+    source.addEventListener('inbox', () => {
+      for (const fn of listeners) fn();
+    });
+
+    // The payload is base64 because an SSE data field ends at the first newline
+    // and a session description is full of them. It is passed on untouched: the
+    // encoding is the stream's problem and the contents are the session's.
+    //
+    // A signal that arrived while the stream was down cannot be replayed, since
+    // nothing stored it. The catch-up above is what recovers it: the offering
+    // device drains its own queue on the same nudge and offers again.
+    source.addEventListener('signal', (event) => {
+      for (const fn of signalListeners) fn(event.data);
+    });
+
+    source.addEventListener('error', () => {
+      // CONNECTING means EventSource is already handling it and a second stream
+      // would only duplicate the first. CLOSED is the state it will not leave
+      // on its own, and the only one worth reopening from.
+      if (retired || source.readyState !== STREAM_CLOSED) return;
+      retired = true;
+      missed = true;
+      stream.wait(open, retryDelay(attempt++));
+    });
+  };
+
+  open();
 }
 
 // The two ways the operating system hands this app something to send. Neither
@@ -309,7 +379,17 @@ async function loadViews() {
 async function waitForApproval() {
   const { renderStrip } = await import('./strip.js');
   $('pairing-node').textContent = state.me.node;
-  renderStrip($('pairing-strip'), 48).setAll('sending');
+  // Left outlined, not filled. Each signal color carries exactly one meaning:
+  // sodium is in transit and seal is sealed or already held. Nothing is in
+  // transit while this device waits for a person at another device to approve
+  // it, so a sodium strip would have the app's most recognizable element state
+  // something untrue about the system. Pending is the honest reading, because
+  // nothing has happened yet.
+  //
+  // ponytail: so this screen is static. Making it feel alive is worth doing and
+  // needs a segment state of its own in the strip's stylesheet, not an accent
+  // borrowed from a meaning it already carries.
+  renderStrip($('pairing-strip'), 48).setAll('pending');
   $('pairing').hidden = false;
   while (!state.me.allowed) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -370,6 +450,12 @@ async function boot() {
   });
 }
 
-boot().catch((err) => {
-  document.body.prepend(el('p', { class: 'bad', style: 'padding:16px' }, err.message));
-});
+// A page is what boots. Importing this module to exercise one of its exports is
+// not, and there is no document to report a failure into. Guarding the call
+// keeps the entry point here, rather than in a second file that would exist only
+// to make this one importable.
+if (typeof document !== 'undefined') {
+  boot().catch((err) => {
+    document.body.prepend(el('p', { class: 'bad', style: 'padding:16px' }, err.message));
+  });
+}

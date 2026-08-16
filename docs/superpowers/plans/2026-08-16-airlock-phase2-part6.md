@@ -22,6 +22,18 @@ And one reliability property that matters more than any of them: **the sending d
 
 Nothing here changes the wire format, the crypto, or the chunk ids. These are the same bytes, moving faster.
 
+## Rejected, with reasons
+
+Recorded so they are not proposed again, and so the reasoning can be checked against task 36's measurements rather than taken on faith.
+
+**Buffering the file in RAM.** The network moves 12 to 40 MB/s; a SATA SSD reads at roughly 500 MB/s and an NVMe drive at several GB/s. Disk is already one to two orders of magnitude faster than the wire, so this optimizes the step that is not costing anything. It would also destroy the flat-memory property that lets a 20 GB transfer cost what a 20 MB one does, which is the single reason large transfers are expected to be reliable here. The operating system's page cache already provides the part that helps, for free, since recently written chunks are re-read from memory.
+
+**Encrypting or hashing on the GPU.** Web Crypto's AES-GCM reaches AES-NI, a dedicated instruction performing an AES round per cycle, and already runs at several GB/s. A GPU has no equivalent instruction, so AES would run as shader code, and the data would pay a PCIe round trip to reach VRAM and return. At the demand rate above, the transfer overhead alone exceeds the entire cost of the encryption. The same holds for SHA-256.
+
+The one genuinely parallel piece is boundary detection, and it only binds above roughly 1.6 Gbps. Even then the cheap answer is SeqCDC, a byte-comparison loop, before anything involving a GPU.
+
+**If task 36's breakdown shows disk read or crypto to be a meaningful share of the wall clock, these conclusions are wrong and should be revisited.** That is what step 4 of it measures.
+
 ---
 
 ### Task 33: Keep the device awake
@@ -421,7 +433,14 @@ git commit -m "feat(peer): parallel connections, unordered channels and message 
 - Produces: `export function sealPool(size)` returning `{seal(index, plain), close()}`
 - Changed: preparing a transfer stages sealed chunks as it cuts, and returns the id list
 
-**Two wastes, removed together.**
+**Four wastes, removed together.**
+
+**Two of them are copies rather than computation**, which is the kind of cost that hides because no profile line is named after it:
+
+- **Chunks are structured-cloned into the workers.** `postMessage` copies by default, so every chunk is duplicated on the way in. Passing the buffer in the transfer list makes it a pointer move. The sealed result already comes back transferred; the input was missed.
+- **Staging uses the async file API.** `createWritable()` allocates and awaits per write. `createSyncAccessHandle()` is available in dedicated workers and is substantially faster. Since sealing already happens in a worker, staging belongs there too, so the bytes are sealed and written in one place and never cross a thread boundary twice.
+
+**Two are the ones this task was originally for:**
 
 **Sealing was serial.** Cutting is inherently sequential, because a content-defined boundary depends on the bytes before it. Hashing and sealing a chunk depend on nothing but that chunk. So the main thread keeps cutting and hands each chunk to a pool of workers, which is the difference between one core and all of them on the CPU-bound half.
 
@@ -502,20 +521,38 @@ import { chunkIdentity, sealChunk } from './crypto.js';
 let master = null;
 let mode = null;
 
+let stageDir = null;
+
 self.onmessage = async (event) => {
   const msg = event.data;
   if (msg.type === 'init') {
-    // A non-extractable CryptoKey survives structured clone, so the key material
-    // is never serialized to get here.
+    // A non-extractable CryptoKey survives structured clone, so no key material
+    // is serialized to get here.
     master = msg.master;
     mode = msg.mode;
+    stageDir = msg.stageDir;
     self.postMessage({ type: 'ready' });
     return;
   }
   try {
     const { h, cid } = await chunkIdentity(master, mode, msg.plain);
     const sealed = await sealChunk(master, mode, h, cid, msg.plain);
-    self.postMessage({ index: msg.index, h, cid, sealed }, [sealed.buffer]);
+
+    // Written here rather than back on the main thread. The synchronous handle
+    // is only available in a worker and is much faster than createWritable, and
+    // writing where the bytes already are avoids sending them across a thread
+    // boundary a second time.
+    const handle = await stageDir.getFileHandle(String(msg.index), { create: true });
+    const access = await handle.createSyncAccessHandle();
+    try {
+      access.write(sealed, { at: 0 });
+      access.flush();
+    } finally {
+      access.close();
+    }
+
+    // Only the identity comes back. The sealed bytes stay on disk.
+    self.postMessage({ index: msg.index, h, cid });
   } catch (err) {
     self.postMessage({ index: msg.index, error: String(err) });
   }
@@ -529,6 +566,8 @@ A fixed pool sized from `navigator.hardwareConcurrency`, capped so a 32-core mac
 - Results resolve by index, since completion order is not submission order.
 - `seal()` applies backpressure when every worker is busy, or the caller can cut faster than the pool seals and hold the whole file in memory.
 - `close()` terminates every worker, including on error.
+- **Chunks are transferred, not cloned.** `worker.postMessage({index, plain}, [plain.buffer])` moves the buffer instead of copying it. Without the transfer list, every chunk is duplicated on the way in, which is a full extra copy of the file across a transfer and appears in no profile line by name. The plain buffer is unusable by the caller afterward, which is correct: it has been handed over.
+- Each worker is initialized once with the master key, the mode, and the staging directory handle, so per-chunk messages carry only an index and bytes.
 
 - [ ] **Step 4: Prepare and stage in one pass**
 
@@ -553,10 +592,11 @@ export async function prepare(file, { mk, mode, cdc, transferId, onProgress }) {
   try {
     for await (const plain of chunkFile(file, cdc)) {
       const i = index++;
-      pending.push(pool.seal(i, plain).then(async (r) => {
+      // The worker seals and stages. Only the identity comes back, so the bytes
+      // cross a thread boundary once, going in, and never come back.
+      pending.push(pool.seal(i, plain).then((r) => {
         cids[r.index] = r.cid;
         hashes[r.index] = r.h;
-        await stage.put(r.index, r.sealed);
         onProgress?.({ prepared: r.index + 1 });
       }));
     }

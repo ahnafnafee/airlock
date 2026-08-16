@@ -435,6 +435,37 @@ registerView('send', 'Send', (panel) => {
 // The checkbox picks the destination of the sealed chunks and nothing else. Both
 // paths chunk, seal and record the transfer identically, so the file the
 // recipient ends up with does not depend on which one carried it.
+
+// Held chunks were never uploaded and must never render as stored: the two
+// colors mean different things and that distinction is the whole point of the
+// strip.
+//
+// Where a chunk sits matters as much as which state it is in. The strip is a
+// row in file order, so its reader takes a segment's place as that chunk's
+// place in the file. Painting held chunks as a block from the start would show
+// a file whose middle changed as one whose tail did, which is exactly the
+// question a delta makes interesting. The uploader reports the positions, so
+// they are painted where they belong.
+//
+// The direct path reports no positions, because on it nothing is held and
+// nothing is on a wire until a peer session opens. It falls back to counts,
+// which is all there is to say about a file being sealed onto this device.
+function paintStrip(strip, p) {
+  if (!p.heldAt) {
+    strip.setRange(0, p.held || 0, 'held');
+    strip.setRange(p.held || 0, (p.held || 0) + (p.sent || 0), 'stored');
+    strip.setRange((p.held || 0) + (p.sent || 0),
+      (p.held || 0) + (p.sent || 0) + (p.inflight || 0), 'sending');
+    return;
+  }
+  strip.setAll('pending');
+  for (const i of p.heldAt) strip.set(i, 'held');
+  for (const i of p.storedAt || []) strip.set(i, 'stored');
+  // The chunks on the wire go last, so that inside a segment shared by several
+  // chunks the state that is moving is the one you see.
+  for (const i of p.inflightAt || []) strip.set(i, 'sending');
+}
+
 async function sendNow(files) {
   const { recipient, hold, progress, status } = requireControls();
   const to = recipient.value ? [recipient.value] : [];
@@ -460,16 +491,7 @@ async function sendNow(files) {
           // the file size. A strip with the wrong number of segments is the one
           // thing this element must never be.
           if (!strip && p.total) strip = renderStrip(progress, p.total);
-          if (strip) {
-            // Held chunks were never uploaded and must never render as stored:
-            // the two colors mean different things and the distinction is the
-            // whole point of the strip.
-            strip.setRange(0, p.held, 'held');
-            strip.setRange(p.held, p.held + p.sent, 'stored');
-            // The chunks on the wire go last, so that inside a segment shared by
-            // several chunks the state that is moving is the one you see.
-            strip.setRange(p.held + p.sent, p.held + p.sent + p.inflight, 'sending');
-          }
+          if (strip) paintStrip(strip, p);
           // On the direct path nothing is held and nothing is on a wire: the
           // count is chunks sealed onto this device. Until the file has been cut
           // there is no total to count against, so the caption counts alone and
@@ -485,10 +507,7 @@ async function sendNow(files) {
         : await queueForDelivery(file, { ...opts, openStage });
       // Settle the strip. Nothing is in transit once either path resolves, so no
       // segment may be left pulsing amber.
-      if (strip) {
-        strip.setRange(0, r.held, 'held');
-        strip.setRange(r.held, r.total, 'stored');
-      }
+      if (strip) paintStrip(strip, { ...r, inflightAt: [], inflight: 0 });
       status.textContent = onServer
         ? `Sent ${file.name} · ${r.held} of ${r.total} chunks were already here`
         // The same words the checkbox promised, so the confirmation reads as

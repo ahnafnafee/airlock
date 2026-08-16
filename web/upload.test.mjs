@@ -528,3 +528,37 @@ test('a queued empty file is refused before the server hears about it', async ()
   assert.equal(api.calls.created.length, 0);
   assert.equal(stage.staged.size, 0);
 });
+
+// The strip is a row in file order, so a reader takes a segment's place as that
+// chunk's place in the file. Reporting only counts made every re-send look like
+// a change at the tail, whatever had actually changed, which is precisely the
+// question a delta makes interesting.
+test('a re-send reports where the held chunks are, not just how many', async () => {
+  // Deterministic but non-repeating, so no two chunks share content and a
+  // position is unambiguous.
+  const bytes = new Uint8Array(4096);
+  let x = 1;
+  for (let i = 0; i < bytes.length; i++) { x = (x * 1103515245 + 12345) & 0x7fffffff; bytes[i] = x >>> 16; }
+  const file = new File([bytes], 'delta.bin');
+  const mk = await mkP;
+
+  const first = fakeApi();
+  await uploadThroughServer(file, { mk, mode: MODE_SEALED, cdc: CDC, api: first, onProgress() {} });
+  const all = first.calls.chunks;
+  assert.ok(all.length >= 3, `needs several chunks to place one, got ${all.length}`);
+  assert.equal(new Set(all).size, all.length, 'the fixture must not repeat a chunk');
+
+  // Every chunk held except one in the MIDDLE, which is the shape of an edit.
+  const middle = Math.floor(all.length / 2);
+  const held = new Set(all.filter((_, i) => i !== middle));
+  const api = fakeApi(held);
+  const reports = [];
+  const r = await uploadThroughServer(file, {
+    mk, mode: MODE_SEALED, cdc: CDC, api, onProgress: (p) => reports.push(p),
+  });
+
+  const expected = all.map((_, i) => i).filter((i) => i !== middle);
+  assert.deepEqual(r.heldAt, expected, 'every position except the changed one should report as held');
+  assert.deepEqual(reports.at(-1).storedAt, [middle],
+    `the stored position should be the one that changed, got ${JSON.stringify(reports.at(-1).storedAt)}`);
+});

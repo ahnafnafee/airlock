@@ -178,6 +178,14 @@ export async function uploadThroughServer(file, opts) {
     // is not a dedup hit: subtracting a de-duplicated set size would report a
     // first upload of a mostly-empty disk image as almost entirely held.
     held: ids.filter((x) => !wanted.has(x.cid)).length,
+    // Where those chunks sit, not just how many there are. The strip is a row
+    // in file order, so a reader takes a segment's place in it as that chunk's
+    // place in the file. Painting the held ones as a block from the start would
+    // report a file whose middle changed as one whose tail did, which is the
+    // one thing about a delta the strip is uniquely able to show.
+    heldAt: ids.map((x, i) => (wanted.has(x.cid) ? -1 : i)).filter((i) => i >= 0),
+    storedAt: [],
+    inflightAt: [],
     sent: 0,
     // How many chunks are on the wire right this instant. The strip paints that
     // window amber, and amber means in transit and nothing else, so the count
@@ -203,14 +211,17 @@ export async function uploadThroughServer(file, opts) {
     const sealed = await sealChunk(mk, mode, h, cid, plain);
     // Reported on entry as well as on completion, so the strip can light the
     // window that is actually moving instead of only the one that has landed.
+    const at = index - 1;
     progress.inflight++;
-    onProgress({ ...progress });
+    progress.inflightAt.push(at);
+    onProgress({ ...progress, inflightAt: [...progress.inflightAt], storedAt: [...progress.storedAt] });
     const p = withRetry(() => api.putChunk(cid, id, sealed))
-      .then(() => { progress.sent++; })
+      .then(() => { progress.sent++; progress.storedAt.push(at); })
       .finally(() => {
         inflight.delete(p);
         progress.inflight--;
-        onProgress({ ...progress });
+        progress.inflightAt = progress.inflightAt.filter((i) => i !== at);
+        onProgress({ ...progress, inflightAt: [...progress.inflightAt], storedAt: [...progress.storedAt] });
       });
     inflight.add(p);
     if (inflight.size >= CONCURRENCY) await Promise.race(inflight);

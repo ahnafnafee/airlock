@@ -297,7 +297,20 @@ func run() error {
 
 	go sweepLoop(transfers, chunks)
 	log.Printf("airlock up: auth=%s addr=%s", *authMode, ln.Addr())
-	return http.Serve(ln, root)
+	srv := &http.Server{
+		Handler: root,
+		// Headers must arrive promptly. The body deliberately has no deadline:
+		// a chunk can be large and a phone's radio slow, and a transfer that is
+		// making progress must not be cut off for taking a while. What bounds a
+		// stalled body instead is that it no longer holds any lock, so it costs
+		// one connection rather than every upload on the server.
+		ReadHeaderTimeout: 20 * time.Second,
+		// An idle connection that is never reused should not be held forever.
+		// The event stream is a response in progress, not an idle connection, so
+		// this does not touch it.
+		IdleTimeout: 5 * time.Minute,
+	}
+	return srv.Serve(ln)
 }
 
 // loadOrCreateSalt returns the public PBKDF2 salt, generating it once. It is not

@@ -262,19 +262,36 @@ func (t *Transfers) PutRecord(id, kind string, r io.Reader) error {
 	}
 	p := filepath.Join(dir, kind)
 
+	// The record's length is not declared, so the cap is what has to be
+	// reserved up front. This check is advisory and the one below the write is
+	// authoritative, exactly as the chunk store does it.
+	t.recMu.Lock()
+	admitErr := t.admitLocked(int64(t.maxRecord))
+	t.recMu.Unlock()
+	if admitErr != nil {
+		return admitErr
+	}
+
+	// Written with no lock held. recMu serializes every record write in the
+	// process, so holding it across the body read would let one stalled upload
+	// block the records of every other transfer.
+	tmp, size, err := writeTemp(p, r, int64(t.maxRecord))
+	if err != nil {
+		return err
+	}
+
 	t.recMu.Lock()
 	defer t.recMu.Unlock()
-	// The record's length is not declared, so the cap is what has to be
-	// reserved. Measuring what actually landed afterwards keeps the total
-	// honest, the same trade the chunk store makes.
-	if err := t.admitLocked(int64(t.maxRecord)); err != nil {
+	if err := t.admitLocked(size); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	before := fileSize(p)
-	if err := writeStream(p, r, int64(t.maxRecord)); err != nil {
+	if err := os.Rename(tmp, p); err != nil {
+		os.Remove(tmp)
 		return err
 	}
-	t.recUsed += fileSize(p) - before
+	t.recUsed += size - before
 	return nil
 }
 

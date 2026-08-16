@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func cid(n byte) string { return strings.Repeat(string("0123456789abcdef"[n&15]), 64) }
@@ -230,4 +231,67 @@ func TestOpenReportsAMissingChunkAsNotFound(t *testing.T) {
 	if _, err := c.Open(cid(3)); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
+}
+
+// A chunk body arrives over the network, so reading it inside the store's lock
+// puts a network transfer in a process-wide critical section: the parallel
+// uploads the client deliberately runs would serialize, and one phone stalled
+// mid-chunk would block every upload from every device until its connection
+// died. This drives that shape directly, with a reader that blocks until it is
+// released.
+func TestASlowChunkBodyDoesNotBlockOtherUploads(t *testing.T) {
+	c, err := NewChunkStore(t.TempDir(), 1<<20, 1<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	release := make(chan struct{})
+	slowDone := make(chan error, 1)
+	go func() {
+		slowDone <- c.Put(cid(1), &blockingReader{body: []byte("slow"), gate: release})
+	}()
+
+	// Give the slow upload time to be inside Put and reading its body.
+	time.Sleep(50 * time.Millisecond)
+
+	fastDone := make(chan error, 1)
+	go func() { fastDone <- c.Put(cid(2), strings.NewReader("fast")) }()
+
+	select {
+	case err := <-fastDone:
+		if err != nil {
+			t.Fatalf("the unrelated upload failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("an unrelated upload was blocked by one whose body had stalled")
+	}
+
+	close(release)
+	if err := <-slowDone; err != nil {
+		t.Fatalf("the slow upload failed: %v", err)
+	}
+	for _, id := range []string{cid(1), cid(2)} {
+		if !c.Has(id) {
+			t.Fatalf("%s was not stored", id)
+		}
+	}
+}
+
+// blockingReader delivers its body only after gate is closed, standing in for a
+// client whose connection has stalled part way through a chunk.
+type blockingReader struct {
+	body []byte
+	gate chan struct{}
+	done bool
+}
+
+func (b *blockingReader) Read(p []byte) (int, error) {
+	if b.done {
+		return 0, io.EOF
+	}
+	<-b.gate
+	n := copy(p, b.body)
+	b.done = true
+	return n, nil
 }

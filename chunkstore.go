@@ -119,19 +119,47 @@ func (c *ChunkStore) Put(id string, r io.Reader) error {
 		return err
 	}
 
+	// A cheap rejection before spending any disk on a body that cannot fit. It
+	// has to use the per-chunk maximum, because the real size is not known
+	// until the body has been read, and it is only advisory: the authoritative
+	// check is under the lock below, against the size that actually arrived.
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.used+c.maxChunkBytes > c.maxTotalBytes {
+	over := c.used+c.maxChunkBytes > c.maxTotalBytes
+	c.mu.Unlock()
+	if over {
 		return ErrQuota
 	}
-	if err := writeStream(p, r, c.maxChunkBytes); err != nil {
-		return err
-	}
-	info, err := os.Stat(p)
+
+	// The body is read with no lock held. Holding one across this would put a
+	// network transfer inside a process-wide critical section: uploads that the
+	// client deliberately runs in parallel would serialize, and one phone that
+	// stalled mid-chunk would block every upload from every device until its
+	// connection died.
+	tmp, size, err := writeTemp(p, r, c.maxChunkBytes)
 	if err != nil {
 		return err
 	}
-	c.used += info.Size()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Re-checked under the lock and against the size that arrived, because
+	// several writers can pass the advisory check above at the same moment.
+	if c.used+size > c.maxTotalBytes {
+		os.Remove(tmp)
+		return ErrQuota
+	}
+	// Another writer may have published this id while this body was in flight.
+	// First write still wins, and counting these bytes too would charge the
+	// budget for a chunk that is about to be discarded.
+	if _, err := os.Stat(p); err == nil {
+		os.Remove(tmp)
+		return nil
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	c.used += size
 	return nil
 }
 
@@ -191,28 +219,46 @@ func (c *ChunkStore) Sweep(referenced map[string]bool) (int, error) {
 // would mistake for a complete one. The limit is enforced here rather than only
 // at the HTTP layer, because the store owns the disk and a bound it cannot
 // enforce itself is advisory.
-func writeStream(path string, r io.Reader, limit int64) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+// writeTemp streams r into a uniquely named temporary file beside path and
+// returns that name and the number of bytes written. The caller renames it into
+// place, which is what lets the read happen outside any lock.
+//
+// The name is unique per call rather than derived from path, because two
+// devices can upload the same chunk id at the same moment and a shared
+// temporary name would let each write part of the other's file, then publish
+// the mixture under an id that no longer describes its contents.
+func writeTemp(path string, r io.Reader, limit int64) (string, int64, error) {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
 	if err != nil {
-		return err
+		return "", 0, err
 	}
+	tmp := f.Name()
 	// Read one byte past the limit, so hitting it is distinguishable from a
 	// body that merely ends there.
 	n, err := io.Copy(f, io.LimitReader(r, limit+1))
 	if err == nil && n > limit {
 		err = ErrTooLarge
 	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
 	if err != nil {
-		f.Close()
+		os.Remove(tmp)
+		return "", 0, err
+	}
+	return tmp, n, nil
+}
+
+func writeStream(path string, r io.Reader, limit int64) error {
+	tmp, _, err := writeTemp(path, r, limit)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return err
 	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, path)
+	return nil
 }
 
 func atomicWrite(path string, b []byte) error {

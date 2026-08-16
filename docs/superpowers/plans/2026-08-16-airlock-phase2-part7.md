@@ -435,6 +435,8 @@ Record each result in `docs/benchmarks.md` or a sibling `docs/platform-notes.md`
 
 ### Task 41: Anything is a file
 
+**Superseded in part by task 44**, which covers dropped folders and the whole inbound chain with receipt-based detection. Keep this task's round-trip tests for unusual names and types; take the folder walking from task 44 rather than implementing it twice.
+
 **Files:**
 - Modify: `web/views/send.js`
 - Test: `web/upload.test.mjs`, `web/naming.test.mjs`
@@ -727,14 +729,19 @@ export async function assemble(transferId, meta, { mk, mode, hashes, cids, stage
 // already on the device and their tags have verified. Export is a separate,
 // retryable action, and the file waits in the app until one of the rungs works.
 export const RUNG = {
+  // Chromium desktop only, and the best rung where it exists: the browser
+  // writes straight to a location the person chose, streaming, with no object
+  // URL and no second copy anywhere.
+  SAVE_PICKER: 'file-system-access',
   STREAM: 'service-worker-stream',
   DOWNLOAD: 'anchor-download',
   SHARE: 'share-sheet',
   KEEP: 'kept-in-app',
 };
 
-export function exportRungs(nav = navigator) {
+export function exportRungs(nav = navigator, win = globalThis) {
   return {
+    [RUNG.SAVE_PICKER]: 'showSaveFilePicker' in win,
     [RUNG.STREAM]: 'serviceWorker' in nav,
     [RUNG.DOWNLOAD]: typeof URL.createObjectURL === 'function',
     [RUNG.SHARE]: typeof nav.canShare === 'function',
@@ -817,4 +824,171 @@ Then on real devices:
 ```bash
 git add web/assemble.js web/export.js web/export.test.mjs web/session.js web/views/inbox.js web/sw.js
 git commit -m "feat(web): assemble into one file and export through a cascade"
+```
+
+---
+
+### Task 44: Getting a file in, on every browser
+
+**Files:**
+- Create: `web/inbound.js`, `web/inbound.test.mjs`
+- Modify: `web/views/send.js`, `web/app.js`, `web/sw.js`, `README.md`
+
+**Interfaces:**
+- `export function observeCapabilities(opts)` starting receipt-based detection
+- `export async function markCapability(name)` / `export async function capabilities()`
+- `export async function filesFromDrop(dataTransfer)` walking dropped folders
+
+**The share sheet is a Chromium bonus, not the path.** `share_target` is implemented only by Chromium, and `file_handlers` is narrower still: Chromium **desktop only**, explicitly absent from Chrome on Android. So on the one platform where a share sheet is the natural gesture, file handling contributes nothing.
+
+Waiting for the other engines is not a plan. Mozilla's standards position is positive but its meta bug is P3, unassigned, and has had no patches in seven years. WebKit's position is neutral with named security and integration concerns, on a bug open since 2019 assigned to nobody, whose only recent comments are third-party developers asking. Nothing in Interop 2026 touches share targets, the manifest, install, or file handling.
+
+**So the file picker is the product's real inbound path, and everything else is an optimization over it.** Firefox Android and Safari iOS live on the picker permanently.
+
+- [ ] **Step 1: Understand what actually works where**
+
+| Mechanism | Chromium desktop | Chromium Android | Firefox desktop | Firefox Android | Safari macOS | Safari iOS |
+|---|---|---|---|---|---|---|
+| File picker, no `accept` | yes | yes | yes | yes | yes | yes |
+| Drag and drop | yes | no | yes | no | yes | iPad only |
+| Paste files | yes | assume no | 116+ | **no** | yes | assume no |
+| `share_target` | Windows and ChromeOS only | yes, needs WebAPK | no | parses, does nothing | no | no |
+| `file_handlers` | yes, install required | **no** | no | no | no | no |
+
+Two entries deserve emphasis because they invert an obvious assumption:
+
+- **Paste is a desktop mechanism, not a universal one.** Firefox Android does not implement `clipboardData.files` at all, and it is unattested on Chromium Android and iOS. Treating paste as the mobile fallback would leave the two weakest platforms with nothing.
+- **`navigator.clipboard.read()` cannot read files.** Its format set is text, HTML and PNG. It is not a more modern version of `clipboardData.files`; it is a different and less capable thing. Do not conflate them.
+
+- [ ] **Step 2: Detect by receipt, not by capability**
+
+The rule: **advertise nothing until it is feature-detected or receipt-confirmed.** Every rung above the picker reveals itself.
+
+This exists because Firefox Android *parses* `share_target` and silently ignores it. There is no error and nothing to detect, so an app that promises a share menu entry on the strength of its own manifest lies on that browser. The only honest evidence a share target works is a share arriving.
+
+```js
+// Receipt-confirmed capabilities. A promise the browser does not keep is worse
+// than an affordance we never offered, so nothing here is set from a manifest
+// member or a user agent string: each flag is written the first time the thing
+// actually happens.
+const FLAGS = 'capabilities';
+
+export async function capabilities() {
+  return (await kvGet(FLAGS)) || {};
+}
+
+export async function markCapability(name) {
+  const current = await capabilities();
+  if (current[name]) return;
+  await kvPut(FLAGS, { ...current, [name]: true });
+}
+
+export function observeCapabilities({ doc = document, win = window } = {}) {
+  // Paste: attach unconditionally and let a real delivery prove it. Firefox
+  // Android never fires with files, which is exactly why it never gets the hint.
+  doc.addEventListener('paste', (e) => {
+    if (e.clipboardData?.files?.length) markCapability('paste');
+  });
+
+  // Drag: the zone is drawn on a real dragenter carrying files rather than from
+  // a capability check, so it simply never appears on a phone.
+  doc.addEventListener('dragenter', (e) => {
+    if (e.dataTransfer?.types?.includes('Files')) markCapability('drop');
+  });
+
+  // The only honest install signal. It fires in Chromium and never in Firefox
+  // or Safari, so an install card cannot appear where installing buys nothing.
+  win.addEventListener('beforeinstallprompt', () => markCapability('installable'));
+
+  if ('launchQueue' in win) markCapability('fileHandlerApi');
+}
+```
+
+The service worker calls `markCapability('shareTarget')` the first time a share POST lands. Until then the install card says installing **may** add Airlock to the share menu, never that it will.
+
+- [ ] **Step 3: Make the picker excellent, since most browsers live on it**
+
+```js
+// No accept attribute. iOS variously ignores it or over-filters, and the files
+// it breaks on are exactly the ones this product is for: .bin, .enc, anything
+// without a recognized extension. A picker that silently refuses to show a file
+// is worse than one that shows everything.
+<input type="file" multiple>
+```
+
+Add a folder picker behind detection, and verify the result rather than the attribute: Firefox Android accepts `webkitdirectory` but returns an empty `webkitRelativePath`, silently flattening the hierarchy. After a pick, if no file has a relative path, treat the selection as flat and say so rather than reconstructing a structure that was not delivered.
+
+Bind `Ctrl+O` to `showPicker()` where `typeof HTMLInputElement.prototype.showPicker === 'function'`.
+
+- [ ] **Step 4: Folder drops, and the traps in them**
+
+```js
+export async function filesFromDrop(dataTransfer) {
+  const entries = [...(dataTransfer.items || [])]
+    .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
+    .filter(Boolean);
+  if (entries.length === 0) return [...dataTransfer.files];
+
+  const out = [];
+  const walk = async (entry, prefix) => {
+    if (entry.isFile) {
+      const file = await new Promise((res, rej) => entry.file(res, rej));
+      out.push(prefix ? new File([file], prefix + file.name, { type: file.type }) : file);
+      return;
+    }
+    const reader = entry.createReader();
+    // readEntries yields at most 100 per call and signals the end with an empty
+    // batch. Calling it once silently truncates any folder of 101 files or more.
+    for (;;) {
+      const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+      if (batch.length === 0) break;
+      for (const child of batch) await walk(child, `${prefix}${entry.name}/`);
+    }
+  };
+  for (const entry of entries) await walk(entry, '');
+  return out;
+}
+```
+
+Call `preventDefault()` on **both** `dragover` and `drop`. Missing either makes the browser navigate away and open the file instead, losing whatever was staged.
+
+- [ ] **Step 5: Two traps in the pipeline, not the UI**
+
+- **Hold a `Blob`, not the `File` handle**, once a file enters the chunking pipeline. A `File` is a live reference to something on disk; if the source is moved or deleted mid-transfer, `arrayBuffer()` rejects with `NotReadableError` partway through. Take `file.slice()` up front, which snapshots.
+- **`file.name` is not trustworthy.** A clipboard screenshot arrives as `image.png`, and an iOS Photos pick may arrive as `image.jpg` with EXIF stripped and a name the user has never seen. Show the name, let it be edited before sending, and never key anything on it.
+
+- [ ] **Step 6: What each browser shows**
+
+No user-agent sniffing anywhere. Each affordance suppresses itself through the detection above.
+
+- **Chromium desktop:** picker, drop zone, paste hint, and an install card whose copy promises only "Open with Airlock", which is true on every desktop OS. Promote to a share-menu claim only after a share is received.
+- **Chromium Android:** picker and install card. Drop and paste hide themselves because their events never fire.
+- **Firefox desktop:** picker, drop zone, paste hint on 116+. No install card ever, since `beforeinstallprompt` never fires. **Nothing mentions a share sheet.**
+- **Firefox Android:** the picker, as the whole screen: one large Choose file button. This is the weakest inbound story of any engine and the UI should not pretend otherwise.
+- **Safari macOS:** picker, drop zone, paste hint. No install card.
+- **Safari iOS:** picker only. Do not ship a paste affordance until a real `File` has been observed arriving from the Files app, and do not advertise iPad drag and drop until a file with an unrecognized extension has been dropped successfully.
+
+- [ ] **Step 7: Tests**
+
+`web/inbound.test.mjs` with fake document, window and storage:
+
+- a `paste` with no files does not set the flag; one with files does
+- a `dragenter` without `Files` in `types` does not set the flag
+- `beforeinstallprompt` sets `installable`; never firing leaves it unset, and the install card is therefore never shown on a Firefox-shaped fake
+- `filesFromDrop` walks a nested folder fake and returns paths in the names
+- `filesFromDrop` keeps reading past a 100-entry batch, using a fake reader that returns 100 then 50 then empty; asserting 150 files is the regression test for the truncation trap
+- with no `items`, it falls back to `dataTransfer.files`
+- `markCapability` is idempotent and never clears a flag
+
+- [ ] **Step 8: One honest sentence in the README**
+
+> Airlock accepts files everywhere through the in-app picker, plus drag and drop and paste on desktop browsers. "Share to Airlock" from the OS share sheet is a Chromium-only bonus, available on Chrome for Android and ChromeOS, and as "Open with Airlock" on installed Chrome or Edge desktop. It does not exist in Firefox or on iOS, where you open Airlock and pick the file.
+
+Also worth a link rather than a build: **Taildrop** already ships with Tailscale on every one of these devices and does register in the iOS and Android share sheets. It does not put the file in Airlock and it is not encrypted in Airlock's sense, but for "get this file to my other device" it covers exactly the gap where Airlock's inbound story is weakest. Point at it in the Firefox Android and iOS sections rather than pretending the gap is not there.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add web/inbound.js web/inbound.test.mjs web/views/send.js web/app.js web/sw.js README.md
+git commit -m "feat(web): receipt-detected inbound affordances with the picker as the floor"
 ```

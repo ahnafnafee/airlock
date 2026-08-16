@@ -61,6 +61,11 @@ function fakeChannel() {
   };
 }
 
+// A transfer runs over several connections, each carrying several channels.
+// Everything this module does with them is per link, so one link with one
+// channel is enough to stand for the shape.
+const fakeLinks = (channel) => [{ pc: null, channels: [channel] }];
+
 // One device's worth of fakes. Everything a test wants to vary is an override,
 // and everything a test wants to assert on is recorded on `log`.
 function harness(overrides = {}) {
@@ -96,7 +101,7 @@ function harness(overrides = {}) {
   };
 
   const channel = fakeChannel();
-  const opened = () => ({ channel, close: () => {} });
+  const opened = () => ({ links: fakeLinks(channel), close: () => {} });
 
   const transport = {
     open: overrides.open || (async (node, id, signal) => {
@@ -136,7 +141,7 @@ function harness(overrides = {}) {
 }
 
 const offerFrom = (node = PEER, transfer = ID) => b64encode(new TextEncoder().encode(
-  JSON.stringify({ kind: 'offer', from: node, transfer, sdp: 'v=0' })));
+  JSON.stringify({ kind: 'offer', from: node, transfer, channels: 2, sdps: ['v=0', 'v=0'] })));
 
 test('a peer gets one session at a time', async () => {
   let release = null;
@@ -145,7 +150,7 @@ test('a peer gets one session at a time', async () => {
     info: SENDING,
     open: (node, id) => {
       h.log.opens.push({ node, id });
-      const opened = { channel: h.channel, close: () => {} };
+      const opened = { links: fakeLinks(h.channel), close: () => {} };
       if (!holding) return Promise.resolve(opened);
       return new Promise((resolve) => { release = () => resolve(opened); });
     },
@@ -274,7 +279,7 @@ test('a peer holding a session leaves the transfer owed', async () => {
     open: (node, id) => {
       h.log.opens.push({ node, id });
       return new Promise((resolve) => {
-        release = () => resolve({ channel: h.channel, close: () => {} });
+        release = () => resolve({ links: fakeLinks(h.channel), close: () => {} });
       });
     },
     handshakeMs: 0,
@@ -328,7 +333,7 @@ test('a handshake that never completes releases the peer', async () => {
     open: (node, id, signal) => {
       h.log.opens.push({ node, id });
       signal?.addEventListener('abort', () => { h.log.aborted++; });
-      if (working) return Promise.resolve({ channel: h.channel, close: () => {} });
+      if (working) return Promise.resolve({ links: fakeLinks(h.channel), close: () => {} });
       // A peer that answered the signal and then went quiet.
       return new Promise(() => {});
     },
@@ -415,15 +420,35 @@ test('a malformed signalling payload is dropped rather than acted on', async () 
   await h.sessions.handleSignal(b64encode(new TextEncoder().encode('{')));
   // A transfer id that would become a path segment if it were ever trusted.
   await h.sessions.handleSignal(b64encode(new TextEncoder().encode(JSON.stringify({
-    kind: 'offer', from: PEER, transfer: '../../etc', sdp: 'v=0',
+    kind: 'offer', from: PEER, transfer: '../../etc', sdps: ['v=0'],
   }))));
   assert.equal(h.log.accepts.length, 0);
+});
+
+test('an offer naming more connections than this device opens is dropped', async () => {
+  // The relay hands the payload over unread, so the list length is a peer's
+  // claim. Without the bound a peer could ask this browser tab to open a
+  // thousand connections, and it would try.
+  const h = harness({});
+  const offer = (sdps) => b64encode(new TextEncoder().encode(JSON.stringify({
+    kind: 'offer', from: PEER, transfer: ID, sdps,
+  })));
+
+  await h.sessions.handleSignal(offer(Array.from({ length: 64 }, () => 'v=0')));
+  await h.sessions.handleSignal(offer([]));
+  await h.sessions.handleSignal(offer(['v=0', 17]));
+  assert.equal(h.log.accepts.length, 0);
+
+  // And the shape it does accept still gets through, so the bound is a bound
+  // and not a refusal of everything.
+  await h.sessions.handleSignal(offer(['v=0', 'v=0']));
+  assert.equal(h.log.accepts.length, 1);
 });
 
 test('an answer is handed to the transport and starts no session', async () => {
   const h = harness({});
   await h.sessions.handleSignal(b64encode(new TextEncoder().encode(JSON.stringify({
-    kind: 'answer', from: PEER, transfer: ID, sdp: 'v=0',
+    kind: 'answer', from: PEER, transfer: ID, sdps: ['v=0'],
   }))));
   assert.equal(h.log.answers.length, 1);
   assert.equal(h.log.accepts.length, 0);

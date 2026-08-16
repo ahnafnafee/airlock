@@ -1,6 +1,6 @@
 // Where the pieces meet. Presence and the signalling relay say who can be
 // reached, the queue says what this device still owes, staging holds the sealed
-// chunks between sessions, and the data channel moves them.
+// chunks between sessions, and the data channels move them.
 //
 // Two rules shape everything else here. A staged chunk is deleted only once the
 // recipient's own progress bitmap says it landed, because deleting when the last
@@ -10,7 +10,9 @@
 // dropped has to resume at 400 and only the written bitmap can say so.
 
 import { api } from './api.js';
-import { newConnection, negotiate, receive } from './peer.js';
+import {
+  CHANNELS_PER_LINK, LINK_COUNT, linkCountFor, negotiate, newConnection, openChannels, receive,
+} from './peer.js';
 import { openStage, indexesFrom } from './staging.js';
 import { transfersActive } from './wake.js';
 import {
@@ -86,6 +88,25 @@ function flushed(channel) {
   });
 }
 
+const channelsOf = (links) => links.flatMap((link) => link.channels);
+
+// A link whose channels failed to open is dropped rather than failing the whole
+// transfer, so a device that manages two of its four connections still sends at
+// two connections' worth instead of not sending at all. The pcs behind the
+// dropped ones are closed here because nothing else will. A link that neither
+// opens nor fails is a different case and is not distinguishable from a slow
+// one here: the session's handshake deadline is what bounds that.
+async function usableLinks(opening) {
+  const settled = await Promise.allSettled(opening.map((link) => link.ready));
+  const links = [];
+  opening.forEach((link, i) => {
+    if (settled[i].status === 'fulfilled') links.push({ pc: link.pc, channels: [...link.channels] });
+    else link.pc.close();
+  });
+  if (links.length === 0) throw new Error('no link opened');
+  return links;
+}
+
 // The transport is every part of this module that touches WebRTC or the relay,
 // kept behind three calls so the rest of the file is about queues and bitmaps.
 //
@@ -94,6 +115,11 @@ function flushed(channel) {
 // so `from` is the peer's own claim: it decides where an answer is addressed and
 // nothing else, and every claim about the transfer itself is checked against the
 // server's record instead.
+//
+// A transfer runs over several connections, so each message carries a list of
+// session descriptions rather than one. The two sides pair them by position,
+// which is why they travel together: one relay round trip and no way for two
+// halves of the same handshake to be matched up wrongly.
 export function liveTransport({ identity, gatherMs = GATHER_MS } = {}) {
   const encoder = new TextEncoder();
   // One outstanding answer per peer, which is all one session per peer allows.
@@ -102,43 +128,44 @@ export function liveTransport({ identity, gatherMs = GATHER_MS } = {}) {
   const post = (to, message) =>
     api.signal(to, b64encode(encoder.encode(JSON.stringify(message))));
 
-  // Ordered, and deliberately so. A chunk travels as a header frame naming its
-  // index followed by a separate body frame, so two chunks that overtook each
-  // other would have their bodies written under the wrong index and the file
-  // would be corrupted silently. The DONE sentinel depends on the same
-  // guarantee.
-  const dataChannel = (pc) => {
-    const channel = pc.createDataChannel('airlock', { ordered: true });
-    channel.binaryType = 'arraybuffer';
-    return channel;
-  };
-
-  async function open(node, transferId, signal) {
-    const pc = newConnection();
-    signal?.addEventListener('abort', () => pc.close(), { once: true });
-    const channel = dataChannel(pc);
-    const opened = whenOpen(channel);
+  // Every channel a link owns has to be open before the link can carry
+  // anything, because the sender spreads one chunk's fragments across all of
+  // them. A rejection here is what marks the link droppable.
+  function openingLink(pc, channels) {
+    const ready = Promise.all(channels.map(whenOpen));
     // Closing the connection after an earlier step failed rejects this too, and
     // by then nothing is waiting on it. The failure that got us there is the one
     // worth reporting.
-    opened.catch(() => {});
+    ready.catch(() => {});
+    return { pc, channels, ready };
+  }
+
+  async function open(node, transferId, signal) {
+    const pcs = Array.from({ length: linkCountFor() }, () => newConnection());
+    const closeAll = () => { for (const pc of pcs) pc.close(); };
+    signal?.addEventListener('abort', closeAll, { once: true });
+    const opening = pcs.map((pc) => openingLink(pc, openChannels(pc)));
     const answered = new Promise((resolve, reject) => {
-      awaiting.set(node, { pc, resolve, reject });
+      awaiting.set(node, { pcs, resolve, reject });
     });
     try {
-      await pc.setLocalDescription(await pc.createOffer());
-      await whenGathered(pc, gatherMs);
+      // Gathering is per connection and none of them waits on another.
+      const sdps = await Promise.all(pcs.map(async (pc) => {
+        await pc.setLocalDescription(await pc.createOffer());
+        await whenGathered(pc, gatherMs);
+        return pc.localDescription.sdp;
+      }));
       await post(node, {
         kind: 'offer',
         from: await identity(),
         transfer: transferId,
-        sdp: pc.localDescription.sdp,
+        channels: CHANNELS_PER_LINK,
+        sdps,
       });
       await answered;
-      await opened;
-      return { channel, close: () => pc.close() };
+      return { links: await usableLinks(opening), close: closeAll };
     } catch (err) {
-      pc.close();
+      closeAll();
       throw err;
     } finally {
       awaiting.delete(node);
@@ -146,31 +173,53 @@ export function liveTransport({ identity, gatherMs = GATHER_MS } = {}) {
   }
 
   async function accept(msg, signal) {
-    const pc = newConnection();
-    signal?.addEventListener('abort', () => pc.close(), { once: true });
-    // The offering side creates the channel, so this side waits for it to
-    // arrive rather than making one of its own.
-    const arrived = new Promise((resolve) => {
-      pc.ondatachannel = (event) => {
-        event.channel.binaryType = 'arraybuffer';
-        resolve(event.channel);
-      };
+    // How many connections and channels to build is the peer's claim, and the
+    // relay does not vouch for it. decode() is the gate; the bounds are repeated
+    // here because a transport that trusts its own input is one refactor away
+    // from a browser tab opening connections until it falls over.
+    const sdps = msg.sdps.slice(0, LINK_COUNT);
+    const perLink = Number.isInteger(msg.channels) && msg.channels > 0
+      ? Math.min(msg.channels, CHANNELS_PER_LINK * 2)
+      : CHANNELS_PER_LINK;
+    const pcs = sdps.map(() => newConnection());
+    const closeAll = () => { for (const pc of pcs) pc.close(); };
+    signal?.addEventListener('abort', closeAll, { once: true });
+
+    // The offering side creates the channels, so this side waits for them to
+    // arrive rather than making any of its own. They are sorted by label
+    // because arrival order is the peer's business, and both sides have to
+    // agree which channel carries the control frames.
+    const opening = pcs.map((pc) => {
+      const channels = [];
+      const ready = new Promise((resolve, reject) => {
+        pc.ondatachannel = (event) => {
+          event.channel.binaryType = 'arraybuffer';
+          channels.push(event.channel);
+          if (channels.length < perLink) return;
+          channels.sort((a, b) => (a.label < b.label ? -1 : 1));
+          Promise.all(channels.map(whenOpen)).then(resolve, reject);
+        };
+      });
+      ready.catch(() => {});
+      return { pc, channels, ready };
     });
+
     try {
-      await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
-      await pc.setLocalDescription(await pc.createAnswer());
-      await whenGathered(pc, gatherMs);
+      const answers = await Promise.all(pcs.map(async (pc, i) => {
+        await pc.setRemoteDescription({ type: 'offer', sdp: sdps[i] });
+        await pc.setLocalDescription(await pc.createAnswer());
+        await whenGathered(pc, gatherMs);
+        return pc.localDescription.sdp;
+      }));
       await post(msg.from, {
         kind: 'answer',
         from: await identity(),
         transfer: msg.transfer,
-        sdp: pc.localDescription.sdp,
+        sdps: answers,
       });
-      const channel = await arrived;
-      await whenOpen(channel);
-      return { channel, close: () => pc.close() };
+      return { links: await usableLinks(opening), close: closeAll };
     } catch (err) {
-      pc.close();
+      closeAll();
       throw err;
     }
   }
@@ -181,7 +230,13 @@ export function liveTransport({ identity, gatherMs = GATHER_MS } = {}) {
     // is a peer that gave up and a reply that arrived after it.
     if (!waiting) return;
     try {
-      await waiting.pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+      const sdps = msg.sdps.slice(0, waiting.pcs.length);
+      await Promise.all(sdps.map((sdp, i) =>
+        waiting.pcs[i].setRemoteDescription({ type: 'answer', sdp })));
+      // A peer that answered fewer connections than were offered is not going
+      // to answer the rest. Closing them turns a wait that would run to the
+      // handshake deadline into a link dropped in the ordinary way.
+      for (let i = sdps.length; i < waiting.pcs.length; i++) waiting.pcs[i].close();
       waiting.resolve();
     } catch (err) {
       waiting.reject(err);
@@ -269,11 +324,17 @@ export function makeSessions(deps) {
   // connection that drops mid-transfer leaves them waiting for one that will
   // never come. Racing the close is what turns that into a failed session with
   // a progress bitmap rather than a promise nobody ever settles.
-  function untilClosed(channel, promise, message) {
+  // Every channel is watched, not only the one carrying control frames. A link
+  // that drops once the transfer is running takes its share of the chunks with
+  // it, and the session has to end so the progress bitmap is written and the
+  // rest is picked up next time.
+  function untilClosed(channels, promise, message) {
     const dropped = new Promise((resolve, reject) => {
       const fail = () => reject(new Error(message));
-      channel.addEventListener('close', fail, { once: true });
-      channel.addEventListener('error', fail, { once: true });
+      for (const channel of channels) {
+        channel.addEventListener('close', fail, { once: true });
+        channel.addEventListener('error', fail, { once: true });
+      }
     });
     return Promise.race([promise, dropped]);
   }
@@ -337,14 +398,15 @@ export function makeSessions(deps) {
     const stage = await openStage(info.id);
     const meta = await openMeta(mk, info);
     const controller = new AbortController();
-    const { channel, close } = await withTimeout(
+    const { links, close } = await withTimeout(
       transport.open(node, info.id, controller.signal),
       handshakeMs, 'the peer never opened a channel', () => controller.abort());
+    const channels = channelsOf(links);
 
     try {
       // The offer names the file and its chunk positions. The hashes that key
       // each chunk stay in the sealed chunk list and never enter a control frame.
-      const result = await untilClosed(channel, negotiate(channel, {
+      const result = await untilClosed(channels, negotiate(links, {
         name: meta.name, size: meta.size, mime: meta.mime, cids: info.cids,
       }, (i) => stage.get(i)), 'the connection dropped mid-transfer');
 
@@ -358,7 +420,8 @@ export function makeSessions(deps) {
       // Best effort, because the confirmation below is what actually decides
       // whether anything may be deleted. A buffer that never drains costs a
       // resend of the tail on the next session, not a lost chunk.
-      await withTimeout(flushed(channel), flushMs, 'the send buffer never drained')
+      await withTimeout(
+        Promise.all(channels.map(flushed)), flushMs, 'the send buffer never drained')
         .catch(() => {});
       await confirmAndClear(info, stage);
       return result;
@@ -441,12 +504,12 @@ export function makeSessions(deps) {
     // as opaque bytes, so a locked device still takes delivery.
     const stage = await openStage(info.id);
     const controller = new AbortController();
-    const { channel, close } = await withTimeout(
+    const { links, close } = await withTimeout(
       transport.accept(msg, controller.signal),
       handshakeMs, 'the peer never opened a channel', () => controller.abort());
 
     try {
-      await untilClosed(channel, receive(channel, {
+      await untilClosed(channelsOf(links), receive(links, {
         onOffer: async (frame) => {
           if (info.declined.includes(me)) return { accept: false, reason: 'declined' };
           // The offered chunk list has to be the one the server recorded for
@@ -483,7 +546,14 @@ export function makeSessions(deps) {
       return null;
     }
     if (!msg || typeof msg.from !== 'string' || msg.from === '') return null;
-    if (typeof msg.sdp !== 'string') return null;
+    // A transfer runs over several connections, so a handshake carries a list.
+    // The length is bounded here rather than at the point of use, because this
+    // is the last place the payload is anything but trusted: without the bound
+    // a peer could name a thousand descriptions and have this device try to
+    // open a thousand connections.
+    if (!Array.isArray(msg.sdps) || msg.sdps.length === 0) return null;
+    if (msg.sdps.length > LINK_COUNT) return null;
+    if (!msg.sdps.every((sdp) => typeof sdp === 'string')) return null;
     if (!TRANSFER_ID.test(msg.transfer || '')) return null;
     return msg;
   }

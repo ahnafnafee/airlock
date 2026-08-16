@@ -1,6 +1,7 @@
 import { registerView, state, el } from '../app.js';
 import { api } from '../api.js';
-import { upload } from '../upload.js';
+import { uploadThroughServer, queueForDelivery } from '../upload.js';
+import { openStage } from '../staging.js';
 import { renderStrip } from '../strip.js';
 import { MODE_SEALED, MODE_PLAIN } from '../crypto.js';
 
@@ -91,6 +92,13 @@ registerView('send', 'Send', (panel) => {
   paintSeal();
   sealed.addEventListener('change', paintSeal);
 
+  // The one decision on this screen that puts content on the server, and it is
+  // off. Left alone, the sealed chunks stay on this device and cross directly
+  // when both devices are online. Ticked, they are uploaded, and the note says
+  // so rather than describing the setting: what it buys and what it costs are
+  // the same sentence.
+  const hold = el('input', { type: 'checkbox', id: 'hold' });
+
   const recipient = el('select', { id: 'to' }, el('option', { value: '' }, 'All my devices'));
   // No visible heading, because the list has to disappear when it is empty. The
   // accessible name carries what the heading would have said.
@@ -103,6 +111,13 @@ registerView('send', 'Send', (panel) => {
     el('h2', {}, 'Send'),
     drop,
     el('p', {}, el('label', { for: 'sealed' }, sealed, ' ', sealNote)),
+    el('p', {}, el('label', { class: 'choice', for: 'hold' },
+      hold,
+      el('span', {},
+        el('span', {}, 'Hold on the server if I go offline'),
+        el('span', { class: 'data muted' },
+          'The file is uploaded encrypted so it arrives even if this device is'
+          + ' closed. Otherwise it waits here until both devices are online.')))),
     el('p', { class: 'label' }, 'To'),
     recipient,
     stagedList,
@@ -110,7 +125,7 @@ registerView('send', 'Send', (panel) => {
     progress,
     status);
 
-  controls = { recipient, progress, status };
+  controls = { recipient, hold, progress, status };
 
   // Rebuilt whole rather than patched, so the index each Remove closes over is
   // the index that row now has. Same row shape the inbox uses: the text block
@@ -135,6 +150,17 @@ registerView('send', 'Send', (panel) => {
   };
 
   sendButton.addEventListener('click', async () => {
+    // The receiving device checks the seal before it takes an offer, so an
+    // unsealed transfer can never be delivered directly and would sit in the
+    // queue being retried against every recipient forever. Refused here, before
+    // the list is emptied, so the files are still staged when either control is
+    // put back.
+    if (!hold.checked && !sealed.checked) {
+      status.textContent = 'An unsealed file cannot be sent directly.'
+        + ' Turn sealing on, or hold it on the server.';
+      status.className = 'data bad';
+      return;
+    }
     // Taken off the list before the first byte moves, so a second press cannot
     // send the same files twice and anything staged while this runs is left for
     // the next press.
@@ -164,15 +190,23 @@ registerView('send', 'Send', (panel) => {
   renderStaged();
 });
 
-// The one upload loop, and the only thing in this module that touches the
-// network. Everything staged leaves through here whether it was dropped, chosen,
-// shared from Android or right-clicked in Explorer, because several call sites
-// for one behavior is how they drift apart. It is deliberately not exported: the
-// press of Send is the only way in, so no launch path can acquire a second one.
-// A file that fails is reported on the status line and the batch continues.
+// The one send loop, and the only thing in this module that touches the network.
+// Everything staged leaves through here whether it was dropped, chosen, shared
+// from Android or right-clicked in Explorer, because several call sites for one
+// behavior is how they drift apart. It is deliberately not exported: the press
+// of Send is the only way in, so no launch path can acquire a second one. A file
+// that fails is reported on the status line and the batch continues.
+//
+// The checkbox picks the destination of the sealed chunks and nothing else. Both
+// paths chunk, seal and record the transfer identically, so the file the
+// recipient ends up with does not depend on which one carried it.
 async function sendNow(files) {
-  const { recipient, progress, status } = requireControls();
+  const { recipient, hold, progress, status } = requireControls();
   const to = recipient.value ? [recipient.value] : [];
+  // Read once for the whole batch, so a stray click mid-send cannot split one
+  // press of Send across two destinations.
+  const onServer = hold.checked;
+  let anyQueued = false;
   for (const file of files) {
     progress.replaceChildren();
     // Reset the tone as well as the text: a failure earlier in the batch would
@@ -181,7 +215,7 @@ async function sendNow(files) {
     let strip = null;
     let last = null;
     try {
-      const r = await upload(file, {
+      const opts = {
         mk: state.mk, mode: state.mode, to, cdc: state.config.cdc, api,
         onProgress: (p) => {
           if (!strip) strip = renderStrip(progress, p.total);
@@ -194,17 +228,29 @@ async function sendNow(files) {
           // The chunks on the wire go last, so that inside a segment shared by
           // several chunks the state that is moving is the one you see.
           strip.setRange(p.held + p.sent, p.held + p.sent + p.inflight, 'sending');
-          status.textContent =
-            `${file.name} · ${humanSize(file.size)} · ${p.held} of ${p.total} held`;
+          // On the direct path nothing is held and nothing is on a wire, so the
+          // strip fills as chunks are sealed onto this device and the caption
+          // counts the same thing the segments do.
+          status.textContent = onServer
+            ? `${file.name} · ${humanSize(file.size)} · ${p.held} of ${p.total} held`
+            : `${file.name} · ${humanSize(file.size)} · ${p.sent} of ${p.total} sealed`;
         },
-      });
-      // Settle the strip. Nothing is in transit once upload resolves, so no
+      };
+      const r = onServer
+        ? await uploadThroughServer(file, opts)
+        : await queueForDelivery(file, { ...opts, openStage });
+      // Settle the strip. Nothing is in transit once either path resolves, so no
       // segment may be left pulsing amber.
       if (strip) {
         strip.setRange(0, r.held, 'held');
         strip.setRange(r.held, r.total, 'stored');
       }
-      status.textContent = `Sent ${file.name} · ${r.held} of ${r.total} chunks were already here`;
+      status.textContent = onServer
+        ? `Sent ${file.name} · ${r.held} of ${r.total} chunks were already here`
+        // The same words the checkbox promised, so the confirmation reads as
+        // the thing the control said it would do rather than as a new fact.
+        : `Queued ${file.name} · it waits here until both devices are online`;
+      if (!onServer) anyQueued = true;
     } catch (err) {
       // A failed send leaves nothing in transit either, and the chunks that
       // never landed are queued, not stored.
@@ -212,5 +258,14 @@ async function sendNow(files) {
       status.textContent = `${file.name} did not send. ${err.message}`;
       status.className = 'data bad';
     }
+  }
+
+  // The transfer is on the server's queue from the moment it was created, so
+  // this only decides whether it moves now or on the next time the app is
+  // opened. Not awaited: a direct session takes as long as the file takes, and
+  // the Send view has already said what it did.
+  if (anyQueued) {
+    const { drainQueue } = await import('../session.js');
+    drainQueue().catch((err) => console.warn('the queue did not drain', err));
   }
 }

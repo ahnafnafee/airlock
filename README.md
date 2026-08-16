@@ -21,7 +21,7 @@ One Go binary and an installable web app. No accounts, no cloud, no public port.
 
 > \[!IMPORTANT]
 >
-> Airlock is under active construction, and this file distinguishes what runs from what is designed. Sending and receiving work end to end today, through the server. The direct device-to-device channel that the design now centers on is specified and not yet built. [Status](#-status) says which task is where.
+> Airlock is under active construction, and this file distinguishes what runs from what is designed. Sending and receiving work end to end today, through the server. The direct device-to-device channel that the design now centers on sends but does not yet finish receiving: a transfer delivered that way reaches the recipient's device and cannot be saved there yet. [Status](#-status) says which task is where.
 
 <details>
 <summary><kbd>Table of contents</kbd></summary>
@@ -67,9 +67,11 @@ That is unusually cheap to reach here. On a tailnet the `100.x` addresses are ho
 
 The devices do not have to overlap for a whole transfer, only repeatedly. The server holds a progress bitmap over the transfer's chunk list and both ends stage their partial work locally, so a 20 GB file can cross in five separate ten-minute windows.
 
-The honest cost is that some overlap must eventually happen. If the sender never opens the app again, a queued transfer never completes. One escape hatch answers that: a per-transfer checkbox, off by default, spools the sealed chunks to the server so a transfer finishes without the sender ever being reachable again. It is the only path by which content reaches the server, and even then it is ciphertext under a key the server does not have.
+The honest cost is that some overlap must eventually happen. If the sender never opens the app again, a queued transfer never completes. One escape hatch answers that: **Hold on the server if I go offline**, a per-transfer checkbox on the Send view, off by default. Tick it and the sealed chunks are spooled to the server, so the transfer finishes without the sender ever being reachable again. It is the only path by which content reaches the server, and even then it is ciphertext under a key the server does not have.
 
-> **Where the code actually is.** The direct channel is designed and not built. Every transfer today takes the server-storage path, which is why that path is the one that is fully implemented, quota-bounded and tested rather than sketched. Tasks 27 to 32 are the transport, and task 32 is that checkbox: until they land there is nothing to opt out of, because holding the sealed chunks on the server is all there is.
+Leave it alone, which is the default, and the sealed chunks are written to this device's own staging area instead. The server is told what the transfer is made of and is given the sealed records the recipient needs to read it, and not one byte of content.
+
+> **Where the code actually is.** The sending half of the direct channel is built: presence, the opaque signalling relay, the per-recipient progress bitmaps, local staging, the data channel, the session orchestration, and the checkbox that routes between the two. The receiving half stops one step short. A directly delivered transfer lands in the recipient's staging area, and assembling it back into a file the browser can save is task 43, so until that lands, receiving still means holding the transfer on the server.
 
 <div align="right">
 
@@ -389,7 +391,7 @@ The three checks that matter most, because these are the ones whose failure look
       |         https://<node>.<tailnet>.ts.net          |
       +---------------- WireGuard / TLS -----------------+
       |                                                  |
-      +--- direct tailnet channel, designed, pending ----+
+      +-- direct tailnet channel, sends, not yet saved --+
 
         data/chunks/<ab>/<cid>       sealed, content addressed
         data/transfers/<id>/         records and the sealed list
@@ -411,7 +413,9 @@ The server may run anywhere on the tailnet, including a machine that is also a c
 | `events.go` | The server-sent nudge stream |
 | `web/cdc.js` | Content-defined chunk boundaries |
 | `web/crypto.js` | Key hierarchy, convergent sealing, record domains |
-| `web/upload.js` | Two-pass upload with dedup negotiation |
+| `web/upload.js` | Two-pass send, to local staging by default or to the server on request |
+| `web/staging.js` | Sealed chunks on the device's own disk, between sessions |
+| `web/peer.js`, `web/session.js` | The direct channel, and the queue that drives it |
 | `web/thumb.js` | Sealed thumbnails from a canvas |
 | `web/api.js`, `web/app.js`, `web/strip.js` | Typed API wrapper, shell and routing, the status strip |
 | `web/views/*.js` | One module per view: send, inbox, history, devices |
@@ -467,7 +471,7 @@ Stated because a security section that only lists wins is not a threat model.
 - **A device that holds the passphrase.** There is one key for everything and no per-device key. Any device that has been unlocked can read every transfer, past and future, and can compute chunk ids from plaintext. Revoking a device in the registry stops it reaching the server; it does not unlearn the key already in its IndexedDB, and it does not make a copy of the ciphertext it already took unreadable. Rotating means choosing a new passphrase on every device, and anything still sealed under the old one becomes unopenable.
 - **Traffic analysis.** Chunk ids, ciphertext sizes, chunk counts, sender, recipients and timestamps are plaintext by necessity, because the server routes and quotas on them. Sizes are not padded and timing is not smoothed.
 - **A hostile server denying service.** Integrity is authenticated; availability is not. A compromised host can delete transfers, withhold chunks, or refuse to serve, and a client will notice but cannot prevent it. A corrupted chunk fails its GCM tag rather than producing a damaged file, which is the failure mode worth having.
-- **Plaintext mode.** With the seal checkbox off, the server holds your bytes as they are. The interface says so in `--breach`, and nothing here softens it.
+- **Plaintext mode.** With the seal checkbox off, whatever holds your bytes holds them as they are. Direct delivery refuses an unsealed transfer, because the receiving device checks the seal before it takes an offer, so this is reachable only by also holding the transfer on the server. The interface says so in `--breach`, and nothing here softens it.
 - **A tailnet member you allowlisted.** The gate is the tailnet plus the registry. Anyone you admit is inside the model, not outside it.
 - **A compromised browser or device.** Plaintext and the master key exist in the client by construction. An extension in the app's origin, or malware on the machine, reads both.
 
@@ -498,6 +502,15 @@ Built task by task from [the implementation plans](./docs/superpowers/plans/), a
 | 21 | Android shell | ❌ Cancelled |
 | 22 | Throughput benchmark and the plaintext toggle | ✅ Done |
 | 23 | Deployment and hardening | ✅ Done |
+| 24 | Declining a transfer | ✅ Done |
+| 25 | Rich notifications with accept and decline | ✅ Done |
+| 26 | Staged send and the Windows context menu | ✅ Done |
+| 27 | Presence and signalling | ✅ Done |
+| 28 | The queue and the progress bitmap | ✅ Done |
+| 29 | Local staging | ✅ Done |
+| 30 | The direct channel | ✅ Done |
+| 31 | Session orchestration | ✅ Done |
+| 32 | Hold-for-me, the one server-storage path | ✅ Done |
 
 Two tasks were cancelled outright rather than deferred.
 
@@ -505,7 +518,9 @@ Two tasks were cancelled outright rather than deferred.
 
 **The Android shell** existed for one capability a web app cannot provide: writing a received file to disk with the app closed. Its price was a second implementation of the crypto, and drift between two implementations does not fail loudly, it produces files that download successfully and will not open. Notification then tap costs a second and buys exactly one place where encryption happens.
 
-**Designed, not yet built,** tasks 24 to 41: declining a transfer, rich notifications with accept and decline, staged send and the Windows context menu, presence and signalling, the queue and the progress bitmap, local staging, the direct channel, session orchestration, hold-for-me as the one server-storage path, the screen wake lock, parallel connections with fragmentation, parallel sealing in a single pass over the file, the throughput measurement, running with no flags anywhere, Windows file sharing, installing it anywhere, verifying what is still unverified, and accepting dropped folders.
+**Designed, not yet built,** tasks 33 to 43: the screen wake lock, parallel connections with fragmentation, parallel sealing in a single pass over the file, the throughput measurement, running with no flags anywhere, Windows file sharing, installing it anywhere, verifying what is still unverified, accepting dropped folders, iOS, and assembling a directly delivered transfer back into a file the browser saves.
+
+That last one is the gap worth naming twice. A transfer that crosses directly lands in the recipient's staging area and stops there, so until task 43 lands, **Hold on the server if I go offline** is what actually gets a file onto the other machine.
 
 **Deliberately not built:** accounts, sharing outside your own tailnet, public links, and any server-side view of plaintext.
 

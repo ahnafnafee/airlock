@@ -85,6 +85,17 @@ button.primary {
   cursor: pointer;
 }
 
+/* A choice that carries its consequence under it rather than beside it, so the
+   box, the decision and what it costs read as one control down to 320px. The
+   box keeps its own size and stays level with the first line rather than
+   centering itself against a note several lines tall. */
+.choice { display: flex; align-items: flex-start; gap: 10px; }
+.choice input[type="checkbox"] { flex: none; margin: 3px 0 0; }
+/* The note sits under the decision it explains rather than trailing it on the
+   same line, where a phone would break it wherever the width happened to run
+   out. */
+.choice .data { display: block; margin-top: 2px; }
+
 input[type="password"], input[type="text"], select {
   background: var(--hull-raised);
   color: var(--bone);

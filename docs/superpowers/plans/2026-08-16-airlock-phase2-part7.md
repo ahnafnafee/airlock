@@ -651,3 +651,170 @@ Record each in `docs/platform-notes.md` with the device and iOS version, and cor
 git add web/ios.js web/ios.test.mjs web/app.js web/index.html web/sw.js web/session.js web/manifest.webmanifest README.md docs/platform-notes.md
 git commit -m "feat(ios): install gate, storage preflight and announcement-only notifications"
 ```
+
+---
+
+### Task 43: Assemble, then export
+
+**Files:**
+- Create: `web/assemble.js`, `web/export.js`, `web/export.test.mjs`
+- Modify: `web/session.js`, `web/views/inbox.js`, `web/sw.js`
+
+**Interfaces:**
+- `export async function assemble(transferId, meta, opts)` writing one decrypted output file into OPFS and returning its `File`
+- `export async function exportFile(file, opts)` running the cascade and returning which rung succeeded
+- `export function exportRungs(nav)` reporting which rungs this browser has
+
+**This removes the last way iOS could have been send-only.**
+
+The earlier design had one save path: a service worker synthesizing a streaming `Response`. That path has regressed twice in a year on WebKit and its behavior inside a Home Screen web app traces to a bug closed to a private radar. Betting the platform on it was the mistake.
+
+**Receiving is two steps and only the second was ever uncertain.** Chunks arrive and land in OPFS. That always works. Turning them into a file the operating system holds is a separate action, it can be retried, and it has several independent implementations.
+
+**The property that makes this cheap: an OPFS `File` is disk-backed.** `getFile()` on a handle returns a `File` referencing bytes on disk rather than in memory, and both `URL.createObjectURL()` and `navigator.share()` accept it without materializing it. So a 20 GB export costs no more memory than a 20 MB one, with no streaming trick at all.
+
+- [ ] **Step 1: Assemble into one file**
+
+```js
+// Decrypt the staged chunks into a single output file. The result is a
+// disk-backed File, which is what lets every export rung below stay
+// memory-flat: createObjectURL and navigator.share both take a reference to
+// disk rather than a copy in memory.
+//
+// Staged chunks are deleted as they are consumed, so peak disk is roughly the
+// file size plus one chunk rather than twice the file size.
+export async function assemble(transferId, meta, { mk, mode, hashes, cids, stage }) {
+  const root = await navigator.storage.getDirectory();
+  const out = await root.getDirectoryHandle('assembled', { create: true });
+  const handle = await out.getFileHandle(transferId, { create: true });
+
+  // One handle held for the whole write. The spec allows a single open sync
+  // access handle per file, and reopening per chunk would be both slower and a
+  // race against itself.
+  const access = await handle.createSyncAccessHandle();
+  try {
+    access.truncate(0);
+    let at = 0;
+    for (let i = 0; i < hashes.length; i++) {
+      const sealed = await stage.get(i);
+      // Throws if the chunk was substituted or corrupted, so a damaged transfer
+      // fails here rather than producing a plausible wrong file.
+      const plain = await openChunk(mk, mode, hashes[i], cids[i], sealed);
+      access.write(plain, { at });
+      at += plain.length;
+      await stage.remove(i);
+    }
+    access.flush();
+    if (at !== meta.size) {
+      throw new Error(`assembled ${at} bytes, expected ${meta.size}`);
+    }
+  } finally {
+    access.close();
+  }
+  return handle.getFile();
+}
+```
+
+`assemble` runs in the staging worker, because `createSyncAccessHandle` is worker-only and on iOS before 26.0 there is no other way to write into OPFS.
+
+- [ ] **Step 2: The export cascade**
+
+```js
+// Four rungs, tried in order. Each is independently supported somewhere, so a
+// browser that fails one still saves the file.
+//
+// Rung four is the reason no platform can be receive-broken: the bytes are
+// already on the device and their tags have verified. Export is a separate,
+// retryable action, and the file waits in the app until one of the rungs works.
+export const RUNG = {
+  STREAM: 'service-worker-stream',
+  DOWNLOAD: 'anchor-download',
+  SHARE: 'share-sheet',
+  KEEP: 'kept-in-app',
+};
+
+export function exportRungs(nav = navigator) {
+  return {
+    [RUNG.STREAM]: 'serviceWorker' in nav,
+    [RUNG.DOWNLOAD]: typeof URL.createObjectURL === 'function',
+    [RUNG.SHARE]: typeof nav.canShare === 'function',
+    [RUNG.KEEP]: true,
+  };
+}
+
+export async function exportFile(file, { preferShare = false, nav = navigator, doc = document } = {}) {
+  // On iOS the share sheet is the rung most likely to reach the Files app, and
+  // it needs a user gesture, so the caller passes preferShare from a click
+  // handler rather than this module guessing.
+  if (preferShare && nav.canShare?.({ files: [file] })) {
+    try {
+      await nav.share({ files: [file] });
+      return RUNG.SHARE;
+    } catch (err) {
+      // A cancelled share is a decision, not a failure. Falling through to a
+      // download would save a file the person just declined to save.
+      if (err && err.name === 'AbortError') return RUNG.KEEP;
+    }
+  }
+
+  try {
+    const url = URL.createObjectURL(file);
+    const a = doc.createElement('a');
+    a.href = url;
+    a.download = file.name;
+    a.rel = 'noopener';
+    doc.body.append(a);
+    a.click();
+    a.remove();
+    // Revoked on a timer rather than immediately: revoking while the browser is
+    // still fetching the URL cancels the download on some engines.
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    return RUNG.DOWNLOAD;
+  } catch {
+    // Nothing is lost. The file is in the app and can be exported later.
+    return RUNG.KEEP;
+  }
+}
+```
+
+- [ ] **Step 3: Tests**
+
+`web/export.test.mjs`, with fakes for `navigator.share` and the DOM:
+
+- a cancelled share reports `KEEP` and does **not** fall through to a download, because saving a file somebody just declined to save is worse than not saving it
+- a share that throws for any other reason does fall through to the download rung
+- `preferShare` false never calls `share`
+- `exportRungs` reports `KEEP` true unconditionally, on any navigator
+- the object URL is revoked, and not before the click
+
+Add to the staging tests: assembling a three-chunk transfer produces the concatenation in order; a chunk that fails its tag aborts assembly rather than writing a short file; assembly checks the total length against the metadata's size.
+
+- [ ] **Step 4: Wire it into the inbox**
+
+A received transfer shows **Save**. Where the stream rung works, that is one tap and the browser's own download UI appears. Where it does not, the same tap assembles and runs the cascade, and the row reports what happened: `Saved`, `Shared`, or `Ready to save` when it stayed in the app.
+
+A transfer whose export stopped at `KEEP` keeps its Save button and is never shown as failed. Its bytes are on the device and verified; only the export is outstanding.
+
+Assembly is idempotent: a second Save reuses the assembled file if it is still present rather than decrypting again.
+
+- [ ] **Step 5: Verify**
+
+```bash
+node --test web/export.test.mjs
+```
+
+Then on real devices:
+
+1. Desktop: save a 2 GB transfer, confirm the download completes and memory stays flat.
+2. iPhone, Home Screen app: save a 200 MB transfer. Whichever rung runs, the file must reach Files. Record which rung.
+3. iPhone: cancel the share sheet. The row must still offer Save, and nothing should have been written elsewhere.
+4. iPhone: save a 2 GB transfer and watch memory. Flat is the requirement; a spike means something materialized the file rather than referencing it.
+5. Corrupt a staged chunk before saving. Assembly must fail rather than write a short or wrong file.
+6. Confirm peak disk during assembly is about the file size plus one chunk, not twice.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add web/assemble.js web/export.js web/export.test.mjs web/session.js web/views/inbox.js web/sw.js
+git commit -m "feat(web): assemble into one file and export through a cascade"
+```

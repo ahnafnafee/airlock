@@ -611,12 +611,27 @@ number is a policy ceiling, not a reservation, and writes still fail when the
 disk is full, with no prompt. Preflight every queued transfer against
 `estimate()` and refuse up front rather than failing at 90 percent.
 
-**One thing is unverified and load-bearing.** Whether a service-worker-synthesized
-download completes inside an installed web app on iOS. That path has regressed
-twice in a year and traces to a WebKit bug closed to a private radar. If it
-fails, iOS is send-only, and there is no "open it in Safari instead" escape
-because of the storage partition. **iOS receive is not documented as working
-until this is tested on a real device.**
+**Receiving cannot fail on any platform, because saving is not one mechanism.**
+Chunks arrive and land in OPFS, which always works. Turning them into a file the
+operating system holds is a separate, retryable step with four independent
+implementations: a service-worker stream, an anchor download on an object URL, the
+system share sheet, and simply keeping the file in the app until one of the others
+works.
+
+That matters most on iOS, where the service-worker path has regressed twice in a
+year and its behavior in a Home Screen app traces to a WebKit bug closed to a
+private radar. An earlier draft of this spec concluded that iOS would be send-only
+if that path failed. That was wrong: it mistook one export mechanism for the whole
+of receiving.
+
+The property that makes the fallbacks cheap is that an OPFS `File` is disk-backed.
+`getFile()` returns a reference rather than a copy, and both `createObjectURL` and
+`navigator.share` accept it without materializing it, so a 20 GB export costs the
+same memory as a small one.
+
+A transfer is complete when its bytes are on the device and their tags verify.
+Export is a separate action, and a step that needs one extra tap is not a broken
+platform.
 
 ---
 

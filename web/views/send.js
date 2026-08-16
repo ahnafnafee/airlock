@@ -164,6 +164,10 @@ registerView('send', 'Send', (panel) => {
   // The key to the strip above it. Hidden until a strip has more than one state
   // to tell apart, because a legend for a single color explains nothing.
   const key = el('div', { hidden: true });
+  // Names the position of an edit, under the chunks that carried it.
+  const edits = el('div', { hidden: true });
+  // Byte offsets under the strip.
+  const ruler = el('div', { hidden: true });
 
   panel.append(
     el('h2', {}, 'Send'),
@@ -183,11 +187,13 @@ registerView('send', 'Send', (panel) => {
     stagedList,
     sendButton,
     progress,
+    ruler,
+    edits,
     key,
     status,
     announcement);
 
-  controls = { recipient, hold, progress, key, status, announcement };
+  controls = { recipient, hold, progress, ruler, edits, key, status, announcement };
 
   // Rebuilt whole rather than patched, so the index each Remove closes over is
   // the index that row now has. Same row shape the inbox uses: the text block
@@ -470,7 +476,7 @@ function paintStrip(strip, p) {
 
 async function sendNow(files) {
   const {
-    recipient, hold, progress, key, status, announcement,
+    recipient, hold, progress, ruler, edits, key, status, announcement,
   } = requireControls();
   const to = recipient.value ? [recipient.value] : [];
   // Read once for the whole batch, so a stray click mid-send cannot split one
@@ -499,7 +505,7 @@ async function sendNow(files) {
           // built when the total arrives rather than drawn against a guess from
           // the file size. A strip with the wrong number of segments is the one
           // thing this element must never be.
-          if (!strip && p.total) strip = renderStrip(progress, p.total);
+          if (!strip && p.total) strip = renderStrip(progress, p.total, { sizes: p.sizes });
           if (strip) { paintStrip(strip, p); strip.legend(key); }
           // On the direct path nothing is held and nothing is on a wire: the
           // count is chunks sealed onto this device. Until the file has been cut
@@ -531,6 +537,10 @@ async function sendNow(files) {
       if (strip) {
         paintStrip(strip, { ...r, inflightAt: [], inflight: 0 });
         strip.legend(key);
+        strip.ruler(ruler, file.size);
+        // Only on a settled send, because a position is not news until it is
+        // final: a chunk still in transit may yet be the one that moved.
+        strip.marks(edits, r.storedAt || [], 'the edit');
       }
       status.textContent = onServer
         ? `Sent ${file.name} · ${r.held} of ${r.total} chunks were already here`

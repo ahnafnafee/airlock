@@ -19,7 +19,8 @@
   /* The reference uses Anybody and Familjen Grotesk. Airlock must also paint
      without a network request, so installed condensed grotesks lead these
      stacks and fall back to the platform UI face. */
-  --display: "Arial Narrow", "Aptos Display", "Roboto Condensed", "Helvetica Neue", system-ui, sans-serif;
+  --display: "Aptos Display", "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system,
+             "Helvetica Neue", Arial, sans-serif;
   --sans: "Aptos", "Segoe UI", "Helvetica Neue", Arial, system-ui, sans-serif;
   --utility: "Cascadia Mono", "SFMono-Regular", Consolas, ui-monospace, monospace;
 
@@ -30,7 +31,7 @@
   --wordmark: 21px;
 
   --track-stencil: 0.02em;
-  --track-panel: -0.03em;
+  --track-panel: -0.022em;
   --track-mark: -0.02em;
 
   --rail: 212px;

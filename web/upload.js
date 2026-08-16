@@ -89,6 +89,10 @@ export async function prepare(file, {
   const pool = newPool();
   const cids = [];
   const hashes = [];
+  // A chunk's plaintext length, at its position. Content defined chunks are not
+  // equal, so this is what lets the strip draw each one at the width it really
+  // occupies and lets a ruler put a byte offset under the right segment.
+  const sizes = [];
   // Bounded rather than awaited only at the end. Awaiting at the end would queue
   // every chunk of the file, which is the memory the streaming chunker exists to
   // avoid. One more than the pool holds, so a worker that finishes has the next
@@ -103,6 +107,7 @@ export async function prepare(file, {
     await pool.init(mk, mode, stageId);
     for await (const plain of chunkFile(file, cdc)) {
       const i = index++;
+      sizes[i] = plain.length;
       const p = pool.seal(i, plain).then((r) => {
         cids[r.index] = r.cid;
         hashes[r.index] = r.h;
@@ -125,7 +130,7 @@ export async function prepare(file, {
     // workers holding chunks for a transfer that is not happening.
     pool.close();
   }
-  return { cids, hashes };
+  return { cids, hashes, sizes };
 }
 
 // Everything the server path does before a sealed chunk has anywhere to go: name
@@ -136,12 +141,14 @@ async function begin(file, opts) {
   const { mk, mode, to, cdc, api } = opts;
 
   const ids = [];
+  const sizes = [];
   for await (const plain of chunkFile(file, cdc)) {
+    sizes.push(plain.length);
     ids.push(await chunkIdentity(mk, mode, plain));
   }
 
   const { id, missing } = await api.createTransfer(ids.map((x) => x.cid), to, true);
-  return { ids, id: checkTransferId(id), missing };
+  return { ids, sizes, id: checkTransferId(id), missing };
 }
 
 // The exception, chosen per transfer. The sealed chunks are spooled to the
@@ -154,13 +161,16 @@ async function begin(file, opts) {
 export async function uploadThroughServer(file, opts) {
   const { mk, mode, cdc, api, onProgress = () => {} } = opts;
 
-  const { ids, id, missing } = await begin(file, opts);
+  const { ids, sizes, id, missing } = await begin(file, opts);
   try {
     const wanted = new Set(missing);
 
     const progress = {
       id,
       total: ids.length,
+      // The widths the segments should have, so the strip stops implying that
+      // every chunk is the same size.
+      sizes,
       // Counted over positions rather than as ids.length minus the missing set.
       // A file can hold the same chunk many times, and a repeat the server lacks
       // is not a dedup hit: subtracting a de-duplicated set size would report a

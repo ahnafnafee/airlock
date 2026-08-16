@@ -33,7 +33,7 @@ export function segmentCount(width, total) {
 // rule is that transfer's own chunk composition, so reading down a list shows
 // which arrivals were mostly bytes this device already held. It is the same
 // scale, the same colors and the same meanings, at the height of a hairline.
-export function renderStrip(container, total, { seam = false, label = 'Transfer progress' } = {}) {
+export function renderStrip(container, total, { seam = false, label = 'Transfer progress', sizes = null } = {}) {
   const span = total || 1;
   const segments = [];
 
@@ -50,8 +50,25 @@ export function renderStrip(container, total, { seam = false, label = 'Transfer 
   // live state onto a new grid costs more than the segments it would regain.
   container.append(row);
   const count = segmentCount(row.clientWidth, total);
+  // A segment's width is the share of the file its chunks occupy. Content
+  // defined chunking cuts on content, so chunks are not equal, and drawing them
+  // equal misplaces every boundary: an edit two thirds of the way through a file
+  // would appear at the middle of the strip. Weights are summed per segment,
+  // because one segment covers several chunks once a transfer is large.
+  const weights = [];
+  if (Array.isArray(sizes) && sizes.length) {
+    for (let i = 0; i < count; i++) weights[i] = 0;
+    for (let i = 0; i < span; i++) {
+      const at = Math.min(count - 1, Math.floor((i * count) / span));
+      weights[at] += Number(sizes[i]) || 0;
+    }
+  }
+  const total_ = weights.reduce((a, b) => a + b, 0);
   for (let i = 0; i < count; i++) {
     const seg = el('span', { class: 'seg pending' });
+    // Falls back to equal shares when no sizes were reported, which is every
+    // caller that has not cut the file yet.
+    if (total_ > 0) seg.style.flex = `${(weights[i] / total_) * count} 1 0`;
     segments.push(seg);
     row.append(seg);
   }
@@ -94,6 +111,54 @@ export function renderStrip(container, total, { seam = false, label = 'Transfer 
       container.className = 'legend';
       container.hidden = rendered.length < 2;
     },
+    // Points at the chunks that actually moved, under the segments they sit in.
+    //
+    // The strip already shows where a change landed, but only to someone who has
+    // learned that solid means moved. This says it in words, once, at the
+    // position it happened, which is the whole claim of content defined
+    // chunking: an edit in the middle of a file costs the middle of the file
+    // and nothing else.
+    //
+    // Drawn only when it is news. If everything moved there was no edit to
+    // point at, just a first send, and a label on every segment would be noise
+    // rather than a finding.
+    // Byte offsets across the strip. Only meaningful once segments carry their
+    // real widths, because until then a position in the row is not a position in
+    // the file. Five marks: enough to locate something, few enough to read.
+    ruler(container, fileSize) {
+      if (!(total_ > 0) || !fileSize) {
+        container.replaceChildren();
+        container.hidden = true;
+        return;
+      }
+      const STOPS = 5;
+      const marks = [];
+      for (let i = 0; i < STOPS; i++) {
+        marks.push(el('span', {}, humanBytes((fileSize * i) / (STOPS - 1))));
+      }
+      container.className = 'ruler';
+      container.hidden = false;
+      container.replaceChildren(...marks);
+    },
+    marks(container, indexes, label) {
+      const held = segments.filter((seg) => (seg.className || '').includes('held')).length;
+      const wanted = new Set([...indexes].map(segIndex));
+      if (!held || !wanted.size || wanted.size > segments.length / 2) {
+        container.replaceChildren();
+        container.hidden = true;
+        return;
+      }
+      container.className = 'marks';
+      container.hidden = false;
+      // A run of adjacent changed chunks is one edit, so only its first segment
+      // is named. Repeating the label under every segment of a run reads as
+      // several separate edits, which is a different and wrong story.
+      container.replaceChildren(...segments.map((_, i) => {
+        if (!wanted.has(i)) return el('span', {});
+        const opensRun = !wanted.has(i - 1);
+        return el('span', { class: 'mark' }, el('i', {}), opensRun ? el('em', {}, label) : []);
+      }));
+    },
   };
 }
 
@@ -104,3 +169,12 @@ const ORDER = [
   { state: 'stored', label: 'sealed now' },
   { state: 'held', label: 'already held' },
 ];
+
+// Short enough to sit under a segment without wrapping.
+function humanBytes(n) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = n;
+  let u = 0;
+  while (v >= 1024 && u < units.length - 1) { v /= 1024; u++; }
+  return `${v < 10 && u > 0 ? v.toFixed(1) : Math.round(v)} ${units[u]}`;
+}

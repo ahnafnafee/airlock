@@ -1356,3 +1356,41 @@ machines could look completely different, and that is the measurement that
 should decide it. What this does establish is that the direct path is not free,
 that its cost is the transport rather than the encryption, and that the
 comparison is worth taking properly.
+
+## Closing the gap to the transport ceiling
+
+The table above left the direct path at 11.2 MB/s against a data channel that
+raw measurement put near 20 MB/s, and attributed the difference to Airlock's own
+per-chunk work rather than to the transport. That was worth acting on, and the
+cause turned out to be one line of control flow.
+
+`sendChunks` read a chunk from storage, sent all of its fragments, and only then
+read the next one. A chunk is megabytes, so the link sat idle for the length of a
+storage read once per chunk, and that idle time was most of the missing
+throughput. One read now runs ahead of the send, so the next chunk is being
+fetched while the current one is on the wire.
+
+Measured on the same two devices, 128 MB, sealed and delivered peer to peer with
+the server holding nothing:
+
+| | Run 1 | Run 2 | Rough mean |
+| --- | --- | --- | --- |
+| Before | 10.7 MB/s | 11.2 MB/s | 11 MB/s |
+| After | 21.4 MB/s | 16.0 MB/s | 19 MB/s |
+
+About 1.7 times faster, which puts the direct path at the raw data channel
+ceiling rather than a little over half of it. Run-to-run variance is wide, as the
+two "after" figures show, because both peers and the server share one machine, so
+treat these as a range rather than a number.
+
+There is no unit test for this. One was written and then deleted: the fake link
+in `peer.test.mjs` delivers asynchronously, so its timing rather than the code's
+decided the result, and the test passed against both the fixed and the original
+version. A test that cannot tell those apart claims coverage it does not have,
+which is worse than leaving the change to the measurement above. A test would
+need a fake whose sends take observable time.
+
+**The remaining ceiling is not Airlock's.** At roughly 20 MB/s the direct path is
+now bounded by what a browser data channel does, which the parameter sweep above
+showed is insensitive to fragment size and connection count. Beating it means
+either not using a data channel or not being in a browser.

@@ -150,8 +150,27 @@ async function sendChunks(link, indexes, readChunk) {
   const { channels } = link;
   const size = fragmentSize(link.pc);
   let turn = 0;
-  for (const index of indexes) {
-    const bytes = asBytes(await readChunk(index));
+  // The next chunk is read while this one is on the wire. Reading it only after
+  // the last fragment of its predecessor had been handed over left the link idle
+  // for the length of a storage read, once per chunk, and a chunk is megabytes.
+  //
+  // Exactly one read runs ahead: a second buys nothing, because one is already
+  // enough to cover a send, and it would double what a link holds in memory.
+  // readChunk may answer synchronously, so its result is normalized first, and
+  // a read that fails while nothing awaits it would surface as an unhandled
+  // rejection rather than as the transfer failure it is.
+  const runAhead = (i) => {
+    if (i >= indexes.length) return null;
+    const p = Promise.resolve(readChunk(indexes[i]));
+    p.catch(() => {});
+    return p;
+  };
+  let ahead = runAhead(0);
+  for (let i = 0; i < indexes.length; i++) {
+    const index = indexes[i];
+    const pending = ahead;
+    ahead = runAhead(i + 1);
+    const bytes = asBytes(await pending);
     const total = bytes.length;
     if (total === 0) {
       await send(channels[turn++ % channels.length], packFragment(index, 0, 0, bytes));

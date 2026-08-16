@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bitmapOf, indexesFrom, makeWriter } from './staging.js';
+import {
+  bitmapOf, indexesFrom, makeWriter, openStage, stageDir, writeStaged,
+} from './staging.js';
 
 // A stand-in for the dedicated worker. Nothing here writes to disk: what these
 // tests hold to account is the message protocol, since a reply matched to the
@@ -130,6 +132,167 @@ test('one worker serves every write', () => {
   write('e'.repeat(32), 0, new Uint8Array([1]));
   write('e'.repeat(32), 1, new Uint8Array([2]));
   assert.equal(spawned, 1);
+});
+
+// A stand-in for the origin private file system, holding just the parts of it
+// staging.js touches: directories, files, the sync access handle a write goes
+// through, and a name listing.
+function fakeStorage() {
+  // File names whose write stops after one byte, which is the state a closed
+  // tab, a sleeping device or a killed process leaves a chunk in.
+  const halt = new Set();
+
+  const missing = (name) => {
+    const err = new Error(`no entry named ${name}`);
+    err.name = 'NotFoundError';
+    return err;
+  };
+
+  function fakeFile(name) {
+    let bytes = new Uint8Array(0);
+    return {
+      async createSyncAccessHandle() {
+        return {
+          write(src, { at = 0 } = {}) {
+            const cut = halt.has(name) ? Math.min(1, src.byteLength) : src.byteLength;
+            const grown = new Uint8Array(Math.max(bytes.length, at + cut));
+            grown.set(bytes);
+            grown.set(src.subarray(0, cut), at);
+            bytes = grown;
+            if (halt.has(name)) throw new Error('the write stopped');
+            return cut;
+          },
+          truncate(size) { bytes = bytes.slice(0, size); },
+          flush() {},
+          close() {},
+        };
+      },
+      async getFile() {
+        const copy = bytes.slice();
+        return { size: copy.length, async arrayBuffer() { return copy.buffer; } };
+      },
+    };
+  }
+
+  function fakeDir() {
+    const entries = new Map();
+    return {
+      async getDirectoryHandle(name, { create = false } = {}) {
+        const found = entries.get(name);
+        if (found) return found;
+        if (!create) throw missing(name);
+        const made = fakeDir();
+        entries.set(name, made);
+        return made;
+      },
+      async getFileHandle(name, { create = false } = {}) {
+        const found = entries.get(name);
+        if (found) return found;
+        if (!create) throw missing(name);
+        const made = fakeFile(name);
+        entries.set(name, made);
+        return made;
+      },
+      async removeEntry(name) {
+        if (!entries.delete(name)) throw missing(name);
+      },
+      async *keys() { yield* [...entries.keys()]; },
+    };
+  }
+
+  return { halt, root: fakeDir() };
+}
+
+// staging.js resolves the file system through navigator.storage on every call
+// rather than holding it, so installing the fake here reaches every path to disk.
+function onDisk() {
+  const disk = fakeStorage();
+  Object.defineProperty(globalThis, 'navigator', {
+    value: { storage: { getDirectory: async () => disk.root } },
+    configurable: true,
+  });
+  return disk;
+}
+
+const STAGE = '0'.repeat(32);
+
+test('an interrupted write leaves nothing that reports as staged', async () => {
+  // The whole point. A chunk file exists from the moment a write starts, so if
+  // presence meant existence, a write cut short would be counted as delivered,
+  // the progress bitmap would claim the chunk arrived, and the sender would be
+  // told it may stop holding the only other copy.
+  const disk = onDisk();
+  const stage = await openStage(STAGE);
+  disk.halt.add('4');
+
+  await assert.rejects(writeStaged(STAGE, 4, new Uint8Array([1, 2, 3])), /the write stopped/);
+
+  // The short file really is on disk. Nothing below is reading an absence.
+  const dir = await stageDir(STAGE);
+  assert.equal((await (await dir.getFileHandle('4')).getFile()).size, 1);
+
+  assert.equal(await stage.has(4), false);
+  assert.deepEqual([...await stage.held()], []);
+  assert.deepEqual([...await stage.bitmap(8)], [0]);
+  await assert.rejects(stage.get(4), /not staged/);
+});
+
+test('a completed write is reported as staged straight away', async () => {
+  onDisk();
+  const stage = await openStage(STAGE);
+  await writeStaged(STAGE, 4, new Uint8Array([1, 2, 3]));
+
+  assert.equal(await stage.has(4), true);
+  assert.deepEqual([...await stage.held()], [4]);
+  assert.deepEqual([...await stage.bitmap(8)], [0b10000]);
+  assert.deepEqual([...await stage.get(4)], [1, 2, 3]);
+});
+
+test('an index written again after an interrupted write is held once it lands', async () => {
+  // Refusing the short chunk is only half of it. The index has to become held
+  // when the chunk is asked for again, or a resume could never finish.
+  const disk = onDisk();
+  const stage = await openStage(STAGE);
+
+  disk.halt.add('4');
+  await assert.rejects(writeStaged(STAGE, 4, new Uint8Array([1, 2, 3])));
+  disk.halt.delete('4');
+  await writeStaged(STAGE, 4, new Uint8Array([1, 2, 3]));
+
+  assert.equal(await stage.has(4), true);
+  assert.deepEqual([...await stage.get(4)], [1, 2, 3]);
+});
+
+test('a chunk left unfinished by an earlier session is not held', async () => {
+  // The same state as an interrupted write, arrived at without one, because
+  // this is what a device that died between the bytes and the commit leaves.
+  onDisk();
+  const stage = await openStage(STAGE);
+  const dir = await stageDir(STAGE);
+  const handle = await dir.getFileHandle('9', { create: true });
+  const access = await handle.createSyncAccessHandle();
+  access.write(new Uint8Array([1, 2, 3]), { at: 0 });
+  access.close();
+  await dir.getFileHandle('9.part', { create: true });
+
+  assert.equal(await stage.has(9), false);
+  assert.deepEqual([...await stage.held()], []);
+});
+
+test('only a bare position counts as a chunk', async () => {
+  // Number() would read these as 16, 1000, 5, 7 and 8, so a name that is not
+  // the one String(index) produces would invent chunks this device never took.
+  onDisk();
+  const stage = await openStage(STAGE);
+  await writeStaged(STAGE, 5, new Uint8Array([1]));
+
+  const dir = await stageDir(STAGE);
+  for (const name of ['0x10', '1e3', '+5', '007', ' 8', '2.part']) {
+    await dir.getFileHandle(name, { create: true });
+  }
+
+  assert.deepEqual([...await stage.held()], [5]);
+  assert.deepEqual([...await stage.bitmap(16)], [0b100000, 0]);
 });
 
 test('a bitmap sets exactly the bits it is given', () => {

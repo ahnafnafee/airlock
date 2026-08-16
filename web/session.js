@@ -16,13 +16,14 @@ import {
 import { openStage, indexesFrom } from './staging.js';
 import { transfersActive } from './wake.js';
 import {
-  DOMAIN, MODE_SEALED, modeOf, openRecord, loadMaster, b64decode, b64encode,
+  DOMAIN, MODE_SEALED, modeOf, openRecord, unpackHashes, loadMaster, b64decode, b64encode,
 } from './crypto.js';
 
 // Every id is checked before it reaches a URL. The one that arrives through the
 // relay is the least trustworthy string this module sees, because the server
 // hands it over without looking inside.
 const TRANSFER_ID = /^[0-9a-f]{32}$/;
+const CHUNK_ID = /^[0-9a-f]{64}$/;
 
 // A peer that answered the signal but never opened a channel must not hold the
 // queue behind it.
@@ -271,6 +272,96 @@ export function liveTransport({ identity, gatherMs = GATHER_MS, linkMs = LINK_MS
   return { open, accept, answer };
 }
 
+// The two readings of a transfer's own record that both a session and a save
+// need, so they sit outside makeSessions rather than being reachable only from
+// inside one device's session state.
+async function openMeta(mk, info) {
+  const record = b64decode(info.meta);
+  // The mode byte decides whether the record is authenticated at all. An
+  // unsealed one names the file whatever its writer chose, and that name is
+  // what the offer puts in front of the recipient, and what a save writes into
+  // the operating system.
+  if (modeOf(record) !== MODE_SEALED) throw new Error('this transfer is not sealed');
+  return JSON.parse(new TextDecoder().decode(
+    await openRecord(mk, DOMAIN.META, info.id, record)));
+}
+
+// A list the server has never had a reason to allocate arrives as null rather
+// than as an empty array, which is what a transfer nobody has declined looks
+// like on the wire. Normalized once here, so no later line has to remember.
+const listOf = (value) => (Array.isArray(value) ? value : []);
+
+// Turning a received transfer into one file the operating system can hold.
+//
+// This is not part of receiving. The chunks are already on this device or on the
+// server and every tag is verified during assembly, so a save is a separate
+// action that can be retried as often as it takes. What it answers with is a
+// disk-backed File, which is what lets the export cascade stay memory-flat on a
+// file of any size.
+//
+// The work happens in a worker because createSyncAccessHandle is callable only
+// from a dedicated worker global scope, and the worker is spawned per save and
+// torn down with it: one long job, no protocol to keep straight.
+const spawnAssembler = () => new Worker(
+  new URL('./assemble-worker.js', import.meta.url), { type: 'module' });
+
+export async function assembleTransfer(transferId, { spawn = spawnAssembler } = {}) {
+  if (!TRANSFER_ID.test(transferId || '')) {
+    throw new Error('a malformed transfer id has nothing to assemble');
+  }
+  const mk = await loadMaster();
+  if (!mk) throw new Error('Locked. Unlock this device first.');
+
+  const info = await api.transfer(transferId);
+  const meta = await openMeta(mk, info);
+
+  // The chunk list is what keys every chunk to its position, and it is sealed
+  // for that reason: an unsealed one would let the server choose which bytes go
+  // where. Its hashes never leave this device.
+  const listRecord = await api.getRecord(transferId, 'chunklist');
+  if (modeOf(listRecord) !== MODE_SEALED) throw new Error('this transfer is not sealed');
+  const hashes = unpackHashes(await openRecord(mk, DOMAIN.LIST, transferId, listRecord));
+
+  const cids = listOf(info.cids);
+  if (hashes.length !== cids.length) {
+    throw new Error('the chunk list and the server record disagree on length');
+  }
+  if (!cids.every((cid) => CHUNK_ID.test(cid))) {
+    throw new Error('the server named a malformed chunk id');
+  }
+
+  // A device sees the transfers it sent as well as the ones it was sent, and a
+  // transfer whose sealed metadata names no stage of its own staged under this
+  // same id. Reading those chunks costs nothing; deleting them as they are read
+  // would destroy the only copy of what this device still owes. An identity that
+  // cannot be established spares the stage rather than spending it, because the
+  // wrong guess in that direction is unrecoverable and the other one is disk.
+  const consume = await identity().then((me) => info.sender !== me, () => false);
+
+  const worker = spawn();
+  try {
+    return await new Promise((resolve, reject) => {
+      // A worker that failed to load or died mid assembly would otherwise leave
+      // this waiting on a reply that is never coming, and a save that never
+      // settles is a button that never comes back.
+      const lost = () => reject(new Error('the assembly worker stopped'));
+      worker.addEventListener('message', (event) => {
+        const { file, error } = event.data || {};
+        if (error) reject(new Error(error));
+        else resolve(file);
+      }, { once: true });
+      worker.addEventListener('error', lost, { once: true });
+      worker.addEventListener('messageerror', lost, { once: true });
+      worker.postMessage({ transfer: transferId, meta, hashes, cids, consume });
+    });
+  } finally {
+    // One job per worker. Terminating with the job is what keeps a save from
+    // leaving a thread and an open directory handle behind for the life of the
+    // page.
+    worker.terminate();
+  }
+}
+
 // makeSessions holds the state that belongs to one device: which peers have a
 // session open, which are cooling off after a failure, and which have refused
 // what. The live instance below is the app's; a test builds its own so those
@@ -364,24 +455,9 @@ export function makeSessions(deps) {
     return Promise.race([promise, dropped]);
   }
 
-  async function openMeta(mk, info) {
-    const record = b64decode(info.meta);
-    // The mode byte decides whether the record is authenticated at all. An
-    // unsealed one names the file whatever its writer chose, and that name is
-    // what the offer puts in front of the recipient.
-    if (modeOf(record) !== MODE_SEALED) throw new Error('this transfer is not sealed');
-    return JSON.parse(new TextDecoder().decode(
-      await openRecord(mk, DOMAIN.META, info.id, record)));
-  }
-
   function sameList(a, b) {
     return Array.isArray(a) && a.length === b.length && a.every((v, i) => v === b[i]);
   }
-
-  // A list the server has never had a reason to allocate arrives as null rather
-  // than as an empty array, which is what a transfer nobody has declined looks
-  // like on the wire. Normalized once here, so no later line has to remember.
-  const listOf = (value) => (Array.isArray(value) ? value : []);
 
   function normalize(info) {
     return {

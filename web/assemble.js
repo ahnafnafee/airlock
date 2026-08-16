@@ -1,0 +1,140 @@
+// Turning a received transfer into one file the operating system can hold.
+//
+// Receiving is two steps and only the second was ever uncertain. Chunks arrive
+// and land in the origin private file system, which always works. Turning them
+// into a file is a separate action, it can be retried, and export.js gives it
+// several independent implementations. Nothing here is the last chance at
+// anything: a transfer whose export has not landed yet is still a transfer whose
+// bytes are on the device and whose tags have verified.
+//
+// Everything in this module runs in a worker. createSyncAccessHandle is callable
+// only from a dedicated worker global scope, and Safari shipped no other way to
+// write into the origin private file system before 26.0, so one write path
+// serves every browser.
+
+import { openChunk } from './crypto.js';
+
+const ASSEMBLED = 'assembled';
+
+async function assembledDir(root) {
+  const base = root || await navigator.storage.getDirectory();
+  return base.getDirectoryHandle(ASSEMBLED, { create: true });
+}
+
+// The name a File carries is what the download attribute saves as and what the
+// share sheet writes into the Files app, so a name chosen on another device has
+// to survive the trip. This is deliberately not naming.js's ASCII fallback,
+// which exists to be safe inside an HTTP header: here the point is the opposite,
+// that an emoji or a non-Latin name reaches the operating system intact. Only
+// the characters that would name a path rather than a file are removed.
+function fileName(meta) {
+  const cleaned = String(meta?.name ?? '')
+    .replace(/[\u0000-\u001f\u007f/\\]/g, '_')
+    .trim();
+  if (cleaned === '' || /^\.+$/.test(cleaned)) return 'download';
+  return cleaned;
+}
+
+// getFile names the File after its handle, which here is the transfer id: an id
+// with no extension is neither a name a person recognizes nor one iOS can pick a
+// type from. Rewrapping costs no memory, because a Blob built from a Blob
+// references the same bytes on disk rather than reading them into the heap.
+const wrap = (file, meta) => new File([file], fileName(meta), {
+  type: meta.mime || 'application/octet-stream',
+});
+
+// Where a chunk comes from, in the order that costs least. A transfer delivered
+// peer to peer already holds its sealed chunks in this device's stage; one
+// relayed through the server does not. Save is only offered on a transfer the
+// server reports complete, so the server can always supply what the stage lacks.
+//
+// Staged chunks are removed as they are consumed, and only the ones that came
+// from the stage. That is what keeps peak disk at roughly the file size plus one
+// chunk rather than twice the file size, and it is safe for exactly the reason
+// above: the same bytes are still on the server.
+//
+// Consuming is refusable, because one stage is not this transfer's to spend. A
+// device sees the transfers it sent as well as the ones it was sent, and a
+// transfer whose sealed metadata names no stage of its own staged under the
+// transfer's own id. Deleting there would destroy the only copy of what this
+// device still owes every recipient that has not taken delivery yet.
+export function chunkSource(dir, cids, { fetchChunk, consume = true }) {
+  const staged = new Set();
+  return {
+    get: async (i) => {
+      try {
+        const handle = await dir.getFileHandle(String(i));
+        const bytes = new Uint8Array(await (await handle.getFile()).arrayBuffer());
+        staged.add(i);
+        return bytes;
+      } catch {
+        return fetchChunk(cids[i]);
+      }
+    },
+    remove: async (i) => {
+      if (!staged.delete(i) || !consume) return;
+      // A stage that cannot be pruned costs disk and nothing else, so it never
+      // fails an assembly that has otherwise succeeded.
+      try {
+        await dir.removeEntry(String(i));
+      } catch {
+        // Already gone, or a directory this transfer no longer owns.
+      }
+    },
+  };
+}
+
+// An assembly already on disk is reused rather than repeated, which is what
+// makes a second Save immediate. It also has to be, rather than merely wanting
+// to be: assemble consumes the staged chunks as it writes, and a share sheet or
+// a save picker needs the user gesture that a long first assembly has already
+// spent. The second tap is the one that reaches the operating system, and it
+// only reaches it in time because this returns without decrypting anything.
+//
+// A file whose length disagrees with the metadata is an assembly that was
+// interrupted. It is treated as absent rather than handed over short.
+export async function assembledFile(transferId, meta, { root = null } = {}) {
+  try {
+    const out = await assembledDir(root);
+    const handle = await out.getFileHandle(transferId);
+    const file = await handle.getFile();
+    if (file.size !== meta.size) return null;
+    return wrap(file, meta);
+  } catch {
+    return null;
+  }
+}
+
+// Decrypt the staged chunks into a single output file. The result is a
+// disk-backed File, which is what lets every export rung stay memory-flat:
+// createObjectURL and navigator.share both take a reference to disk rather than
+// a copy in memory, so a 20 GB export costs what a 20 MB one does.
+export async function assemble(transferId, meta, { mk, mode, hashes, cids, stage, root = null }) {
+  const out = await assembledDir(root);
+  const handle = await out.getFileHandle(transferId, { create: true });
+
+  // One handle held for the whole write. The spec allows a single open sync
+  // access handle per file, and reopening per chunk would be both slower and a
+  // race against itself.
+  const access = await handle.createSyncAccessHandle();
+  try {
+    access.truncate(0);
+    let at = 0;
+    for (let i = 0; i < hashes.length; i++) {
+      const sealed = await stage.get(i);
+      // Throws if the chunk was substituted or corrupted, so a damaged transfer
+      // fails here rather than producing a plausible wrong file.
+      const plain = await openChunk(mk, mode, hashes[i], cids[i], sealed);
+      access.write(plain, { at });
+      at += plain.length;
+      await stage.remove(i);
+    }
+    access.flush();
+    if (at !== meta.size) {
+      throw new Error(`assembled ${at} bytes, expected ${meta.size}`);
+    }
+  } finally {
+    access.close();
+  }
+  return wrap(await handle.getFile(), meta);
+}

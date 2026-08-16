@@ -1,6 +1,38 @@
 import { registerView, state, el, onInbox } from '../app.js';
 import { api } from '../api.js';
+import { RUNG, exportFile } from '../export.js';
 import { DOMAIN, MODE_SEALED, openRecord, modeOf, b64decode } from '../crypto.js';
+
+// What a row says once a save lands. None of these is a failure: the bytes are
+// on the device and their tags verified during assembly, so the only thing an
+// export decides is where they went. A transfer that stayed in the app keeps its
+// Save button and waits.
+const REPORT = {
+  [RUNG.SAVE_PICKER]: 'Saved',
+  [RUNG.DOWNLOAD]: 'Saved',
+  [RUNG.SHARE]: 'Shared',
+  [RUNG.KEEP]: 'Ready to save',
+};
+
+// The share sheet is preferred only where nothing below it reaches the operating
+// system. Two conditions together say that without asking what browser this is.
+// A window with no browser chrome has no downloads shelf and no address bar, so
+// a file saved by an anchor can land somewhere the person cannot see. A browser
+// with no save picker has no file-writing path of its own either. That pair is
+// the shape of a Home Screen web app on iOS. In a tab, or in an installed window
+// on a browser that has the picker, the rungs below are better and this stays
+// false, which matters because a desktop share sheet offers applications rather
+// than a place on disk.
+//
+// The decision is made here rather than inside the cascade because a share needs
+// the user gesture this click is part of, and only the click knows it has one.
+function preferShare(file, nav = navigator, win = window) {
+  const standalone = win.matchMedia?.('(display-mode: standalone)').matches
+    || nav.standalone === true;
+  return Boolean(standalone
+    && typeof win.showSaveFilePicker !== 'function'
+    && nav.canShare?.({ files: [file] }));
+}
 
 function humanSize(bytes) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -125,7 +157,39 @@ registerView('inbox', 'Inbox', (panel) => {
 
     const actions = el('div', { class: 'actions' });
     if (openable) {
-      actions.append(el('a', { class: 'ghost', href: `/dl/${t.id}`, download: '' }, 'Save'));
+      // Save assembles on this device and runs the export cascade, rather than
+      // navigating to the service worker's download route. That route is a fine
+      // rung where it works and a dead end where it does not, and which of those
+      // a browser is cannot be detected. Assembling first makes the outcome
+      // reportable and the action repeatable.
+      const save = el('button', {
+        class: 'ghost', type: 'button',
+        onclick: async () => {
+          // A save runs for as long as the file is large, and a second one
+          // started underneath it would decrypt the same chunks twice.
+          save.disabled = true;
+          try {
+            // Imported here rather than at the top so the whole direct-transfer
+            // path stays out of the boot path, exactly as the app loads it.
+            const { assembleTransfer } = await import('../session.js');
+            const file = await assembleTransfer(t.id);
+            const rung = await exportFile(file, { preferShare: preferShare(file) });
+            detailNode.textContent = REPORT[rung];
+            detailNode.className = 'data muted';
+          } catch (err) {
+            detailNode.textContent = `Could not save. ${err.message}`;
+            detailNode.className = 'data bad';
+          } finally {
+            // The button comes back whatever happened. A share sheet or a save
+            // picker needs a user gesture, and a long first assembly spends the
+            // one this click carried; the second tap finds the file already
+            // assembled and reaches the operating system with its gesture
+            // intact. A saved file is also worth saving again somewhere else.
+            save.disabled = false;
+          }
+        },
+      }, 'Save');
+      actions.append(save);
     }
     // Delete removes a transfer for everyone. Decline removes it for you, and
     // the server deletes it once every addressee has refused. Both are offered,

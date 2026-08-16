@@ -219,14 +219,25 @@ async function thumbnail(id) {
   }
 }
 
+// This route is one rung of several and never the last one. Where it works it is
+// the best thing a notification's Accept can do: one tap, no assembly, and the
+// browser's own download UI. Where it does not, nothing is lost, because the
+// same transfer has a Save in the inbox that assembles on the device and runs
+// the export cascade. So every failure here lands on that row rather than on a
+// plain-text error page, which would be a dead end wearing an explanation.
+const toInbox = () => Response.redirect('/#inbox', 303);
+
 async function download(id) {
   // This id comes from whatever navigated here, so it is the least trustworthy
-  // one in the app and is checked before it reaches a URL.
+  // one in the app and is checked before it reaches a URL. A malformed one names
+  // no transfer, so there is no row to send anyone to.
   if (!TRANSFER_ID.test(id)) {
     return new Response('That download link is malformed.', { status: 400 });
   }
   const mk = await loadMaster();
-  if (!mk) return new Response('Locked. Open Airlock and unlock this device first.', { status: 403 });
+  // The app is where a passphrase is entered, and the inbox is where this
+  // transfer is once it has been.
+  if (!mk) return toInbox();
 
   try {
     const info = await (await getOk(`/api/transfer/${id}`)).json();
@@ -278,6 +289,7 @@ async function download(id) {
       },
     });
   } catch (err) {
-    return new Response(`Could not open this transfer. ${err.message}`, { status: 500 });
+    console.warn(`the download stream could not be built for ${id}`, err);
+    return toInbox();
   }
 }

@@ -57,8 +57,34 @@ const wrap = (file, meta) => new File([file], fileName(meta), {
 // Its caller decides, and refuses in two cases: a stage holding what this device
 // still owes somebody, and a stage that anything might still ask to resume from.
 // Emptying either one turns a save into a second delivery of the whole file.
-export function chunkSource(dir, cids, { fetchChunk, consume = true }) {
+// A stage is pruned only when doing so cannot lose bytes.
+//
+// consume says whether this device is allowed to prune at all. replaceable says
+// whether the server still holds a copy of every chunk, which decides WHEN: a
+// chunk the server can hand back is safe to delete the moment it has been
+// written, because a failed assembly can fetch it again. A chunk the server
+// does not have is the only copy in existence, so deleting it as the output
+// grows would mean an assembly interrupted half way through has destroyed the
+// bytes it had not finished with, leaving a partial output that fails its own
+// size check and can never be retried. Those chunks are released by commit(),
+// which the caller runs only after the whole file has assembled and verified.
+//
+// consume defaults to false so the safe answer is the one you get by omission.
+// The worker is the only producer and always passes it explicitly.
+export function chunkSource(dir, cids, { fetchChunk, consume = false, replaceable = false }) {
   const staged = new Set();
+  const spent = [];
+
+  const drop = async (i) => {
+    // A stage that cannot be pruned costs disk and nothing else, so it never
+    // fails an assembly that has otherwise succeeded.
+    try {
+      await dir.removeEntry(String(i));
+    } catch {
+      // Already gone, or a directory this transfer no longer owns.
+    }
+  };
+
   return {
     get: async (i) => {
       try {
@@ -72,13 +98,14 @@ export function chunkSource(dir, cids, { fetchChunk, consume = true }) {
     },
     remove: async (i) => {
       if (!staged.delete(i) || !consume) return;
-      // A stage that cannot be pruned costs disk and nothing else, so it never
-      // fails an assembly that has otherwise succeeded.
-      try {
-        await dir.removeEntry(String(i));
-      } catch {
-        // Already gone, or a directory this transfer no longer owns.
-      }
+      if (replaceable) await drop(i);
+      else spent.push(i);
+    },
+    // Called once the assembled file is whole. Until then every irreplaceable
+    // chunk is still on disk, so a failure at any point leaves the transfer
+    // exactly as retryable as it was before the attempt.
+    commit: async () => {
+      for (const i of spent.splice(0)) await drop(i);
     },
   };
 }
@@ -135,5 +162,8 @@ export async function assemble(transferId, meta, { mk, mode, hashes, cids, stage
   } finally {
     access.close();
   }
+  // Only now, with the whole file written and its length agreed, are chunks the
+  // server cannot replace safe to release.
+  await stage.commit?.();
   return wrap(await handle.getFile(), meta);
 }

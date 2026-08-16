@@ -30,7 +30,7 @@ async function fetchChunk(cid) {
 }
 
 self.addEventListener('message', async (event) => {
-  const { transfer, meta, hashes, cids, consume } = event.data || {};
+  const { transfer, meta, hashes, cids, consume, replaceable } = event.data || {};
   try {
     // Checked again on this side of the message, because a path is built from it
     // here as well as there.
@@ -57,7 +57,7 @@ self.addEventListener('message', async (event) => {
     // the ceiling staging.js already names: nothing sweeps stages. Lift it with
     // that sweep rather than with a second, non-creating way to name a stage,
     // which would put the path this device builds in two places.
-    const stage = chunkSource(await stageDir(transfer), cids, { fetchChunk, consume });
+    const stage = chunkSource(await stageDir(transfer), cids, { fetchChunk, consume, replaceable });
     // The mode is a constant rather than anything that crossed a wire. Every
     // record this transfer rests on was required to be sealed before its Save
     // was offered, and a plaintext chunk carries no tag to verify.

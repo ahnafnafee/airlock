@@ -387,6 +387,13 @@ export async function assembleTransfer(transferId, { spawn = spawnAssembler } = 
   // that cannot be established spares the stage for the same reason everything
   // else in that answer does.
   const consume = await identity().then((me) => mayConsumeStage(api, me, info), () => false);
+  // Whether the server could hand a chunk back decides not whether the stage is
+  // pruned but when. With every chunk on the server a consumed chunk is
+  // replaceable, so it goes as soon as it is written and peak disk stays at the
+  // file plus one chunk. On a directly delivered transfer the server holds
+  // nothing, the staged copy is the only one, and it may not be released until
+  // the whole file has assembled.
+  const replaceable = listOf(info.missing).length === 0;
 
   const worker = spawn();
   try {
@@ -402,7 +409,7 @@ export async function assembleTransfer(transferId, { spawn = spawnAssembler } = 
       }, { once: true });
       worker.addEventListener('error', lost, { once: true });
       worker.addEventListener('messageerror', lost, { once: true });
-      worker.postMessage({ transfer: transferId, meta, hashes, cids, consume });
+      worker.postMessage({ transfer: transferId, meta, hashes, cids, consume, replaceable });
     });
   } finally {
     // One job per worker. Terminating with the job is what keeps a save from

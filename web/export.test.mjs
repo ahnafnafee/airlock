@@ -190,6 +190,8 @@ test('a chunk missing from the stage comes from the server, and only staged ones
   const asked = [];
   const source = chunkSource(dir, ['cid-zero', 'cid-one'], {
     fetchChunk: async (cid) => { asked.push(cid); return new Uint8Array([1]); },
+    consume: true,
+    replaceable: true,
   });
 
   assert.deepEqual(await source.get(0), new Uint8Array([1]));
@@ -370,4 +372,82 @@ test('keeping the file is a rung every browser has', () => {
   for (const [rung, has] of Object.entries(rich)) {
     assert.equal(has, true, `${rung} should be reported on a browser that has it`);
   }
+});
+
+
+// A chunk the server does not have is the only copy of those bytes. Deleting it
+// as the output grows means an assembly interrupted half way through has
+// destroyed what it had not finished with, and the partial output fails its own
+// size check, so the transfer becomes unrecoverable rather than retryable. This
+// is reachable on the product default, where the sender hands bytes straight to
+// the recipient and the server holds no chunk at all.
+test('an irreplaceable chunk survives until the whole file has assembled', async () => {
+  const root = fakeStorage();
+  const dir = await root.getDirectoryHandle('staging-c');
+  for (const name of ['0', '1']) {
+    const handle = await dir.getFileHandle(name, { create: true });
+    const access = await handle.createSyncAccessHandle();
+    access.write(new Uint8Array([7]), { at: 0 });
+    access.close();
+  }
+
+  const source = chunkSource(dir, ['cid-zero', 'cid-one'], {
+    fetchChunk: async () => { throw new Error('the server holds nothing'); },
+    consume: true,
+    replaceable: false,
+  });
+
+  await source.get(0);
+  await source.remove(0);
+  // Consumed, written into the output, and still on disk: the assembly has not
+  // finished, so this is still the only copy of those bytes.
+  assert.equal(dir.files.has('0'), true, 'the only copy of a consumed chunk was deleted mid assembly');
+
+  await source.get(1);
+  await source.remove(1);
+  assert.equal(dir.files.has('1'), true);
+
+  await source.commit();
+  assert.equal(dir.files.has('0'), false, 'a committed assembly should release its stage');
+  assert.equal(dir.files.has('1'), false);
+});
+
+// The other half of the same rule. When the server holds every chunk, a
+// consumed one is replaceable and goes immediately, which is what keeps peak
+// disk at the file size plus one chunk rather than twice the file size.
+test('a replaceable chunk is released as soon as it is written', async () => {
+  const root = fakeStorage();
+  const dir = await root.getDirectoryHandle('staging-d');
+  const handle = await dir.getFileHandle('0', { create: true });
+  const access = await handle.createSyncAccessHandle();
+  access.write(new Uint8Array([7]), { at: 0 });
+  access.close();
+
+  const source = chunkSource(dir, ['cid-zero'], {
+    fetchChunk: async () => new Uint8Array([7]),
+    consume: true,
+    replaceable: true,
+  });
+
+  await source.get(0);
+  await source.remove(0);
+  assert.equal(dir.files.has('0'), false);
+});
+
+// Omitting consume must not prune. The worker is the only producer and always
+// passes it, but a default of true would make the dangerous answer the one you
+// get by forgetting.
+test('a stage is never pruned by a caller that did not ask', async () => {
+  const root = fakeStorage();
+  const dir = await root.getDirectoryHandle('staging-e');
+  const handle = await dir.getFileHandle('0', { create: true });
+  const access = await handle.createSyncAccessHandle();
+  access.write(new Uint8Array([7]), { at: 0 });
+  access.close();
+
+  const source = chunkSource(dir, ['cid-zero'], { fetchChunk: async () => new Uint8Array([7]) });
+  await source.get(0);
+  await source.remove(0);
+  await source.commit();
+  assert.equal(dir.files.has('0'), true);
 });

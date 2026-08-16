@@ -169,31 +169,137 @@ wall clock a user could feel. The rest was already hiding behind the wire.
 
 ## 3. Tailscale host against embedded, not yet measured
 
-Needs a real tailnet and two devices. Run on the server, once in each mode, with
-the client on another tailnet device:
+Needs a real tailnet and two devices. The client runs on the second device and
+uploads to the server, once with the server in each mode.
+
+### Before the first run
+
+Four things will each turn the run into a measurement of nothing. The script
+below aborts on the ones it can see, so these are the setup steps it cannot do
+for you. The first is the dangerous one, because it is the only one that can
+still produce a plausible-looking number.
+
+**The two modes do not share a URL.** `host` binds the server machine's own
+tailnet address, so it answers on that machine's tailnet name. `embedded` joins
+as its own tsnet node named by `-hostname`, default `airlock`, so it answers on
+`airlock.<tailnet>.ts.net`. Take the base URL for each mode from that mode's own
+startup, and do not reuse the first one for the second run. If the first server
+is still up when the second run starts, reusing its URL measures the first mode
+twice and reports the two as identical, which is a wrong answer that looks like
+a finding.
+
+**The client device must be allowed through the gate**, or every request is 403
+before the body is read. Two separate checks can produce that 403. The tailnet
+allowlist defaults to the server node's owner, so a client device owned by a
+different tailnet user is refused unless the server was started with
+`-allow-users`. And with `-require-approval` set, a device that has never been
+approved is refused even when its user is allowed. Confirm the client is through
+both with `curl https://<base>/api/whoami`, which must answer
+`"allowed":true`.
+
+**`embedded` needs `TS_AUTHKEY`** in the environment the first time it starts,
+or it never joins the tailnet.
+
+**Each run stores a real gigabyte** and it is not swept for `-ttl-hours`, so six
+runs need about 6 GiB free. Point `-data` at a scratch directory for this and
+delete it afterward rather than benchmarking into a live store.
+
+### The measurement
+
+Save this as `benchmode.sh`. It takes the base URL and a two-hex-character tag
+that must be different for every run this server has ever seen.
 
 ```bash
+#!/bin/sh
+# Usage: benchmode.sh https://<node>.<tailnet>.ts.net <tag>
+set -eu
+BASE=$1
+TAG=$2
+
 head -c 8388608 /dev/urandom > /tmp/chunk8m
-time for i in $(seq 1 128); do
-  id=$(printf '%064x' $i)
-  curl -s -o /dev/null -X PUT --data-binary @/tmp/chunk8m \
-    "https://<node>.<tailnet>.ts.net/api/chunk/$id"
-done
+
+# The tag prefixes all 128 ids, which is what keeps this run's chunks distinct
+# from every other run's. See the note below on why that matters.
+ids=$(i=1; while [ $i -le 128 ]; do printf '%s%062x\n' "$TAG" "$i"; i=$((i+1)); done)
+json=$(printf '%s' "$ids" | sed 's/.*/"&"/' | paste -sd, -)
+
+# PUT /api/chunk/{cid} requires the transfer it belongs to as a query
+# parameter and rejects the request with 400 before reading the body without
+# it, so the transfer has to exist first. The server's reply carries the
+# subset it does not already hold, and that list is the guard: anything short
+# of 128 means these ids are already stored and the run would time a stat
+# rather than a write.
+resp=$(curl -sS --fail-with-body -X POST -H 'Content-Type: application/json' \
+  -d "{\"cids\":[$json],\"to\":[]}" "$BASE/api/transfer")
+tid=$(printf '%s' "$resp" | sed -n 's/.*"id":"\([0-9a-f]\{32\}\)".*/\1/p')
+missing=$(printf '%s' "$resp" | sed 's/.*"missing"://' | grep -o '[0-9a-f]\{64\}' | wc -l)
+[ -n "$tid" ] || { echo "no transfer id in: $resp" >&2; exit 1; }
+[ "$missing" -eq 128 ] || { echo "server already holds $((128 - missing)) of these ids; use a fresh tag" >&2; exit 1; }
+
+start=$(date +%s%3N)
+for id in $ids; do
+  curl -sS -o /dev/null -w '%{http_code} %{size_upload}\n' \
+    -X PUT --data-binary @/tmp/chunk8m "$BASE/api/chunk/$id?transfer=$tid"
+done | sort | uniq -c
+end=$(date +%s%3N)
+
+echo "1 GiB in $((end - start)) ms = $((1024 * 1000 / (end - start))) MB/s"
 ```
 
-1 GiB per run. Record MB/s for `--tailscale-mode=host` and again for
-`--tailscale-mode=embedded`, and fill in the table below.
+Run each mode three times with a fresh tag every time, and report the median:
 
-| Mode | Wall clock for 1 GiB | MB/s |
-| --- | --- | --- |
-| `host` | not yet measured | |
-| `embedded` | not yet measured | |
+```bash
+./benchmode.sh https://<host-mode-base> a1     # then a2, a3
+./benchmode.sh https://<embedded-mode-base> b1 # then b2, b3
+```
 
-Two things to watch when taking it. Send the 128 chunks under distinct ids, as
-the loop above does, or `Put`'s first-write-wins short circuit turns run 2
-onwards into a stat and the number becomes meaningless. And confirm from
-`tailscale status` whether the link went direct or relayed through DERP, because
-a DERP-relayed run measures the relay and not the mode.
+**Read the count line before the throughput line.** A healthy run prints exactly
+`128 204 8388608` and nothing else. Any other status code appearing there means
+that many requests were rejected and the elapsed time is meaningless. To see
+what the server objected to, repeat one request without `-o /dev/null`.
+
+`date +%s%3N` is GNU date. On BSD or macOS drop the `%3N` and divide by seconds
+instead, accepting the coarser resolution.
+
+| Mode | Wall clock for 1 GiB (median of 3) | MB/s | Spread |
+| --- | --- | --- | --- |
+| `host` | not yet measured | | |
+| `embedded` | not yet measured | | |
+
+### Why the tag has to change between runs
+
+`ChunkStore.Put` is first-write-wins: an id the store already holds makes it
+discard the body and skip the write. The bytes still cross the network, so the
+run does not look obviously wrong. It just gets faster.
+
+The size of that error is not hypothetical. Running the block above twice over
+loopback, once with fresh ids and once reusing them, 1 GiB took a median of
+13,166 ms writing and 12,482 ms deduplicating. The 684 ms difference over 128
+chunks is 5.3 ms per chunk, which agrees with the 4.87 ms that section 1
+measured for an 8 MiB `Put` by a completely different route. On that 77 MB/s
+link it was 5.2 percent of wall clock.
+
+**5 percent is the same order as the difference this section exists to
+measure.** Reusing the tag between the `host` and the `embedded` run would hand
+whichever ran second a bias comparable to the effect, in its favor. The
+`missing` check in the script is there to make that impossible to do by
+accident, because the prose version of this warning is easy to read past.
+
+### Confirm the link was direct
+
+Check `tailscale status` for the client. A run relayed through DERP measures the
+relay, not the mode, and the two modes would then look identical for a reason
+that has nothing to do with either.
+
+### What has and has not been verified here
+
+The command block above was executed end to end before publication, against a
+token-mode server on loopback: 128 of 128 requests returned 204 having uploaded
+8,388,608 bytes each, the `missing` guard correctly refused a reused tag, and
+the throughput line printed. So the commands run and the guard works.
+
+What has not happened is the measurement itself. No part of the table above was
+taken over a tailnet, and loopback throughput says nothing about either mode.
 
 ## 4. Sealed against plaintext end to end, not yet measured
 

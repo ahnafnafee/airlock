@@ -2,6 +2,7 @@ import { chunkFile } from './cdc.js';
 import {
   DOMAIN, chunkIdentity, sealChunk, sealRecord, packHashes,
 } from './crypto.js';
+import { makeThumbnail } from './thumb.js';
 
 // Four in flight. Measured guidance puts a 110 MB upload at roughly 22 seconds
 // sequential and 12 seconds at three, with little left to win past four. Peak
@@ -128,4 +129,13 @@ async function uploadRecords(api, mk, mode, id, file, ids) {
 
   const list = await sealRecord(mk, mode, DOMAIN.LIST, id, packHashes(ids.map((x) => x.h)));
   await withRetry(() => api.putRecord(id, 'chunklist', list));
+
+  // The server can never make this: it has never seen the image. A transfer
+  // that is not an image or a video simply carries no thumb record.
+  const thumb = await makeThumbnail(file);
+  if (thumb) {
+    const sealed = await sealRecord(mk, mode, DOMAIN.THUMB, id, thumb);
+    // A thumbnail is a nicety. Losing it must never fail the transfer.
+    await withRetry(() => api.putRecord(id, 'thumb', sealed)).catch(() => {});
+  }
 }

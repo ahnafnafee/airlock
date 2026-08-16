@@ -80,6 +80,7 @@ registerView('inbox', 'Inbox', (panel) => {
     let name = 'Incomplete transfer';
     let detail = `from ${t.sender} · ${ago(t.createdAt)}`;
     let openable = false;
+    let thumbEl = null;
 
     if (t.complete) {
       const { meta, detail: refusal } = await openMeta(state.mk, t);
@@ -87,6 +88,22 @@ registerView('inbox', 'Inbox', (panel) => {
         name = meta.name;
         detail = `${humanSize(meta.size)} · from ${t.sender} · ${ago(t.createdAt)}`;
         openable = true;
+        if (t.thumb) {
+          try {
+            const record = b64decode(t.thumb);
+            // The same rule the metadata follows. A plaintext record carries no
+            // authentication tag, so a forged one would render as this
+            // transfer's own picture. Only a sealed thumbnail is shown.
+            if (modeOf(record) === MODE_SEALED) {
+              const bytes = await openRecord(state.mk, DOMAIN.THUMB, t.id, record);
+              const url = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
+              thumbEl = el('img', { class: 'thumb', src: url, alt: '', loading: 'lazy' });
+            }
+          } catch {
+            // A thumbnail that will not open is not worth reporting: the row is
+            // still useful without it.
+          }
+        }
       } else {
         name = 'Cannot open';
         detail = refusal;
@@ -124,6 +141,9 @@ registerView('inbox', 'Inbox', (panel) => {
     }, 'Delete'));
 
     return el('li', {},
+      // Flattened away when there is none, so a row without a thumbnail keeps
+      // exactly the shape it had.
+      thumbEl || [],
       el('div', {}, el('div', { class: 'name' }, name), detailNode),
       actions);
   }

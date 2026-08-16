@@ -54,7 +54,9 @@ export function showView(name) {
     if (b.dataset.view === name) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
   }
-  location.hash = name;
+  // Assigning the same hash again would add a history entry that goes nowhere,
+  // so a person pressing Back would have to press it twice to leave a view.
+  if (location.hash.slice(1) !== name) location.hash = name;
 }
 
 async function unlock(passphrase) {
@@ -89,6 +91,14 @@ function enterApp() {
   $('app').hidden = false;
   const first = location.hash.slice(1);
   showView(views.has(first) ? first : views.keys().next().value);
+  // The hash is a view's address, so it has to be read as well as written.
+  // Without this the system Back gesture and any link into a view move the
+  // address and leave whatever was already on screen, which on Android is the
+  // primary way people navigate and reads as the app ignoring them.
+  addEventListener('hashchange', () => {
+    const name = location.hash.slice(1);
+    if (views.has(name)) showView(name);
+  });
   subscribePush();
   // Like push, a launch is an enhancement and never a gate. A share that cannot
   // be replayed leaves the app open on the send view rather than refusing to
@@ -255,12 +265,29 @@ async function loadViews() {
   await import('./views/devices.js');
 }
 
+// A device is recorded the first time it asks who it is, and an approved device
+// turns it on from its own Devices view. Polling rather than listening: the
+// event stream is one of the things approval unlocks, so a waiting device has
+// nothing to listen to yet.
+async function waitForApproval() {
+  const { renderStrip } = await import('./strip.js');
+  $('pairing-node').textContent = state.me.node;
+  renderStrip($('pairing-strip'), 48).setAll('sending');
+  $('pairing').hidden = false;
+  while (!state.me.allowed) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    state.me = await api.whoami().catch(() => state.me);
+  }
+  $('pairing').hidden = true;
+}
+
 async function boot() {
   await loadViews();
   await registerWorker();
 
   state.me = await api.whoami();
   $('me').textContent = state.me.node;
+  if (!state.me.allowed) await waitForApproval();
   state.config = await api.config();
   state.mk = await loadMaster();
 

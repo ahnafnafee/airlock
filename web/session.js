@@ -15,7 +15,7 @@ import {
 } from './peer.js';
 import { openStage, indexesFrom } from './staging.js';
 import { transfersActive } from './wake.js';
-import { hasRoomFor } from './ios.js';
+import { roomShortfall } from './ios.js';
 import {
   DOMAIN, MODE_SEALED, modeOf, openRecord, unpackHashes, loadMaster, b64decode, b64encode,
 } from './crypto.js';
@@ -419,7 +419,7 @@ export async function assembleTransfer(transferId, { spawn = spawnAssembler } = 
 export function makeSessions(deps) {
   const {
     api, openStage, transport, negotiate, receive, loadMaster, identity,
-    hasRoom = hasRoomFor,
+    shortfall = roomShortfall,
     handshakeMs = HANDSHAKE_MS,
     flushMs = FLUSH_MS,
     cooldownMs = COOLDOWN_MS,
@@ -433,6 +433,15 @@ export function makeSessions(deps) {
   const sessions = new Map();
   const cooling = new Map();
   const refused = new Set();
+
+  // What a row has to say about a transfer this device could not take. Running
+  // out of disk is the one failure nobody but the person holding this device can
+  // undo, so the shortfall is kept where a view can read it instead of being
+  // spent on a console line that owner never sees.
+  //
+  // Bytes rather than a sentence, because the two places that render a size
+  // already know how to write one and this module does not.
+  const shortfalls = new Map();
 
   // The one place a peer slot is taken. Two channels to the same device would
   // interleave chunk frames and corrupt both transfers, so a peer that is
@@ -559,10 +568,15 @@ export function makeSessions(deps) {
       }, (i) => stage.get(i)), 'the connection dropped mid-transfer');
 
       if (!result.accepted) {
-        // A refusal is final. Re-offering would deliver a file the recipient
-        // said no to. The recipient records it on the server as well, which is
-        // what keeps it final once this page is gone.
-        refused.add(`${info.id}|${node}`);
+        // A refusal that was a decision is final: re-offering would deliver a
+        // file the recipient said no to, and the recipient records that decision
+        // on the server as well, which is what keeps it final once this page is
+        // gone. A refusal the recipient marked retryable is not a decision. It
+        // is a condition of the moment, nothing about it is written down
+        // anywhere, and treating it as final would mean a disk that was briefly
+        // full killed the transfer for as long as this page stays open.
+        if (!result.retryable) refused.add(`${info.id}|${node}`);
+        else console.warn(`${node} cannot take ${info.id} yet: ${result.reason}`);
         return result;
       }
       // Best effort, because the confirmation below is what actually decides
@@ -618,7 +632,14 @@ export function makeSessions(deps) {
       // waits on the poll rather than on an event.
       if (!session) { owed = true; continue; }
       try {
-        await session;
+        const result = await session;
+        // A recipient that refused for a reason which can change is still owed
+        // this transfer, and is cooled off first so the retry is not a tight
+        // loop against a disk nobody has emptied yet.
+        if (result?.accepted === false && result.retryable) {
+          cooling.set(node, now() + cooldownMs);
+          owed = true;
+        }
       } catch (err) {
         cooling.set(node, now() + cooldownMs);
         owed = true;
@@ -672,15 +693,26 @@ export function makeSessions(deps) {
           if (!sameList(frame.cids, info.cids)) {
             return { accept: false, reason: 'that is not this transfer' };
           }
-          // Refused up front rather than at ninety percent. The reason travels
-          // back in the decline frame so the sending device can say why, and it
-          // is logged here as well, because this is the device whose disk it is
-          // and the person who can free space is sitting in front of it.
-          if (!await hasRoom(frame.size)) {
-            const reason = `this device has no room for ${frame.size} bytes`;
-            console.warn(`refusing ${info.id}: ${reason}`);
-            return { accept: false, reason };
+          // Refused up front rather than at ninety percent, and marked as a
+          // condition rather than a decision so the sender keeps it queued. The
+          // shortfall is recorded against the transfer, because this is the
+          // device whose disk it is and the person who can free the space is
+          // sitting in front of it: the inbox row is where that lands. The
+          // sender is told only that there is no room, which is all it can act
+          // on and all a peer is owed about how full this disk is.
+          const short = await shortfall(frame.size);
+          if (short > 0) {
+            shortfalls.set(info.id, short);
+            return {
+              accept: false,
+              reason: 'the receiving device is out of space',
+              retryable: true,
+            };
           }
+          // Cleared on the way in rather than on the way out, so a transfer that
+          // is being taken stops claiming a shortfall from the moment it is
+          // accepted rather than when it finishes.
+          shortfalls.delete(info.id);
           return { accept: true };
         },
         has: (i) => stage.has(i),
@@ -838,7 +870,14 @@ export function makeSessions(deps) {
     }
   }
 
-  return { startSend, handleSignal, drainQueue };
+  // How many bytes short this device was the last time it refused this transfer
+  // for want of room, or 0 if it never did. Read by the inbox row, which is the
+  // one surface the transfer already has on the device that has to act.
+  function shortfallFor(transferId) {
+    return shortfalls.get(transferId) || 0;
+  }
+
+  return { startSend, handleSignal, drainQueue, shortfallFor };
 }
 
 // The app's own instance. Its identity is read once and cached: it names this
@@ -865,4 +904,4 @@ const live = makeSessions({
   identity,
 });
 
-export const { startSend, handleSignal, drainQueue } = live;
+export const { startSend, handleSignal, drainQueue, shortfallFor } = live;

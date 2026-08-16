@@ -105,12 +105,23 @@ registerView('inbox', 'Inbox', (panel) => {
       return;
     }
 
+    // Read through a dynamic import for the same reason the save path below
+    // uses one: the direct-transfer module stays out of the boot path. By the
+    // time a row renders the app has loaded it, so this is a module-map lookup.
+    let shortfallFor = () => 0;
+    try {
+      ({ shortfallFor } = await import('../session.js'));
+    } catch (err) {
+      // A row without this note is still a row worth showing.
+      console.warn('the storage note was not read', err);
+    }
+
     for (const t of transfers) {
-      list.append(await row(t));
+      list.append(await row(t, shortfallFor));
     }
   }
 
-  async function row(t) {
+  async function row(t, shortfallFor = () => 0) {
     let name = 'Incomplete transfer';
     let detail = `from ${t.sender} · ${ago(t.createdAt)}`;
     let openable = false;
@@ -152,7 +163,17 @@ registerView('inbox', 'Inbox', (panel) => {
       detail += ` · ${held} of ${t.cids.length} chunks`;
     }
 
-    const detailNode = el('div', { class: 'data muted' }, detail);
+    // Running out of room is the one arrival failure the person holding this
+    // device can undo, and it is silent everywhere else: the sender keeps the
+    // transfer queued and says nothing about why, and a console line is a
+    // message to a developer rather than to an owner. So the row says what
+    // happened and what to do, and the transfer lands on its own once it is
+    // done, with no button to press here.
+    const short = shortfallFor(t.id);
+    const detailNode = short > 0
+      ? el('div', { class: 'data bad' },
+        `Not enough space. Free about ${humanSize(short)} and this arrives on its own.`)
+      : el('div', { class: 'data muted' }, detail);
 
     const actions = el('div', { class: 'actions' });
     if (openable) {

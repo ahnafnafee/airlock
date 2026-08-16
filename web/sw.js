@@ -4,7 +4,7 @@ import {
 } from './crypto.js';
 import { contentDisposition } from './naming.js';
 import { markCapability } from './inbound.js';
-import { setBadge } from './ios.js';
+import { inboundTo, setBadge } from './ios.js';
 
 // Registered with {type:'module'} so these imports work.
 
@@ -163,14 +163,19 @@ async function announce() {
   let inbox = [];
   try {
     mk = await loadMaster();
-    inbox = await (await getOk('/api/inbox')).json();
+    // Both, because /api/inbox answers with this device's own outbound transfers
+    // as well as the ones addressed to it, and only the device's own name can
+    // tell those apart. Announcing a file this phone sent, or badging it, would
+    // be an arrival that never happened.
+    const [inboxRes, whoRes] = await Promise.all([getOk('/api/inbox'), getOk('/api/whoami')]);
+    inbox = inboundTo(await inboxRes.json(), (await whoRes.json()).node);
   } catch {
     return self.registration.showNotification('Airlock', { ...base, body: 'A file is waiting' });
   }
 
   // Every path below this line has the count, so the badge is set once here
   // rather than at each of them. It is the one rich affordance WebKit honors and
-  // it needs no key: how many transfers are waiting is not a secret the server
+  // it needs no key: how many transfers have arrived is not a secret the server
   // keeps from itself.
   await setBadge(inbox.length);
   const [newest] = inbox;

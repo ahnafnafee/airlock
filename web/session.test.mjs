@@ -136,7 +136,7 @@ function harness(overrides = {}) {
     receive: overrides.receive || (async () => ({ accepted: true, received: 0 })),
     loadMaster: async () => (overrides.locked ? null : key),
     identity: async () => ME,
-    hasRoom: overrides.hasRoom,
+    shortfall: overrides.shortfall,
     handshakeMs: overrides.handshakeMs ?? 200,
     flushMs: 50,
     cooldownMs: overrides.cooldownMs ?? 0,
@@ -311,6 +311,24 @@ test('a refusal is final and is not offered again', async () => {
   assert.equal(h.log.opens.length, 1);
 });
 
+test('a refusal the peer marked retryable stays queued and is offered again', async () => {
+  // A recipient with a full disk is not a recipient that said no. Treating the
+  // two the same would let a disk that was briefly full kill the transfer for as
+  // long as this page stays open, and freeing space would not bring it back.
+  const h = harness({
+    info: SENDING,
+    negotiate: async () => ({
+      accepted: false, sent: 0, held: 0,
+      reason: 'the receiving device is out of space',
+      retryable: true,
+    }),
+  });
+
+  assert.equal(await h.sessions.startSend(ID), true, 'the recipient was left owed nothing');
+  assert.equal(await h.sessions.startSend(ID), true);
+  assert.equal(h.log.opens.length, 2);
+});
+
 test('a failure is retried where a refusal is not', async () => {
   let attempts = 0;
   const h = harness({
@@ -467,7 +485,7 @@ test('an offer this device has no room for is refused before a chunk is staged',
   let handlers = null;
   const h = harness({
     stage,
-    hasRoom: async (bytes) => { asked.push(bytes); return false; },
+    shortfall: async (bytes) => { asked.push(bytes); return 4096; },
     receive: async (channel, given) => {
       handlers = given;
       return { accepted: false, received: 0 };
@@ -477,17 +495,20 @@ test('an offer this device has no room for is refused before a chunk is staged',
   await h.sessions.handleSignal(offerFrom());
   const decision = await handlers.onOffer({ cids: CIDS, size: 9e12 });
   assert.equal(decision.accept, false);
-  // The reason travels back in the decline frame, so the sending device can say
-  // why rather than reporting a refusal with nothing behind it.
-  assert.match(decision.reason, /room/);
+  // Marked retryable, because a full disk is a condition of this moment and the
+  // sender records anything else as a decision it must never re-offer.
+  assert.equal(decision.retryable, true);
   assert.deepEqual(asked, [9e12]);
   assert.equal(stage.store.size, 0);
+  // And the shortfall reaches the one surface the owner of this disk can see.
+  // A console line would be a message to a developer.
+  assert.equal(h.sessions.shortfallFor(ID), 4096);
 });
 
 test('an offer that fits is accepted, so the preflight is a bound and not a refusal', async () => {
   let handlers = null;
   const h = harness({
-    hasRoom: async () => true,
+    shortfall: async () => 0,
     receive: async (channel, given) => {
       handlers = given;
       return { accepted: true, received: 0 };
@@ -496,6 +517,30 @@ test('an offer that fits is accepted, so the preflight is a bound and not a refu
 
   await h.sessions.handleSignal(offerFrom());
   assert.deepEqual(await handlers.onOffer({ cids: CIDS, size: 9 }), { accept: true });
+  assert.equal(h.sessions.shortfallFor(ID), 0);
+});
+
+test('space freed after a refusal clears the note the row was showing', async () => {
+  // The transfer is offered again on its own, so the row has to stop saying a
+  // thing that is no longer true the moment it is taken.
+  let short = 4096;
+  let handlers = null;
+  const h = harness({
+    shortfall: async () => short,
+    receive: async (channel, given) => {
+      handlers = given;
+      return { accepted: false, received: 0 };
+    },
+  });
+
+  await h.sessions.handleSignal(offerFrom());
+  await handlers.onOffer({ cids: CIDS, size: 9e12 });
+  assert.equal(h.sessions.shortfallFor(ID), 4096);
+
+  short = 0;
+  await h.sessions.handleSignal(offerFrom());
+  assert.deepEqual(await handlers.onOffer({ cids: CIDS, size: 9e12 }), { accept: true });
+  assert.equal(h.sessions.shortfallFor(ID), 0);
 });
 
 test('a staged write refused for quota drops the partial stage and records nothing', async () => {

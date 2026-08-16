@@ -187,7 +187,15 @@ export function negotiate(links, manifest, readChunk) {
       }
 
       if (frame.type === WIRE.DECLINE) {
-        finish({ accepted: false, sent: 0, held: 0, reason: frame.reason || '' });
+        // Two different refusals travel on this frame and the sender treats them
+        // oppositely. A decision is final and must never be re-offered; a
+        // condition of the moment, such as a disk with no room left on it, has
+        // to stay queued or freeing space would never let the file land.
+        finish({
+          accepted: false, sent: 0, held: 0,
+          reason: frame.reason || '',
+          retryable: frame.retry === true,
+        });
         return;
       }
       if (frame.type !== WIRE.NEED) return;
@@ -288,7 +296,14 @@ export function receive(links, { onOffer, has, onChunk }) {
           count = Array.isArray(frame.cids) ? frame.cids.length : 0;
           const decision = await onOffer(frame);
           if (!decision.accept) {
-            channel.send(JSON.stringify({ type: WIRE.DECLINE, reason: decision.reason || '' }));
+            // retry says the refusal can change on its own. Without it the
+            // sender is right to give up, and with it wrongly set a file the
+            // recipient said no to would be offered again.
+            channel.send(JSON.stringify({
+              type: WIRE.DECLINE,
+              reason: decision.reason || '',
+              retry: decision.retryable === true,
+            }));
             finish({ accepted: false, received: 0 });
             return;
           }

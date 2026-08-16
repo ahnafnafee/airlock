@@ -5,7 +5,7 @@ import {
 import { api, ApiError } from './api.js';
 import { requestPersistence } from './staging.js';
 import { observeCapabilities } from './inbound.js';
-import { needsInstallGate, setBadge } from './ios.js';
+import { inboundTo, needsInstallGate, setBadge } from './ios.js';
 
 export const state = { mk: null, mode: MODE_SEALED, config: null, me: null };
 
@@ -134,9 +134,14 @@ function enterApp() {
 // notification affordance WebKit honors, which is why it is here at all, but it
 // is worth the same on every platform that has the API and none of this asks
 // which platform it is on.
+//
+// Inbound is a filter and not a reading of the endpoint, because /api/inbox
+// answers with what this device sent as well as what it was sent. The predicate
+// is inboundTo's, in one place, so the badge and the notification cannot come to
+// disagree about what is waiting.
 async function refreshBadge() {
   try {
-    await setBadge((await api.inbox()).length);
+    await setBadge(inboundTo(await api.inbox(), state.me?.node).length);
   } catch (err) {
     console.warn('the badge was not updated', err);
   }

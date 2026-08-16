@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  PREFLIGHT_FACTOR, hasRoomFor, isIOS, isStandalone, needsInstallGate, setBadge,
+  PREFLIGHT_FACTOR, inboundTo, isIOS, isStandalone, needsInstallGate, roomShortfall, setBadge,
 } from './ios.js';
 
 // The window a browser tab presents: the media query answers, and it answers no.
@@ -61,27 +61,30 @@ test('a navigator with no user agent at all is not mistaken for iOS', () => {
 
 const withQuota = (quota, usage) => ({ storage: { estimate: async () => ({ quota, usage }) } });
 
-test('a transfer that fits under the headroom factor is allowed', async () => {
+test('a transfer that fits under the headroom factor is short by nothing', async () => {
   // 600 free. 520 with 15 percent asked over it is 598, which fits.
-  assert.equal(await hasRoomFor(520, PREFLIGHT_FACTOR, withQuota(1000, 400)), true);
+  assert.equal(await roomShortfall(520, PREFLIGHT_FACTOR, withQuota(1000, 400)), 0);
 });
 
-test('a transfer that fits the disk but not the headroom is refused', async () => {
+test('a transfer that fits the disk but not the headroom names what it is short', async () => {
   // 600 free and 530 wanted, so a check that forgot the factor would allow this.
-  // 530 with 15 percent over it is 609.5, which does not fit.
-  assert.equal(await hasRoomFor(530, PREFLIGHT_FACTOR, withQuota(1000, 400)), false);
+  // 530 with 15 percent over it is 609.5, which does not fit, and 9.5 rounds up
+  // to the 10 a person would have to free.
+  assert.equal(await roomShortfall(530, PREFLIGHT_FACTOR, withQuota(1000, 400)), 10);
   // And the factor is what decides it, rather than the numbers happening to sit
   // either side of some other line.
-  assert.equal(await hasRoomFor(530, 1, withQuota(1000, 400)), true);
+  assert.equal(await roomShortfall(530, 1, withQuota(1000, 400)), 0);
 });
 
-test('a transfer far larger than the quota is refused', async () => {
-  assert.equal(await hasRoomFor(80e9, PREFLIGHT_FACTOR, withQuota(76e9, 0)), false);
+test('a transfer far larger than the quota is short by the whole difference', async () => {
+  // The shortfall is what the person has to free, not what was asked for, which
+  // is the number the message is built out of.
+  assert.equal(await roomShortfall(80e9, PREFLIGHT_FACTOR, withQuota(76e9, 0)), 16e9);
 });
 
 test('a browser with no estimate is not stopped by the preflight', async () => {
-  assert.equal(await hasRoomFor(1e12, PREFLIGHT_FACTOR, {}), true);
-  assert.equal(await hasRoomFor(1e12, PREFLIGHT_FACTOR, { storage: {} }), true);
+  assert.equal(await roomShortfall(1e12, PREFLIGHT_FACTOR, {}), 0);
+  assert.equal(await roomShortfall(1e12, PREFLIGHT_FACTOR, { storage: {} }), 0);
 });
 
 test('a size the preflight cannot read allows the transfer through', async () => {
@@ -90,8 +93,25 @@ test('a size the preflight cannot read allows the transfer through', async () =>
   // still catches the quota failure.
   const nav = withQuota(1000, 400);
   for (const size of [undefined, null, 'lots', NaN, Infinity, -1]) {
-    assert.equal(await hasRoomFor(size, PREFLIGHT_FACTOR, nav), true, `refused ${size}`);
+    assert.equal(await roomShortfall(size, PREFLIGHT_FACTOR, nav), 0, `refused ${size}`);
   }
+});
+
+test('the badge counts what arrived and never what this device sent', async () => {
+  // /api/inbox answers with this device's own outbound transfers alongside the
+  // ones addressed to it, so a phone that sent three files and received nothing
+  // would otherwise wear a badge of three.
+  const list = [
+    { id: 'a', sender: 'phone' },
+    { id: 'b', sender: 'laptop' },
+    { id: 'c', sender: 'phone' },
+    { id: 'd', sender: 'desktop' },
+  ];
+  assert.deepEqual(inboundTo(list, 'phone').map((t) => t.id), ['b', 'd']);
+  assert.equal(inboundTo([{ sender: 'phone' }], 'phone').length, 0);
+  // Nothing to compare against leaves the list alone rather than hiding arrivals.
+  assert.equal(inboundTo(list, '').length, 4);
+  assert.equal(inboundTo(list, undefined).length, 4);
 });
 
 test('the badge carries the count, and zero clears it', async () => {

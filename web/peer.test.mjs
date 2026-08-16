@@ -102,6 +102,26 @@ test('a declined offer sends nothing', async () => {
   assert.equal(result.accepted, false);
   assert.equal(result.sent, 0);
   assert.equal(result.reason, 'not now');
+  // A decision, so the sender is right to record it as final.
+  assert.equal(result.retryable, false);
+});
+
+test('a refusal marked retryable arrives as one, and only when it was marked', async () => {
+  // The sender treats the two oppositely: a decision is never re-offered, and a
+  // condition of the moment has to be. The marker is what separates them, so it
+  // has to survive the wire rather than being inferred from the reason text.
+  for (const [retryable, expected] of [[true, true], [false, false], [undefined, false]]) {
+    const [send, recv] = linkPool(1, 1);
+    const receiving = receive(recv, {
+      onOffer: async () => ({ accept: false, reason: 'no room', retryable }),
+      has: async () => false,
+      onChunk: async () => assert.fail('a declined transfer must send nothing'),
+    });
+    const result = await negotiate(send, MANIFEST, readChunk);
+    await receiving;
+    assert.equal(result.retryable, expected, `retryable ${retryable}`);
+    assert.equal(result.reason, 'no room');
+  }
 });
 
 test('a receiver holding everything accepts and receives nothing', async () => {

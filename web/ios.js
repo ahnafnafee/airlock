@@ -53,11 +53,33 @@ export const PREFLIGHT_FACTOR = 1.15;
 // size travels in a peer's offer frame and a device that refused every transfer
 // whose size it could not read would simply stop receiving. The write path
 // catches the quota failure either way.
-export async function hasRoomFor(bytes, factor = PREFLIGHT_FACTOR, nav = navigator) {
-  if (!nav.storage?.estimate) return true;
-  if (!Number.isFinite(bytes) || bytes < 0) return true;
+//
+// It answers with the number of bytes short rather than a yes or a no, because
+// the only useful thing to tell the person holding the full device is how much
+// to free. Zero means it fits, or that nothing here can tell.
+export async function roomShortfall(bytes, factor = PREFLIGHT_FACTOR, nav = navigator) {
+  if (!nav.storage?.estimate) return 0;
+  if (!Number.isFinite(bytes) || bytes < 0) return 0;
   const { quota = 0, usage = 0 } = await nav.storage.estimate();
-  return quota - usage > bytes * factor;
+  const needed = bytes * factor;
+  const free = quota - usage;
+  return free > needed ? 0 : Math.ceil(needed - free);
+}
+
+// What the badge counts and what an arrival notification speaks for. The inbox
+// endpoint answers with this device's own outbound transfers alongside the ones
+// addressed to it, so without this a phone that sent three files and received
+// nothing would wear a badge of three until they were deleted or swept.
+//
+// Pending means still in the inbox. Nothing anywhere records that a file has
+// been saved, so a transfer leaves this list on a decline, a delete, or the
+// server's own sweep and on nothing else.
+export function inboundTo(transfers, node) {
+  // Without a name for this device there is nothing to compare against, and
+  // guessing would hide real arrivals. The count is wrong in the same direction
+  // it was before rather than wrong in the direction that loses files.
+  if (!node) return transfers;
+  return transfers.filter((t) => t.sender !== node);
 }
 
 // The Home Screen badge is the one rich notification affordance WebKit honors,

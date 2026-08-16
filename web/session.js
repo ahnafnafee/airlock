@@ -355,33 +355,51 @@ export function makeSessions(deps) {
   // startSend offers one queued transfer to each of its recipients that is here
   // to take it. A per-peer failure is caught and cooled off rather than thrown,
   // so one unreachable device does not stop the rest of the queue.
+  //
+  // It answers whether it left anyone owed, which is the only place that can be
+  // known: four of the five ways a recipient is skipped are still reachable
+  // later, and the caller has to come back for them. Away, cooling off after a
+  // failure, holding this device's one session slot, and failing outright all
+  // say "later"; a decline says never. Reporting only the absent ones would
+  // leave a transfer that failed against a peer who stayed online with nothing
+  // scheduled to try it again.
   async function startSend(transferId, online = null) {
     if (!TRANSFER_ID.test(transferId || '')) {
       throw new Error('a malformed transfer id has nothing to send');
     }
     const mk = await loadMaster();
     // The sealed metadata names the file the offer describes, and it opens only
-    // on an unlocked device.
-    if (!mk) return;
+    // on an unlocked device. Unlocking is itself what starts the drain, so a
+    // locked device has nothing to schedule.
+    if (!mk) return false;
 
     const info = normalize(await api.transfer(transferId));
     const here = online || new Set(await api.presence());
 
+    let owed = false;
     for (const node of info.to) {
+      // Both finals. Neither a decline recorded on the server nor a refusal
+      // heard on the wire is undone by waiting.
       if (info.declined.includes(node)) continue;
       if (refused.has(`${info.id}|${node}`)) continue;
-      if (!here.has(node)) continue;
-      if ((cooling.get(node) || 0) > now()) continue;
+
+      if (!here.has(node)) { owed = true; continue; }
+      if ((cooling.get(node) || 0) > now()) { owed = true; continue; }
 
       const session = claim(node, () => sendTo(info, mk, node));
-      if (!session) continue;
+      // The slot is held by a session already running against this peer, quite
+      // possibly a receive. When it ends nothing announces it, so this transfer
+      // waits on the poll rather than on an event.
+      if (!session) { owed = true; continue; }
       try {
         await session;
       } catch (err) {
         cooling.set(node, now() + cooldownMs);
+        owed = true;
         console.warn(`sending to ${node} failed`, err);
       }
     }
+    return owed;
   }
 
   // The bitmap is written after every session, including one that ended badly,
@@ -429,6 +447,15 @@ export function makeSessions(deps) {
           // An index outside the chunk list names no position in the bitmap, so
           // storing it would leave a file in the stage that nothing ever reads.
           if (!Number.isInteger(i) || i < 0 || i >= info.cids.length) return;
+          // ponytail: this is the one call in the module that writes to the
+          // origin private file system, and openStage writes through
+          // createSyncAccessHandle, which a browser only allows inside a
+          // dedicated worker. The ceiling is that the receiving half does not
+          // run in the page at all: the first chunk to arrive rejects with
+          // InvalidStateError, while every read the sending half makes stays
+          // main-thread safe. Lift it by moving the stage's writes into a
+          // worker behind a message protocol, keeping openStage's signature, so
+          // this line is the only one that has to stay exactly as it is.
           await stage.put(i, bytes);
         },
       }), 'the connection dropped mid-transfer');
@@ -510,16 +537,20 @@ export function makeSessions(deps) {
       return;
     }
 
+    // Whether anything is still owed is startSend's answer rather than a second
+    // reading of the same conditions here, because a copy of them would go stale
+    // against the one that decides. The call comes first in the expression so
+    // that a transfer is always offered, never short circuited past.
     let owed = false;
     for (const raw of queued) {
       const info = normalize(raw);
-      if (info.to.some((node) => !info.declined.includes(node) && !here.has(node))) {
-        owed = true;
-      }
       try {
-        await startSend(info.id, here);
+        owed = (await startSend(info.id, here)) || owed;
       } catch (err) {
+        // The transfer could not even be read. That is a condition of this
+        // moment, not of the transfer, so it is worth coming back for.
         console.warn(`transfer ${info.id} could not be offered`, err);
+        owed = true;
       }
     }
     schedulePoll(owed);

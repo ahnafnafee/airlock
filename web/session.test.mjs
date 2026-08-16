@@ -126,7 +126,8 @@ function harness(overrides = {}) {
     cooldownMs: overrides.cooldownMs ?? 0,
     confirmTries: overrides.confirmTries ?? 2,
     confirmGapMs: 0,
-    presencePollMs: 0,
+    // Off unless a test is about the poll, so no test leaves a timer behind it.
+    presencePollMs: overrides.presencePollMs ?? 0,
     wait: () => Promise.resolve(),
     now: overrides.now || (() => Date.now()),
   });
@@ -255,12 +256,69 @@ test('a failed peer is left alone until its cooldown expires', async () => {
   });
 
   await h.sessions.startSend(ID);
-  await h.sessions.startSend(ID);
+  const cooling = await h.sessions.startSend(ID);
   assert.equal(h.log.opens.length, 1);
+  // The peer is present and cooling, so nothing external will ever say "now".
+  // Reporting the transfer as still owed is what buys it another pass.
+  assert.equal(cooling, true);
 
   clock += 5001;
   await h.sessions.startSend(ID);
   assert.equal(h.log.opens.length, 2);
+});
+
+test('a peer holding a session leaves the transfer owed', async () => {
+  let release = null;
+  const h = harness({
+    info: SENDING,
+    open: (node, id) => {
+      h.log.opens.push({ node, id });
+      return new Promise((resolve) => {
+        release = () => resolve({ channel: h.channel, close: () => {} });
+      });
+    },
+    handshakeMs: 0,
+  });
+
+  const first = h.sessions.startSend(ID);
+  await settle();
+  assert.equal(h.log.opens.length, 1);
+
+  // While A is receiving from B, A's drain skips B. Nothing announces the end of
+  // that session, so a skip that reported nothing would strand this transfer.
+  const second = await h.sessions.startSend(ID);
+  assert.equal(h.log.opens.length, 1);
+  assert.equal(second, true);
+
+  release();
+  await first;
+});
+
+test('a drain comes back for a peer that stayed online and failed', async () => {
+  let attempts = 0;
+  const opts = {
+    info: SENDING,
+    queue: [{ id: ID, to: [PEER], declined: [] }],
+    presencePollMs: 10,
+    negotiate: async () => {
+      attempts++;
+      throw new Error('the connection dropped');
+    },
+  };
+  const h = harness(opts);
+
+  await h.sessions.drainQueue();
+  assert.equal(attempts, 1);
+
+  // The peer never went away, so its event stream never dropped and no inbox
+  // event is coming. Without a scheduled pass the transfer sits here forever.
+  await sleep(60);
+  assert.ok(attempts > 1, 'the drain never came back for a peer that was present');
+
+  // Emptying the queue is what stops the polling, which is the same thing that
+  // ends it in the app once the transfer is gone.
+  opts.queue = [];
+  await sleep(40);
 });
 
 test('a handshake that never completes releases the peer', async () => {

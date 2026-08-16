@@ -11,18 +11,55 @@ function humanSize(bytes) {
   return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
 }
 
-// The nodes an upload draws on belong to the mounted panel, and the launch
-// paths in app.js reach them through this. showView performs the mount
-// synchronously, so anything that has shown this view can send.
+// The nodes an upload draws on belong to the mounted panel, and the upload loop
+// reaches them through this. It is set by the same mount that builds the button
+// the loop is reached from, so the guard below is a statement of that invariant
+// rather than a case anything hits today.
 let controls = null;
-
-// One authored name for the file a shared link or note travels as, so the row
-// the staging list shows is the row the inbox will show.
-const SHARED_TEXT_NAME = 'shared.txt';
 
 function requireControls() {
   if (!controls) throw new Error('the send view has not been shown yet');
   return controls;
+}
+
+// Files wait here until the owner picks a destination and presses Send. Nothing
+// uploads on arrival, whether it came from the drop zone, the Android share
+// sheet, or the Windows context menu: choosing where a file goes is the product.
+//
+// It is also what keeps a forged share harmless. The share POST is a navigation,
+// and any page can navigate this browser, so a payload that arrived that way is
+// only a proposal until someone presses the same Send a dropped file needs.
+//
+// The list outlives the mount, and renderStaged is a no-op until the view claims
+// it, so a launch that stages before the panel exists is drawn when it mounts
+// rather than lost.
+const staged = [];
+let renderStaged = () => {};
+
+export function stageFiles(files) {
+  staged.push(...files);
+  renderStaged();
+}
+
+// A shared link or a shared note arrives as text with no file behind it. It
+// travels as a file like everything else, so the staging list, the upload loop
+// and the inbox all have one kind of row.
+export function stageText(text) {
+  staged.push(new File([text], noteName(text), { type: 'text/plain' }));
+  renderStaged();
+}
+
+// The note's opening words become its name, so two staged notes are told apart.
+// Path separators, control characters and the rest of the set Windows refuses
+// are stripped here rather than left to the download side, because this is the
+// one filename in the app that whoever started the share chose outright. A stem
+// that is empty or nothing but dots is not a name any platform accepts.
+function noteName(text) {
+  const stem = text.slice(0, 40)
+    .replace(/[\\/:*?"<>|\x00-\x1f\x7f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return `${/^\.*$/.test(stem) ? 'note' : stem}.txt`;
 }
 
 registerView('send', 'Send', (panel) => {
@@ -55,7 +92,10 @@ registerView('send', 'Send', (panel) => {
   sealed.addEventListener('change', paintSeal);
 
   const recipient = el('select', { id: 'to' }, el('option', { value: '' }, 'All my devices'));
-  const staging = el('div', { hidden: true });
+  // No visible heading, because the list has to disappear when it is empty. The
+  // accessible name carries what the heading would have said.
+  const stagedList = el('ul', { class: 'rows staged', 'aria-label': 'Staged files' });
+  const sendButton = el('button', { class: 'primary', type: 'button', disabled: true }, 'Send');
   const status = el('div', { class: 'data muted' });
   const progress = el('div');
 
@@ -65,11 +105,43 @@ registerView('send', 'Send', (panel) => {
     el('p', {}, el('label', { for: 'sealed' }, sealed, ' ', sealNote)),
     el('p', { class: 'label' }, 'To'),
     recipient,
-    staging,
+    stagedList,
+    sendButton,
     progress,
     status);
 
-  controls = { recipient, staging, progress, status };
+  controls = { recipient, progress, status };
+
+  // Rebuilt whole rather than patched, so the index each Remove closes over is
+  // the index that row now has. Same row shape the inbox uses: the text block
+  // takes the free space so a long name ellipsizes instead of pushing the size
+  // off a narrow screen.
+  renderStaged = () => {
+    stagedList.replaceChildren();
+    staged.forEach((file, i) => {
+      stagedList.append(el('li', {},
+        el('div', { class: 'rowtext' },
+          el('div', { class: 'name' }, file.name),
+          el('div', { class: 'data muted' }, humanSize(file.size))),
+        el('div', { class: 'actions' },
+          el('button', {
+            class: 'ghost', type: 'button',
+            'aria-label': `Remove ${file.name}`,
+            onclick: () => { staged.splice(i, 1); renderStaged(); },
+          }, 'Remove'))));
+    });
+    sendButton.disabled = staged.length === 0;
+    sendButton.textContent = staged.length > 1 ? `Send ${staged.length} files` : 'Send';
+  };
+
+  sendButton.addEventListener('click', async () => {
+    // Taken off the list before the first byte moves, so a second press cannot
+    // send the same files twice and anything staged while this runs is left for
+    // the next press.
+    const files = staged.splice(0, staged.length);
+    renderStaged();
+    await sendNow(files);
+  });
 
   api.devices().then((devices) => {
     for (const d of devices) {
@@ -84,15 +156,21 @@ registerView('send', 'Send', (panel) => {
   for (const type of ['dragleave', 'drop']) {
     drop.addEventListener(type, () => drop.classList.remove('over'));
   }
-  drop.addEventListener('drop', (e) => { e.preventDefault(); sendFiles([...e.dataTransfer.files]); });
-  picker.addEventListener('change', (e) => sendFiles([...e.target.files]));
+  drop.addEventListener('drop', (e) => { e.preventDefault(); stageFiles([...e.dataTransfer.files]); });
+  picker.addEventListener('change', (e) => stageFiles([...e.target.files]));
+
+  // Last, so a share or a launch that staged before this panel existed is on
+  // screen the moment it does.
+  renderStaged();
 });
 
-// The one upload loop. The drop zone, the Android share sheet and the Windows
-// Open with handler all arrive here, because three call sites for one behavior
-// is how they drift apart. A file that fails is reported on the status line and
-// the batch continues, so a caller that cannot await this still loses nothing.
-export async function sendFiles(files) {
+// The one upload loop, and the only thing in this module that touches the
+// network. Everything staged leaves through here whether it was dropped, chosen,
+// shared from Android or right-clicked in Explorer, because several call sites
+// for one behavior is how they drift apart. It is deliberately not exported: the
+// press of Send is the only way in, so no launch path can acquire a second one.
+// A file that fails is reported on the status line and the batch continues.
+async function sendNow(files) {
   const { recipient, progress, status } = requireControls();
   const to = recipient.value ? [recipient.value] : [];
   for (const file of files) {
@@ -135,47 +213,4 @@ export async function sendFiles(files) {
       status.className = 'data bad';
     }
   }
-}
-
-// A shared link or a shared note arrives as text with no file behind it. It
-// travels as a file like everything else, so the inbox has one kind of row and
-// the sealing path has one shape.
-export function sendText(text) {
-  return sendFiles([new File([text], SHARED_TEXT_NAME, { type: 'text/plain' })]);
-}
-
-// A launch is not a click. The share sheet delivers its payload through a
-// navigation, and a navigation is something any page the browser is pointed at
-// can start, so a share arriving here is only a proposal: it is listed by name
-// and waits for the same Send a dropped file would have needed. That is what
-// keeps a forged POST from turning into an upload nobody asked for, and it
-// works whatever the request claimed about where it came from.
-function stage(items, run) {
-  const { staging } = requireControls();
-  const send = el('button', { class: 'primary', type: 'button' }, 'Send');
-  send.addEventListener('click', () => {
-    staging.hidden = true;
-    staging.replaceChildren();
-    run();
-  });
-  staging.replaceChildren(
-    el('p', { class: 'label' }, 'Shared'),
-    // Same row shape the inbox uses: the text block takes the free space so a
-    // long name ellipsizes instead of pushing the size off a narrow screen.
-    el('ul', { class: 'rows' }, items.map((item) => el('li', {},
-      el('div', { class: 'rowtext' }, el('div', { class: 'data name' }, item.name)),
-      el('span', { class: 'data muted' }, humanSize(item.size))))),
-    el('p', {}, send));
-  staging.hidden = false;
-  send.focus();
-}
-
-// The one entry point for a stashed share. Files and text converge on the same
-// staged confirmation and then on the same upload loop, so neither can acquire
-// a second path to the network.
-export function stageShare({ files, text }) {
-  if (files?.length) stage(files, () => sendFiles(files));
-  // Blob measures the encoded bytes, which is the size the row would otherwise
-  // report wrong for anything outside ASCII.
-  else if (text) stage([{ name: SHARED_TEXT_NAME, size: new Blob([text]).size }], () => sendText(text));
 }

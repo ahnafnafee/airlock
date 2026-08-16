@@ -128,10 +128,14 @@ func TestManifestLaunchTargetsHaveHandlers(t *testing.T) {
 // gate's cross-site check never runs on it. A service worker intercepts an
 // in-scope navigation whoever started it, which means a hostile page can post a
 // payload of its choosing to /share and land the browser back on the app. What
-// keeps that from becoming an upload is that the page stages the stash and waits
-// for a Send. Uploading it on arrival instead is a one-line change that reads
-// like a convenience, so the shape is pinned here.
-func TestASharedPayloadIsStagedRatherThanUploaded(t *testing.T) {
+// keeps that from becoming an upload is that every launch path stages, and only
+// a press of Send uploads. Uploading on arrival instead is a one-line change
+// that reads like a convenience, so the shape is pinned here.
+//
+// The Windows file handler is held to the same rule for a different reason: a
+// launch names files but not a destination, and picking the destination is the
+// product.
+func TestEveryLaunchPathStagesRatherThanUploads(t *testing.T) {
 	app, err := webFS.ReadFile("web/app.js")
 	if err != nil {
 		t.Fatal(err)
@@ -141,15 +145,19 @@ func TestASharedPayloadIsStagedRatherThanUploaded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !strings.Contains(string(app), "stageShare(pending)") {
-		t.Error("web/app.js does not hand the stashed share to stageShare, so nothing confirms it before it uploads")
-	}
-	if !strings.Contains(string(send), "export function stageShare") {
-		t.Error("web/views/send.js does not export stageShare, so the launch path has no staged confirmation to reach")
-	}
-	for _, call := range []string{"sendFiles(pending", "sendText(pending"} {
-		if strings.Contains(string(app), call) {
-			t.Errorf("web/app.js calls %s...), which uploads a share nobody confirmed", call)
+	for _, fn := range []string{"stageFiles", "stageText"} {
+		if !strings.Contains(string(send), "export function "+fn) {
+			t.Errorf("web/views/send.js does not export %s, so a launch path has no staging list to reach", fn)
 		}
+		if !strings.Contains(string(app), fn) {
+			t.Errorf("web/app.js never names %s, so something it was handed reaches the network unstaged or not at all", fn)
+		}
+	}
+
+	// The upload loop stays unexported, so no launch path can reach it even by
+	// importing it directly. This is what makes the rule above structural rather
+	// than a convention app.js has to remember.
+	if regexp.MustCompile(`export\s+(?:async\s+)?function\s+send`).Match(send) {
+		t.Error("web/views/send.js exports a send function, so a launch path can upload without a staged confirmation")
 	}
 }

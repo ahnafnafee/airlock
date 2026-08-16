@@ -126,36 +126,41 @@ function listen() {
   });
 }
 
-// The two ways the operating system hands this app something to send. Both end
-// in the send view's own upload loop, never in a copy of it.
+// The two ways the operating system hands this app something to send. Neither
+// uploads: both put what they were given on the send view's staging list, where
+// it waits for a destination and a press of Send. That is the product, and it is
+// also the only defense the share path has, because a share POST is a navigation
+// and any page can navigate this browser.
 async function handleLaunch() {
+  // The view is shown before the payload reaches it, so the list the files land
+  // on is the list already on screen. showView mounts synchronously and the
+  // module is already loaded, so this import is a lookup rather than a fetch.
+  const staging = async () => {
+    showView('send');
+    return import('./views/send.js');
+  };
+
   // Android share sheet: the worker stashed the payload before redirecting here,
-  // because the plaintext POST could not be allowed to reach the server. That
-  // POST is a navigation, and any page can navigate this browser, so what was
-  // stashed is staged for confirmation rather than sent: a forged share reaches
-  // a list of names and a Send button nobody presses. The stash is cleared
-  // first, so the plaintext is not left at rest and a share is offered once
-  // rather than on every later visit.
+  // because the plaintext POST could not be allowed to reach the server. The
+  // stash is cleared first, so the plaintext is not left at rest and a share is
+  // offered once rather than on every later visit.
   if (new URLSearchParams(location.search).has('share')) {
     const pending = await kvGet('pending-share');
     await kvPut('pending-share', null);
     history.replaceState(null, '', '/');
-    if (pending) {
-      showView('send');
-      const { stageShare } = await import('./views/send.js');
-      stageShare(pending);
-    }
+    if (pending?.files?.length) (await staging()).stageFiles(pending.files);
+    else if (pending?.text) (await staging()).stageText(pending.text);
   }
-  // Windows Open with: Chrome hands the app the files it was launched on. This
-  // one needs no confirmation of its own, because it is the confirmation: the
-  // browser only fills the launch queue when the person picked this app for
-  // those files in the shell, and no page can reach it.
+
+  // Windows: Chrome hands the app the files it was launched on, whether that was
+  // Open with for a type the manifest names or the context-menu entry for
+  // everything else. The shell says which files, and never which device they are
+  // for, so they stage like anything else.
   if ('launchQueue' in window) {
     window.launchQueue.setConsumer(async (params) => {
       if (!params.files?.length) return;
-      showView('send');
-      const { sendFiles } = await import('./views/send.js');
-      await sendFiles(await Promise.all(params.files.map((h) => h.getFile())));
+      const files = await Promise.all(params.files.map((h) => h.getFile()));
+      (await staging()).stageFiles(files);
     });
   }
 }

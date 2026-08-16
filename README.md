@@ -149,10 +149,18 @@ Because the Tailscale certificate makes the page a genuine secure context, the w
 
 - **Android share sheet.** Share a photo from Gallery, pick Airlock, and it is staged in the Send view with the recipient picker in reach. Sending stays an explicit action, because a share target that uploaded on arrival would let any page choose what you sent.
 - **Web Push.** A file lands and your desktop notifies you with the real filename, decrypted locally, because the push itself carries no payload to leak.
-- **Windows file handling.** Right-click a PDF, an image, an archive, Open with, Airlock. A file handler has to name the types it accepts, so the list is the common ones; dragging onto the window covers everything else.
+- **Windows file handling.** Right-click any file and choose **Send with Airlock**. The app opens with the file staged, so you pick the destination before anything leaves the machine. **Open with** reaches Airlock too, for the types the manifest names.
 - **A live inbox.** An open app is nudged by a server-sent event stream rather than by polling, so an arrival appears without a refresh.
 
-You pick a destination, or leave it at all your devices, which stays the default because it is the common case. The recipient list is deliberately plaintext: the server has to route on it, and it reveals only which of your own devices talk to each other.
+The context-menu entry is installed once, on each Windows machine, after installing the app itself:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy\windows\install-context-menu.ps1
+```
+
+It writes one per-user registry key pointing at the launcher your browser already created, needs no administrator, and `uninstall-context-menu.ps1` removes it. Nothing is installed but that key: a shell helper that uploaded on its own would need the passphrase, and it would become a second implementation of the encryption. On Windows 11 the entry appears under **Show more options**, where the classic menu lives. Dragging a file onto the window works with no setup at all.
+
+You pick a destination, or leave it at all your devices, which stays the default because it is the common case. Nothing uploads until you press Send, whichever way the file arrived. The recipient list is deliberately plaintext: the server has to route on it, and it reveals only which of your own devices talk to each other.
 
 <div align="right">
 

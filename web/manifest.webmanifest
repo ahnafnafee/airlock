@@ -27,13 +27,30 @@
     {
       "action": "/open",
       "accept": {
-        "application/octet-stream": [".bin", ".iso", ".img"],
+        "application/octet-stream": [".bin", ".iso", ".img", ".dmg", ".apk"],
         "application/pdf": [".pdf"],
         "application/zip": [".zip"],
+        "application/x-7z-compressed": [".7z"],
+        "application/x-tar": [".tar", ".gz", ".tgz"],
+        "application/msword": [".doc"],
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
+        "application/vnd.ms-excel": [".xls"],
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": [".pptx"],
+        "application/json": [".json"],
         "image/jpeg": [".jpg", ".jpeg"],
         "image/png": [".png"],
-        "text/plain": [".txt", ".log", ".md"],
-        "video/mp4": [".mp4"]
+        "image/gif": [".gif"],
+        "image/webp": [".webp"],
+        "image/heic": [".heic"],
+        "image/tiff": [".tif", ".tiff"],
+        "text/plain": [".txt", ".log", ".md", ".csv"],
+        "video/mp4": [".mp4", ".m4v"],
+        "video/quicktime": [".mov"],
+        "video/x-matroska": [".mkv"],
+        "audio/mpeg": [".mp3"],
+        "audio/flac": [".flac"],
+        "audio/wav": [".wav"]
       }
     }
   ]

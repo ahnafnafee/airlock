@@ -1,5 +1,6 @@
 import { registerView, state, el, onInbox } from '../app.js';
 import { api } from '../api.js';
+import { openStage } from '../staging.js';
 import { RUNG, exportFile } from '../export.js';
 import { DOMAIN, MODE_SEALED, openRecord, modeOf, b64decode } from '../crypto.js';
 import { isStandalone } from '../ios.js';
@@ -80,6 +81,76 @@ async function openMeta(mk, t) {
   }
 }
 
+// Which chunk positions this device already holds. Every storage fault reads as
+// an empty stage rather than as a failure, because the only thing this decides
+// is whether Save is offered, and a transfer that has not started arriving has
+// no directory to read.
+//
+// ponytail: asking opens the staging directory, which creates an empty one for a
+// transfer that has never staged anything. The ceiling is one empty directory
+// per listed transfer, cleared only when the origin's storage is. Lifting it
+// wants an opener in staging.js that does not create.
+async function heldHere(transferId, open) {
+  try {
+    return await (await open(transferId)).held();
+  } catch {
+    return new Set();
+  }
+}
+
+// Everything a row turns on, decided before a node is built and with no document
+// in reach.
+//
+// Two questions, independent, and each has its own authority.
+//
+// What to call the transfer is the sealed metadata record's answer. Both send
+// paths upload that record before a chunk moves anywhere, so a name, a size and
+// a picture are available long before the bytes are, and gating them on anything
+// else leaves a row that cannot say what it is.
+//
+// Whether it can be saved is a question about where the bytes are, and the
+// device doing the saving is the authority on that. Assembly reads a position
+// from this device's stage and falls back to the server, so a position is
+// reachable when either one holds it. The server's completeness flag speaks for
+// the server alone, and on the direct path the server is handed no chunk at all:
+// a row that asked only that would refuse to open a file already on this disk.
+export async function readRow(t, mk, open = openStage) {
+  const from = `from ${t.sender} · ${ago(t.createdAt)}`;
+  // The metadata record lands before the chunks do, so a transfer without one is
+  // at its first instant rather than in trouble. It is the only nameless row.
+  if (!t.meta) return { name: 'Incomplete transfer', detail: from, saveable: false };
+
+  const { meta, detail: refusal } = await openMeta(mk, t);
+  if (!meta) return { name: 'Cannot open', detail: refusal, saveable: false };
+
+  const detail = `${humanSize(meta.size)} · ${from}`;
+  // Asked first because a transfer the server holds needs nothing from this
+  // disk, and asking would open a staging directory for one that never had one.
+  if (t.complete) return { name: meta.name, detail, meta, saveable: true };
+
+  const cids = Array.isArray(t.cids) ? t.cids : [];
+  const here = await heldHere(t.id, open);
+  const missing = new Set(t.missing);
+  // Counted over positions rather than as the id count minus the length of the
+  // missing list, which reads the same only while that list carries one entry
+  // per position. A file can hold the same chunk many times, and a set of ids
+  // cannot say how many positions have landed.
+  const reach = cids.filter((cid, i) => here.has(i) || !missing.has(cid)).length;
+  if (cids.length > 0 && reach === cids.length) {
+    return { name: meta.name, detail, meta, saveable: true };
+  }
+  return {
+    name: meta.name,
+    detail,
+    meta,
+    saveable: false,
+    // What the row is waiting for, in the one sentence it takes to say it. The
+    // count is the honest part: it is positions this device could assemble from
+    // right now, whichever side holds them.
+    note: `Still arriving. ${reach} of ${cids.length} chunks so far.`,
+  };
+}
+
 registerView('inbox', 'Inbox', (panel) => {
   const list = el('ul', { class: 'rows' });
   panel.append(el('h2', {}, 'Inbox'), list);
@@ -147,45 +218,26 @@ registerView('inbox', 'Inbox', (panel) => {
   }
 
   async function row(t, shortfallFor = () => 0) {
-    let name = 'Incomplete transfer';
-    let detail = `from ${t.sender} · ${ago(t.createdAt)}`;
-    let openable = false;
-    let thumbEl = null;
+    const { name, detail, meta, saveable, note } = await readRow(t, state.mk);
 
-    if (t.complete) {
-      const { meta, detail: refusal } = await openMeta(state.mk, t);
-      if (meta) {
-        name = meta.name;
-        detail = `${humanSize(meta.size)} · from ${t.sender} · ${ago(t.createdAt)}`;
-        openable = true;
-        if (t.thumb) {
-          try {
-            const record = b64decode(t.thumb);
-            // The same rule the metadata follows. A plaintext record carries no
-            // authentication tag, so a forged one would render as this
-            // transfer's own picture. Only a sealed thumbnail is shown.
-            if (modeOf(record) === MODE_SEALED) {
-              const bytes = await openRecord(state.mk, DOMAIN.THUMB, t.id, record);
-              const url = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
-              thumbEl = el('img', { class: 'thumb', src: url, alt: '', loading: 'lazy' });
-            }
-          } catch {
-            // A thumbnail that will not open is not worth reporting: the row is
-            // still useful without it.
-          }
+    // Carried by the same record as the name, so it appears with the name rather
+    // than waiting on the bytes.
+    let thumbEl = null;
+    if (meta && t.thumb) {
+      try {
+        const record = b64decode(t.thumb);
+        // The same rule the metadata follows. A plaintext record carries no
+        // authentication tag, so a forged one would render as this transfer's
+        // own picture. Only a sealed thumbnail is shown.
+        if (modeOf(record) === MODE_SEALED) {
+          const bytes = await openRecord(state.mk, DOMAIN.THUMB, t.id, record);
+          const url = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
+          thumbEl = el('img', { class: 'thumb', src: url, alt: '', loading: 'lazy' });
         }
-      } else {
-        name = 'Cannot open';
-        detail = refusal;
+      } catch {
+        // A thumbnail that will not open is not worth reporting: the row is
+        // still useful without it.
       }
-    } else {
-      // Counted over positions rather than as the id count minus the length of
-      // the missing list, which reads the same only while that list carries one
-      // entry per position. A file can hold the same chunk many times, and a
-      // set of ids cannot say how many positions have landed.
-      const missing = new Set(t.missing);
-      const held = t.cids.filter((cid) => !missing.has(cid)).length;
-      detail += ` · ${held} of ${t.cids.length} chunks`;
     }
 
     // Running out of room is the one arrival failure the person holding this
@@ -200,8 +252,14 @@ registerView('inbox', 'Inbox', (panel) => {
         `Not enough space. Free about ${humanSize(short)} and this arrives on its own.`)
       : el('div', { class: 'data muted' }, detail);
 
+    // Suppressed under the storage note, which is about the same wait and is the
+    // half a person can act on.
+    const noteNode = note && short === 0
+      ? el('div', { class: 'data muted' }, note)
+      : null;
+
     const actions = el('div', { class: 'actions' });
-    if (openable) {
+    if (saveable) {
       // Save assembles on this device and runs the export cascade, rather than
       // navigating to the service worker's download route. That route is a fine
       // rung where it works and a dead end where it does not, and which of those
@@ -275,7 +333,8 @@ registerView('inbox', 'Inbox', (panel) => {
       thumbEl || [],
       // The text block absorbs the row's free space so the thumbnail stays
       // against the name it belongs to rather than drifting to the far side.
-      el('div', { class: 'rowtext' }, el('div', { class: 'name' }, name), detailNode),
+      el('div', { class: 'rowtext' },
+        el('div', { class: 'name' }, name), detailNode, noteNode || []),
       actions);
   }
 });

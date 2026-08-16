@@ -1,26 +1,30 @@
 # Benchmarks
 
-Two design decisions were left open until they could be measured: whether the
-`host` Tailscale mode really beats `embedded`, and whether the sealing toggle
-buys anything at all. This file records what was measured, on what, and what the
-numbers say about each decision, including where they disagree with the
-reasoning the design was built on.
+Several design decisions were left open until they could be measured: whether
+the `host` Tailscale mode really beats `embedded`, whether the sealing toggle
+buys anything at all, how many connections the direct path should open, how many
+workers should seal, and whether the chunker's rolling hash is worth replacing.
+This file records what was measured, on what, and what the numbers say about each
+decision, including where they disagree with the reasoning the design was built
+on.
 
-Two of the four measurements are done. Two need hardware this was not run on and
-are marked **not yet measured**, with the exact commands to take them.
+The measurements split by what they need. Everything that runs on one machine has
+been taken. Everything that needs a real tailnet and a second device has not, and
+each of those sections is marked **not yet measured** and carries the exact
+commands to take it.
 
 ## Machine
 
 | | |
 | --- | --- |
-| CPU | Intel Core i9-14900K |
+| CPU | Intel Core i9-14900K, 8 performance cores plus 16 efficiency cores, 32 logical |
 | Memory | 64 GB |
 | OS | Windows 11 Pro, build 10.0.22631 |
 | Disk | WD SN550 1 TB NVMe, NTFS, `C:` volume (Go's `b.TempDir()` lands here) |
 | Go | 1.26.5, windows/amd64 |
 | Node | 22.17.1 |
 | Defender real-time protection | off |
-| Date | 2026-08-15 |
+| Date | 2026-08-15 for sections 1 and 2, 2026-08-16 for sections 5 to 8 |
 
 Every number below is a median of the repeat count named with it. The spread is
 reported too, because on one of these the spread is the finding.
@@ -344,7 +348,713 @@ two modes can show up as wall clock. If the measured difference is larger than
 pass one alone accounts for, the pipeline is not overlapping the way section 2
 assumes, and that is worth knowing.
 
-## The two open decisions
+## 5. The direct path's link count, not yet measured
+
+Needs a real tailnet and two devices, because the question is what a LAN does and
+loopback cannot answer it.
+
+`web/peer.js` spreads a transfer over `LINK_COUNT` peer connections, each
+carrying `CHANNELS_PER_LINK` data channels. The plan for this measurement called
+that one number, `CHANNEL_COUNT`. The code has two, and they are two because the
+module's own comment claims they do different jobs: connections are separate SCTP
+associations and their bandwidth adds up, while channels inside one connection
+share a congestion window and exist only so a fragment waiting on a retransmit
+does not block everything queued behind it.
+
+Both of those are arguments. Neither has been measured. The constants have
+deliberately not been changed, because moving a constant on the strength of an
+argument is the thing this file exists to prevent.
+
+### The measurement
+
+Instrument the send loop, because the session's wall clock also contains the
+handshake, the offer round trip and the receiver's dedup pass, and none of those
+scale with link count. In `negotiate` in `web/peer.js`, wrap the one line that
+fans out to the links:
+
+```js
+        const t0 = performance.now();
+        await Promise.all(links.map((link, l) =>
+          sendChunks(link, indexesFor(wanted, links.length, l), readChunk)));
+        const ms = performance.now() - t0;
+        console.log(`links=${links.length} chan=${links[0].channels.length} ` +
+          `sent ${wanted.length} of ${manifest.cids.length} chunks, ` +
+          `${manifest.size} B in ${ms.toFixed(0)} ms = ` +
+          `${((manifest.size / 1048576) / (ms / 1000)).toFixed(1)} MB/s`);
+```
+
+That block is temporary and is not committed. It prints on the sending device's
+console.
+
+**Read the two counts before the throughput.** The MB/s figure divides the whole
+file by the elapsed time, so it is only true when `wanted.length` equals
+`manifest.cids.length`. A receiver that already holds part of the file answers
+`NEED` with a shorter index list, fewer bytes cross, and the line then reports a
+throughput the link never reached. It gets faster the more of the file the
+receiver already has, which is the failure mode that looks like a finding.
+
+The web assets are compiled into the binary by `//go:embed`, so every constant
+change needs a rebuild and a reinstall on the sending device:
+
+```bash
+# On the sending device, once per row of the table.
+# Edit LINK_COUNT in web/peer.js, then:
+go build -o airlock . && ./airlock      # airlock.exe on Windows
+```
+
+Prepare the same 2 GB file for the other device once per row, let the direct
+transfer run, and read the line off the sender's console. Take three runs per row
+and report the median. Between rows, clear the receiving device's staged and
+stored chunks, which is what keeps the two counts equal.
+
+| `LINK_COUNT` | `CHANNELS_PER_LINK` | MB/s (median of 3) | Spread |
+| --- | --- | --- | --- |
+| 1 | 2 | not yet measured | |
+| 2 | 2 | not yet measured | |
+| 4 | 2 | not yet measured | |
+| 6 | 2 | not yet measured | |
+| 8 | 2 | not yet measured | |
+| 12 | 2 | not yet measured | |
+
+Then hold `LINK_COUNT` at whatever the first sweep chose and vary the second
+number, because the two claims are independent and one table cannot separate
+them:
+
+| `LINK_COUNT` | `CHANNELS_PER_LINK` | MB/s (median of 3) | Spread |
+| --- | --- | --- | --- |
+| chosen | 1 | not yet measured | |
+| chosen | 2 | not yet measured | |
+| chosen | 4 | not yet measured | |
+
+Confirm the link was direct before believing any of it. `tailscale status` on the
+sending device must not show the peer as relayed. A run through DERP measures the
+relay, and every row of both tables would then agree for a reason that has
+nothing to do with either constant.
+
+### What the result has to decide
+
+Expect a knee: throughput climbing to some count and flattening after it. Set the
+constant to the knee and not past it, because every extra link is another ICE
+negotiation, another DTLS transport, another send buffer at the `HIGH_WATER`
+ceiling and another reassembly map.
+
+**If one connection already reaches what four reach, set `LINK_COUNT` to 1 and
+take the fan-out out.** That result would mean the multiplexing earns nothing on
+this hardware, and shipping complexity that earns nothing is worse than not
+having built it. The same test applies to `CHANNELS_PER_LINK`: if 1 matches 2,
+set it to 1, and `sendChunks` loses its round robin along with it.
+
+Two things would make the sweep flat for reasons that are not the constants, and
+both are worth checking before concluding anything. If the link itself saturates
+at one connection, every row after the first is flat and the answer is 1 for this
+link rather than 1 in general, so record the link's speed alongside the table. If
+`usrsctp` saturates a core first, the sender's CPU is pinned and the rows are flat
+for the reason the module's `ponytail:` note already names, which is a different
+finding and calls for a different fix.
+
+### Ordered against unordered
+
+Same setup, one extra pair of rows. `openChannels` creates channels with
+`{ ordered: false }`. Flip it to `{ ordered: true }` on the sending device,
+rebuild, and take three more runs at the chosen `LINK_COUNT`. Only the offering
+side's build matters, because only the offerer creates the channels and the
+answering side inherits their ordering.
+
+| `ordered` | MB/s (median of 3) | Spread |
+| --- | --- | --- |
+| `false` | not yet measured | |
+| `true` | not yet measured | |
+
+If the difference is inside the run to run spread, record that. Unordered stays
+either way, because it is not there for throughput on a clean link: it is there
+so one retransmit does not stall the fragments queued behind it, and a LAN with
+no loss is exactly the case where that costs nothing and shows nothing.
+
+## 6. Preparing a file, measured on Node
+
+`prepare()` in `web/upload.js` reads the file, cuts it, hashes and seals each
+chunk in a worker pool, and stages the sealed bytes. On the direct path it runs
+before the peer is reachable, so its whole wall clock is time the sender waits
+through no matter what the network later does. That makes it worth breaking apart
+on its own, independently of the link measurement above.
+
+**Caveat first: this is Node 22, not a browser.** Three things differ, and one of
+them is not small.
+
+- The crypto is real. Node and the browser reach the same native implementations
+  through the same Web Crypto API, and the harness imports the app's own
+  unmodified `web/crypto.js` and `web/cdc.js`.
+- The pool is real. The harness imports `web/sealpool.js` unmodified and drives
+  it through a small facade that gives a `worker_threads` Worker the five members
+  the DOM shape needs. All of the pool's scheduling, backpressure and failure
+  handling are the shipped ones. What differs is the thread primitive underneath.
+- **Staging is a proxy, not the real thing.** Node has no OPFS, so the harness's
+  worker writes the sealed bytes with `writeFileSync` where the real seal worker
+  calls `writeStaged`, which goes through an OPFS sync access handle. The write is
+  a synchronous write of the same bytes from the same thread, which is the shape
+  that matters, but the number is NTFS rather than the browser's sandboxed
+  filesystem.
+
+The file is read from the OS page cache, since it was written moments before, so
+the read row understates a cold read. That bias works against the conclusions
+below rather than for them: a cheaper read makes cutting look like a larger share
+than it is, and cutting is the thing under examination.
+
+### The harness
+
+Save both files in one directory outside the repo and set `REPO`. `bench36.mjs`:
+
+```js
+// Task 36 harness. Measures the local half of a transfer with the repo's own
+// modules: read, cut, hash and seal, stage. It cannot measure a network, so it
+// makes no claim about one.
+//
+//   node bench36.mjs gen      <path> <gib>
+//   node bench36.mjs read     <path>
+//   node bench36.mjs cut      <path>
+//   node bench36.mjs pool     <path> <workers> [stageDir]
+//   node bench36.mjs poolonly <workers> <chunks> <chunkBytes> [stageDir]
+//   node bench36.mjs cutpoint <mib>
+//   node bench36.mjs seal1    <chunkBytes> <rounds>
+//
+// REPO below is the only thing to change to run this elsewhere.
+
+import { openAsBlob, createWriteStream } from 'node:fs';
+import { Worker as NodeWorker } from 'node:worker_threads';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+import { resolve, dirname } from 'node:path';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const REPO = 'D:/GitHub/transfer-local';
+const CRYPTO_URL = pathToFileURL(resolve(REPO, 'web/crypto.js')).href;
+const CDC_URL = pathToFileURL(resolve(REPO, 'web/cdc.js')).href;
+const POOL_URL = pathToFileURL(resolve(REPO, 'web/sealpool.js')).href;
+const WORKER_URL = pathToFileURL(resolve(HERE, 'seal-node-worker.mjs'));
+
+// main.go cdcDefaults, verbatim.
+const CDC = {
+  min: 512 << 10,
+  normal: 1 << 20,
+  max: 8 << 20,
+  maskS: (1 << 22) - 1,
+  maskL: (1 << 20) - 1,
+};
+
+const PASSPHRASE = 'a benchmark passphrase';
+const SALT = Buffer.alloc(16, 7).toString('base64');
+const TRANSFER_ID = '0123456789abcdef0123456789abcdef';
+
+const MB = (bytes, ms) => (bytes / 1048576) / (ms / 1000);
+
+let peakRss = 0;
+function watchRss() {
+  const t = setInterval(() => {
+    const rss = process.memoryUsage().rss;
+    if (rss > peakRss) peakRss = rss;
+  }, 25);
+  t.unref();
+}
+
+async function gen(path, gib) {
+  const total = Math.round(gib * (1 << 30));
+  const block = new Uint8Array(8 << 20);
+  const view = new Uint32Array(block.buffer);
+  let x = 0x12345678;
+  const out = createWriteStream(path);
+  let written = 0;
+  while (written < total) {
+    for (let i = 0; i < view.length; i++) {
+      x ^= x << 13; x >>>= 0;
+      x ^= x >>> 17;
+      x ^= x << 5; x >>>= 0;
+      view[i] = x;
+    }
+    const n = Math.min(block.length, total - written);
+    if (!out.write(Buffer.from(block.buffer, 0, n))) {
+      await new Promise((r) => out.once('drain', r));
+    }
+    written += n;
+  }
+  await new Promise((r) => out.end(r));
+  console.log(JSON.stringify({ op: 'gen', path, bytes: total }));
+}
+
+async function streamOf(path) {
+  const blob = await openAsBlob(path);
+  return { stream: blob.stream(), size: blob.size };
+}
+
+async function read(path) {
+  const { stream } = await streamOf(path);
+  const reader = stream.getReader();
+  const t0 = performance.now();
+  let bytes = 0;
+  let reads = 0;
+  for (;;) {
+    const r = await reader.read();
+    if (r.done) break;
+    bytes += r.value.length;
+    reads++;
+  }
+  const ms = performance.now() - t0;
+  console.log(JSON.stringify({
+    op: 'read', bytes, ms: +ms.toFixed(1), mbps: +MB(bytes, ms).toFixed(1),
+    reads, meanRead: Math.round(bytes / reads),
+  }));
+}
+
+async function cut(path) {
+  const { chunkStream } = await import(CDC_URL);
+  const { stream, size } = await streamOf(path);
+  const t0 = performance.now();
+  let chunks = 0;
+  let bytes = 0;
+  let min = Infinity;
+  let max = 0;
+  for await (const chunk of chunkStream(stream, CDC)) {
+    chunks++;
+    bytes += chunk.length;
+    if (chunk.length < min) min = chunk.length;
+    if (chunk.length > max) max = chunk.length;
+  }
+  const ms = performance.now() - t0;
+  console.log(JSON.stringify({
+    op: 'cut', bytes, ms: +ms.toFixed(1), mbps: +MB(bytes, ms).toFixed(1),
+    chunks, meanChunk: Math.round(bytes / chunks), minChunk: min, maxChunk: max,
+    ok: bytes === size,
+  }));
+}
+
+// A DOM-shaped facade over a node worker_threads Worker, so web/sealpool.js runs
+// unmodified. The pool's scheduling, backpressure and failure handling are the
+// real ones; only the thread primitive underneath differs.
+function spawn(stageDir) {
+  return () => {
+    const w = new NodeWorker(WORKER_URL, {
+      workerData: { cryptoUrl: CRYPTO_URL, stageDir: stageDir || null },
+    });
+    const facade = {
+      onmessage: null,
+      onerror: null,
+      onmessageerror: null,
+      postMessage: (msg, transfer) => w.postMessage(msg, transfer),
+      terminate: () => w.terminate(),
+    };
+    w.on('message', (data) => facade.onmessage?.({ data }));
+    w.on('error', (err) => facade.onerror?.(err));
+    return facade;
+  };
+}
+
+async function pool(path, size, stageDir) {
+  watchRss();
+  const { chunkStream } = await import(CDC_URL);
+  const { sealPool } = await import(POOL_URL);
+  const p = sealPool(size, spawn(stageDir));
+  await p.init({ passphrase: PASSPHRASE, salt: SALT }, 0x01, TRANSFER_ID);
+
+  const { stream } = await streamOf(path);
+  const limit = size + 1;
+  const pending = new Set();
+  let index = 0;
+  let bytes = 0;
+  const t0 = performance.now();
+  for await (const plain of chunkStream(stream, CDC)) {
+    bytes += plain.length;
+    const job = p.seal(index++, plain).finally(() => pending.delete(job));
+    job.catch(() => {});
+    pending.add(job);
+    if (pending.size >= limit) await Promise.race(pending);
+  }
+  await Promise.all(pending);
+  const ms = performance.now() - t0;
+  p.close();
+  console.log(JSON.stringify({
+    op: 'pool', size, staged: !!stageDir, bytes, chunks: index,
+    ms: +ms.toFixed(1), mbps: +MB(bytes, ms).toFixed(1),
+    peakRssMB: +(peakRss / 1048576).toFixed(1),
+  }));
+}
+
+// Single-thread cost of the two crypto calls at the mean chunk size, so the
+// total CPU work can be separated from the wall clock the pool hides it behind.
+async function seal1(sizeBytes, rounds) {
+  const { deriveMaster, chunkIdentity, sealChunk, MODE_SEALED } = await import(CRYPTO_URL);
+  const mk = await deriveMaster(PASSPHRASE, SALT);
+  const plain = new Uint8Array(sizeBytes);
+  for (let off = 0; off < sizeBytes; off += 65536) {
+    crypto.getRandomValues(plain.subarray(off, Math.min(off + 65536, sizeBytes)));
+  }
+  const time = async (fn) => {
+    for (let i = 0; i < 5; i++) await fn();
+    const t0 = performance.now();
+    for (let i = 0; i < rounds; i++) await fn();
+    return (performance.now() - t0) / rounds;
+  };
+  const idMs = await time(() => chunkIdentity(mk, MODE_SEALED, plain));
+  const { h, cid } = await chunkIdentity(mk, MODE_SEALED, plain);
+  const sealMs = await time(() => sealChunk(mk, MODE_SEALED, h, cid, plain));
+  console.log(JSON.stringify({
+    op: 'seal1', sizeBytes, rounds,
+    identityMs: +idMs.toFixed(3), sealMs: +sealMs.toFixed(3),
+    totalMs: +(idMs + sealMs).toFixed(3),
+    mbps: +MB(sizeBytes, idMs + sealMs).toFixed(1),
+  }));
+}
+
+// The pool with no cutter in front of it. Chunks are synthesized rather than
+// read, so the only thing being measured is how far hashing and sealing scale
+// with worker count. AES-GCM and SHA-256 have no data-dependent branches, so a
+// buffer that is mostly zeros costs what a random one costs; every page is
+// touched so none of it is a lazily mapped zero page.
+async function poolonly(size, chunks, chunkBytes, stageDir) {
+  watchRss();
+  const { sealPool } = await import(POOL_URL);
+  const p = sealPool(size, spawn(stageDir));
+  await p.init({ passphrase: PASSPHRASE, salt: SALT }, 0x01, TRANSFER_ID);
+
+  const make = () => {
+    const b = new Uint8Array(chunkBytes);
+    for (let i = 0; i < b.length; i += 4096) b[i] = (i >>> 12) & 0xff;
+    return b;
+  };
+  // Warm the allocator and the workers before the clock starts.
+  await Promise.all(Array.from({ length: size }, (_, i) => p.seal(i, make())));
+
+  const limit = size + 1;
+  const pending = new Set();
+  const t0 = performance.now();
+  for (let i = 0; i < chunks; i++) {
+    const job = p.seal(i, make()).finally(() => pending.delete(job));
+    job.catch(() => {});
+    pending.add(job);
+    if (pending.size >= limit) await Promise.race(pending);
+  }
+  await Promise.all(pending);
+  const ms = performance.now() - t0;
+  p.close();
+  const bytes = chunks * chunkBytes;
+  console.log(JSON.stringify({
+    op: 'poolonly', size, staged: !!stageDir, chunks, chunkBytes, bytes,
+    ms: +ms.toFixed(1), mbps: +MB(bytes, ms).toFixed(1),
+    peakRssMB: +(peakRss / 1048576).toFixed(1),
+    uvThreads: process.env.UV_THREADPOOL_SIZE || 'default',
+  }));
+}
+
+// cutPoint in isolation: no I/O, no window rebuilding, no copies. This is the
+// ceiling SeqCDC would be replacing, and the gap between it and the cut op above
+// is what the refill concatenation costs.
+async function cutpoint(mib) {
+  const { cutPoint } = await import(CDC_URL);
+  const size = mib * (1 << 20);
+  const buf = new Uint8Array(size);
+  const view = new Uint32Array(buf.buffer);
+  let x = 0x12345678;
+  for (let i = 0; i < view.length; i++) {
+    x ^= x << 13; x >>>= 0;
+    x ^= x >>> 17;
+    x ^= x << 5; x >>>= 0;
+    view[i] = x;
+  }
+  const walk = () => {
+    let at = 0;
+    let chunks = 0;
+    while (at < size) {
+      const n = cutPoint(buf, at, Math.min(at + CDC.max, size), CDC);
+      at += n;
+      chunks++;
+    }
+    return chunks;
+  };
+  walk();
+  const t0 = performance.now();
+  const rounds = 8;
+  let chunks = 0;
+  for (let i = 0; i < rounds; i++) chunks = walk();
+  const ms = (performance.now() - t0) / rounds;
+  console.log(JSON.stringify({
+    op: 'cutpoint', mib, chunks, ms: +ms.toFixed(1),
+    mbps: +MB(size, ms).toFixed(1),
+  }));
+}
+
+const [, , op, ...rest] = process.argv;
+if (op === 'gen') await gen(rest[0], Number(rest[1]));
+else if (op === 'read') await read(rest[0]);
+else if (op === 'cut') await cut(rest[0]);
+else if (op === 'pool') await pool(rest[0], Number(rest[1]), rest[2]);
+else if (op === 'seal1') await seal1(Number(rest[0]), Number(rest[1]));
+else if (op === 'cutpoint') await cutpoint(Number(rest[0]));
+else if (op === 'poolonly') {
+  await poolonly(Number(rest[0]), Number(rest[1]), Number(rest[2]), rest[3]);
+}
+else { console.error('unknown op'); process.exit(2); }
+```
+
+`seal-node-worker.mjs`:
+
+```js
+// Node stand-in for web/seal-worker.js. It runs the repo's own crypto.js
+// unmodified and does the same two calls per chunk, then optionally writes the
+// sealed bytes out. It cannot import web/seal-worker.js directly because that
+// file stages through OPFS, which Node does not have.
+
+import { parentPort, workerData } from 'node:worker_threads';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const { cryptoUrl, stageDir } = workerData;
+const { deriveMaster, chunkIdentity, sealChunk } = await import(cryptoUrl);
+
+let master = null;
+let mode = null;
+let transferId = null;
+
+parentPort.on('message', async (msg) => {
+  if (msg.type === 'init') {
+    // The browser hands a non-extractable CryptoKey across the thread boundary.
+    // Deriving here instead keeps the harness independent of whether Node's
+    // structured clone carries a CryptoKey, and it happens before the timed
+    // region either way.
+    master = await deriveMaster(msg.mk.passphrase, msg.mk.salt);
+    mode = msg.mode;
+    transferId = msg.transferId;
+    if (stageDir) mkdirSync(join(stageDir, transferId), { recursive: true });
+    parentPort.postMessage({ type: 'ready' });
+    return;
+  }
+  try {
+    const { h, cid } = await chunkIdentity(master, mode, msg.plain);
+    const sealed = await sealChunk(master, mode, h, cid, msg.plain);
+    if (stageDir) {
+      // Proxy for OPFS createSyncAccessHandle: a synchronous write of the
+      // sealed bytes from the thread that produced them.
+      writeFileSync(join(stageDir, transferId, String(msg.index)), sealed);
+    }
+    parentPort.postMessage({ index: msg.index, h, cid });
+  } catch (err) {
+    parentPort.postMessage({ index: msg.index, error: String(err?.message || err) });
+  }
+});
+```
+
+Every section below uses one 2 GiB file of pseudorandom bytes:
+
+```bash
+node bench36.mjs gen bench2g.bin 2
+```
+
+Under `cdcDefaults` that file cuts into **1,146 chunks with a mean of 1,873,895
+bytes**, the smallest 529,214 and the largest at the 8 MiB ceiling.
+
+The mean is 1.79 MiB rather than the 1 MiB `normal`, and the masks predict that.
+Between `min` and `normal` a cut needs 22 bits to land zero, about one position
+in 4.2 million, so the 512 KiB stretch there cuts only about an eighth of the
+time. Past `normal` the mask loosens to 20 bits, about one position in 1.05
+million, so a cut arrives after roughly another mebibyte. `normal` plus a
+mebibyte, less the eighth that cut early and less what the 8 MiB ceiling clips,
+is 1.79 MiB. Nothing is wrong here; it is worth writing down only because the
+chunk size that everything else scales against is not the one the parameter name
+suggests.
+
+### Reading and cutting
+
+```bash
+node bench36.mjs read bench2g.bin      # three runs
+node bench36.mjs cut  bench2g.bin      # three runs
+node bench36.mjs cutpoint 256          # three runs
+```
+
+| | Wall clock for 2 GiB (median of 3) | MB/s | Spread |
+| --- | --- | --- | --- |
+| Read only, through `Blob.stream()` | 2,315 ms | 885 | 2,290 to 2,404 ms |
+| Read and cut, through `chunkStream` | 5,457 ms | 375 | 5,418 to 5,466 ms |
+| `cutPoint` alone, no I/O, no copies | 1,168 ms | 1,754 | 1,719 to 1,768 MB/s |
+
+The `cutPoint` row is measured over 256 MiB and scaled to 2 GiB; its spread is
+quoted as throughput because that is what the op reports, and it includes a
+fourth confirming run taken after the harness was tidied.
+
+The read is 32,768 reads of 64 KiB, so 885 MB/s is per-read overhead rather than
+the disk, and the disk barely appears at all because the file is in the page
+cache.
+
+The gap is the finding. Cutting adds 3,142 ms on top of the read, but the rolling
+hash that does the cutting accounts for only 1,168 ms of that. **The other 1,974
+ms is copying**, and it is 69 percent larger than the hash it exists to serve.
+
+The mechanism is in `chunkStream`'s refill, and `web/cdc.js` already carries a
+`ponytail:` note naming it. Before every cut the window is rebuilt by
+concatenating the remainder with the reads that top it back up to `max`, which
+copies about 8.4 MB per chunk, and then the chunk itself is copied out with
+`buf.slice(0, n)`, which is another 1.87 MB. That is 10.3 MB moved per 1.87 MB of
+file delivered, an amplification of about 5.5x. Over 2 GiB it is 11.8 GB of
+copying, and 1,974 ms of it works out at 6.0 GB/s, which is what a single
+threaded memcpy looks like on this machine. The arithmetic and the measurement
+agree closely enough that the residual can be trusted as the copy rather than as
+whatever did not fit elsewhere.
+
+### Where the 2 GiB goes
+
+The full run, at the pool size section 7 chooses, with staging on:
+
+```bash
+node bench36.mjs pool bench2g.bin 2 stage
+```
+
+Median of 3: **5,718 ms, 358 MB/s**, spread 5,703 to 5,734 ms.
+
+| Step | Wall clock | Share | How it was obtained |
+| --- | --- | --- | --- |
+| Reading the file | 2,315 ms | 40% | measured directly |
+| Rolling hash, finding the cuts | 1,168 ms | 20% | measured directly |
+| Rebuilding the cut window | 1,974 ms | 35% | read and cut, less the two above |
+| Hashing, sealing and staging | 261 ms | 5% | full run, less read and cut |
+| Channel time | not measured | | needs section 5 |
+
+The shares are rounded and sum to 100. The two measured rows and the total are
+the load-bearing numbers; the other two are a difference each, which is why the
+copying figure was checked against its own arithmetic above before being
+believed.
+
+The sealing row is the surprise, and it is the one that decides section 7.
+Hashing, sealing and staging cost **4,565 ms of CPU** for this file on one
+thread, which is more than the read and the cut together. Almost none of it
+reaches the wall clock, because it happens on worker threads while the main
+thread is still reading and cutting, and the main thread is slower. What survives
+is the tail: the last chunk cannot be sealed until it has been cut.
+
+So the shape of `prepare()` on this machine is a main thread pinned at 375 MB/s
+by reading and cutting, and a worker pool with most of its capacity idle. Nearly
+four fifths of the main thread's own time is I/O and memcpy rather than the
+rolling hash everyone assumes is the expensive part.
+
+## 7. Seal pool size, measured on Node
+
+Two tables, because one of them alone would give the wrong answer.
+
+### The pool on its own
+
+Synthetic chunks at the mean size, no cutter in front, so this is how far hashing
+and sealing actually scale.
+
+```bash
+node bench36.mjs poolonly <workers> 1146 1873895        # two runs each
+```
+
+| Workers | Wall clock for 2 GiB | MB/s | Scaling | Peak RSS |
+| --- | --- | --- | --- | --- |
+| 1 | 2,522 ms | 812 | 1.00x | 105 MB |
+| 2 | 1,385 ms | 1,479 | 1.82x | 147 MB |
+| 4 | 854 ms | 2,398 | 2.95x | 229 MB |
+| 8 | 653 ms | 3,137 | 3.86x | 395 MB |
+| 16 | 656 ms | 3,121 | 3.84x | 761 MB |
+
+Sealing scales, sublinearly, and stops at 8. Going to 16 buys nothing measurable
+and doubles peak memory, which is what `sealPool`'s `MAX_WORKERS = 8` already
+assumes. Two checks say that plateau is the crypto and not the harness: raising
+`UV_THREADPOOL_SIZE` to 16 changes the 8-worker row by less than its own spread
+(653, 656 and 665 ms), and the loop that synthesizes chunks runs at 10.0 GB/s on
+its own, three times the plateau it would have to explain.
+
+The single-worker row is also a check on section 2, by a different route. 812
+MB/s here against 755 MB/s there for a 1 MiB chunk, the difference being the
+larger chunk amortizing the per-call overhead.
+
+### The pool behind the real cutter
+
+The same sweep with `prepare()`'s actual input: the 2 GiB file, cut by
+`chunkStream` on the main thread, staged by the workers.
+
+```bash
+node bench36.mjs pool bench2g.bin <workers> stage        # three runs each
+```
+
+| Workers | Wall clock for 2 GiB (median of 3) | MB/s | Peak RSS | Spread |
+| --- | --- | --- | --- | --- |
+| 1 | 5,923 ms | 346 | 173 MB | 5,828 to 6,060 ms |
+| 2 | **5,718 ms** | **358** | 210 MB | 5,703 to 5,734 ms |
+| 4 | 6,496 ms | 315 | 260 MB | 5,857 to 6,840 ms |
+| 8 | 6,553 ms | 313 | 308 MB | 6,324 to 6,725 ms |
+
+**The knee is at 2, and past it more workers make preparation slower.** Every
+sample at 8 is slower than every sample at 1 or 2, so the effect is outside the
+run to run spread even though it is only 15 percent. Peak memory meanwhile grows
+by about 20 MB per worker with nothing to show for it.
+
+The two tables together explain each other. A single worker seals and stages at
+449 MB/s including the write, and the cutter can only feed it 375 MB/s, so one
+worker already has headroom and a second only covers the tail and the jitter.
+Everything past that is contending with the main thread for cores and for memory
+bandwidth, and the main thread is the one holding the whole pipeline up.
+
+The write is worth naming separately, since it is invisible in the table above.
+At one worker, staging costs 2,043 ms per 2 GiB, just over 1,000 MB/s: sealing
+alone is 2,522 ms and sealing plus staging is 4,565 ms (spread 4,475 to 4,579).
+At eight workers the writes overlap and the same 2 GiB costs 366 ms, which is
+5.6 GB/s and is the NTFS write-back cache rather than the disk. None of it
+reaches `prepare()`'s wall clock, because the workers have the idle time to
+absorb it.
+
+### What was deliberately not changed
+
+`poolSize()` returns `min(8, hardwareConcurrency)`, which is 8 on this machine.
+The measurement says 2. **The constant was left alone anyway**, for two reasons
+that are worth stating rather than quietly acting on:
+
+- The knee is at 2 only because the cutter is slow. Section 6 says nearly four
+  fifths of the cutter's time is I/O and memcpy, and the copy is already named as
+  removable. A pipeline whose main thread got twice as fast would want more
+  workers again, and a constant lowered now would have to be raised back.
+- These are `worker_threads` in one Node process, not Web Workers in a browser
+  tab. The scaling curve should carry over, since it is native crypto on the same
+  cores, but the 20 MB per worker will not: a browser Worker's floor cost is its
+  own, and a phone's is different again.
+
+The trigger for changing it: measure `prepare()` on a phone, on a file of a few
+hundred MB. If the knee is still at 2 there, drop `MAX_WORKERS` to 3, which keeps
+one worker of headroom for a faster cutter at well under half the memory. Phones
+commonly report 8 for `hardwareConcurrency`, so a phone opens the full pool and
+pays for all of it on the device with the least memory to spare.
+
+## 8. SeqCDC, considered and rejected on evidence
+
+[SeqCDC](https://cs.uwaterloo.ca/~alkiswan/papers/SeqCDC_Middleware24.pdf)
+replaces the gear-hash rolling hash with a scan for a run of monotonically
+increasing bytes. It is faster and it is simpler code, and it lands within 4
+percent of FastCDC's dedup ratio. Against that, its sequence length is a subtle
+parameter, and getting it wrong collapses the dedup ratio silently rather than
+failing, which for this product means transfers that quietly stop deduplicating
+with nothing anywhere to notice.
+
+The measurement is what settles it, and section 6 has it. **The rolling hash is
+1,168 ms of a 5,718 ms preparation, 20 percent.** That is the whole of what
+SeqCDC could touch, so even an infinitely fast cutter would leave 80 percent of
+preparation exactly where it is. Put against a transfer rather than a
+preparation, on a 50 MB/s tailnet where 2 GiB spends about 41 seconds on the
+wire, the rolling hash is under 3 percent of the job.
+
+The plan for this measurement set the bar at "under about a tenth of the total".
+Which side of that line the hash falls on depends on what "the total" means, and
+the honest answer is that it is over the line against preparation and under it
+against a transfer. The decision does not turn on picking one, because the same
+table names something better to do first:
+
+**The copying that surrounds the hash costs 1,974 ms, 69 percent more than the
+hash itself.** Removing it is the change `web/cdc.js` already proposes in its own
+`ponytail:` note, a preallocated window with `copyWithin` after each cut. It
+cannot change a single chunk boundary, so it carries none of SeqCDC's risk, and
+it is worth more.
+
+**SeqCDC is rejected.** Not because cutting is cheap, but because within cutting
+it is the smaller half, and the larger half is both safer and already specified.
+Reconsider it only after the copy is gone, when the hash would be roughly a third
+of a faster preparation and the trade would be a real one. Any reconsideration
+also has to answer the parameter question with a dedup measurement across two
+versions of a real file, not with a throughput number.
+
+## The open decisions
 
 ### Does `host` beat `embedded`?
 
@@ -388,3 +1098,55 @@ a desktop i9-14900K. A phone is the case where the ratio is thinnest and it is
 also the common sending device. Re-run section 2's script under a mobile
 browser, or take section 4 on a phone, before anyone concludes the margin is
 comfortable everywhere.
+
+### How many connections should the direct path open?
+
+**Undecided. The measurement in section 5 has not been taken.** `LINK_COUNT`
+stays at 4 and `CHANNELS_PER_LINK` at 2, which is where an argument put them. The
+argument is a good one and may well be right. It is not evidence, and the sweep
+is cheap once two devices share a tailnet.
+
+### How many workers should seal?
+
+**The knee is at 2 on this machine. `poolSize()` asks for 8.**
+
+The cap itself is vindicated. `sealPool`'s comment predicts that a machine with
+four times the cores would hold four times the memory for no more throughput than
+memory bandwidth allows, and section 7's first table shows exactly that: 16
+workers reach 3,121 MB/s against 8 workers' 3,137 MB/s, at nearly twice the peak
+memory.
+
+What the comment does not anticipate is that a real file never asks the pool for
+that. The main thread reads and cuts at 375 MB/s and a single worker seals and
+stages at 449 MB/s, so the pool is starved from the first chunk to the last, and
+six of its eight workers are memory that never becomes throughput. Preparation at
+8 workers is 15 percent slower than at 2 and holds 100 MB more.
+
+The constant is unchanged, because the knee is at 2 only for as long as the
+cutter is slow, and because a Node thread's memory is not a browser Worker's.
+Section 7 records the trigger: measure `prepare()` on a phone, and if the knee is
+still at 2, drop `MAX_WORKERS` to 3.
+
+### Is SeqCDC worth adopting?
+
+**No, on the evidence in section 8.** The rolling hash it would replace is 20
+percent of preparing a file and under 3 percent of sending one over a tailnet.
+The copying that surrounds the hash costs 69 percent more than the hash does, is
+already named for removal in `web/cdc.js`, and cannot move a chunk boundary,
+where SeqCDC's whole risk is that a badly chosen sequence length moves all of
+them and says nothing.
+
+**The reasoning this contradicts is the assumption that cutting is where the CPU
+goes when a file is prepared.** It is not. Reading the file is a larger share
+than the rolling hash, and so is the memcpy the chunker does around it. Any
+future attempt to make preparation faster should start from section 6's table
+rather than from the intuition that content-defined chunking is expensive.
+
+**Open question this leaves behind.** Every number in sections 6, 7 and 8 was
+taken on Node on a desktop i9-14900K, and the shares are what matter rather than
+the absolute rates. A phone changes both halves of the ratio, and not by the same
+factor: the cut loop is JavaScript and the sealing is native AES and SHA with
+hardware support. If the cut loop slows down more than the crypto does, the case
+against SeqCDC gets stronger and the case for a smaller pool gets stronger with
+it. If it slows down less, both weaken. Re-run section 6 under a mobile browser
+before treating either conclusion as settled off this desk.

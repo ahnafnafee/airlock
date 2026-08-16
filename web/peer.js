@@ -36,7 +36,9 @@ export const WIRE = {
 
 // How many connections a transfer opens, and how many channels each carries.
 // Both are named because they are what a throughput measurement varies, and
-// either may turn out to be 1.
+// either may turn out to be 1. docs/benchmarks.md section 5 holds that sweep,
+// including what its result has to decide and how to keep a relayed run or a
+// receiver that already holds the file from answering the question wrongly.
 export const LINK_COUNT = 4;
 export const CHANNELS_PER_LINK = 2;
 

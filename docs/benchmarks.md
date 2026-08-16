@@ -1169,3 +1169,148 @@ hardware support. If the cut loop slows down more than the crypto does, the case
 against SeqCDC gets stronger and the case for a smaller pool gets stronger with
 it. If it slows down less, both weaken. Re-run section 6 under a mobile browser
 before treating either conclusion as settled off this desk.
+
+---
+
+# Live end-to-end measurements, two devices
+
+Everything above this line was measured in isolation, a phase at a time. This
+section is the whole pipeline running: a file picked on one device, sealed,
+handed to another device over the peer path, and opened there, with the phases
+timed separately so it is clear which one costs what.
+
+## What was measured against
+
+Two genuinely distinct devices against one server, using the fact that token
+mode names a device by its remote address. Device A is `127.0.0.1`, device B is
+`::1`. Different hosts, and because they are different origins, separate browser
+storage, separate identities, separate event streams and a real WebRTC session
+between them.
+
+**Read the caveat before the numbers.** Both peers run inside one browser on one
+machine, so they share a CPU and the same SCTP stack. This measures the software
+path. It is not a LAN measurement, and the connection-count result in particular
+cannot be carried over to two machines, because a fan-out across connections is
+least able to help when both ends are competing for the same cores.
+
+Chunking parameters are the shipped defaults: 512 KiB minimum, 1 MiB target,
+8 MiB maximum. Every transfer below was verified by comparing a SHA-256 of the
+assembled file against the sender's, and every one matched.
+
+## The three phases
+
+**Secure**, meaning cut into content-defined chunks, seal each under AES-256-GCM,
+and write the sealed chunks to this device's own storage:
+
+| Size | Time | Rate |
+| --- | --- | --- |
+| 8 MB | 202 ms | 41 MB/s |
+| 16 MB | 310 ms | 52 MB/s |
+| 32 MB | 410 ms | 78 MB/s |
+| 128 MB | 1.5 to 1.8 s | 76 MB/s |
+
+Sealing alone, without the write to storage, is considerably faster and is what
+the crypto itself costs:
+
+| Size | Chunks | Rate |
+| --- | --- | --- |
+| 1 MB | 1 | 29 MB/s |
+| 8 MB | 4 | 149 MB/s |
+| 32 MB | 20 | 242 MB/s |
+| 128 MB | 74 | 305 MB/s |
+| 256 MB | 138 | 304 MB/s |
+
+Small files are dominated by starting the worker pool, which is why 1 MB looks
+slow and is not. The rate plateaus near 304 MB/s.
+
+**Transfer**, peer to peer, with the server holding no chunk at any point:
+
+| Size | Session setup | Moving | Rate while moving |
+| --- | --- | --- | --- |
+| 16 MB | 662 ms | 7.0 s | 2.3 MB/s |
+| 128 MB | 662 ms | 11.4 s | 11.2 MB/s |
+
+Opening a session costs about two thirds of a second and does not grow with the
+file. The 16 MB row is slower per byte than the 128 MB row because the watcher
+taking the measurement polled ten times a second during it, and each poll lists a
+directory on the same disk the transfer is writing to. That is a lesson about
+measuring, not about the product: the instrument was a meaningful share of the
+load. The 128 MB row polled once a second and is the trustworthy one.
+
+**Assemble**, meaning decrypt every chunk, verify its tag, and write one file:
+
+| Size | Time | Rate |
+| --- | --- | --- |
+| 8 MB | 115 ms | 70 MB/s |
+| 32 MB | 314 ms | 102 MB/s |
+| 128 MB | 1.24 s | 104 MB/s |
+
+## Where the time actually goes
+
+Sealing runs about 27 times faster than the transport moves bytes, and assembly
+about 9 times faster. **The encryption is not the bottleneck and is not close to
+being it.** A 128 MB transfer spends 1.8 s being secured, 11.4 s in flight and
+1.2 s being opened.
+
+So the question is what bounds the transport. A loopback data channel pair was
+benchmarked directly, with no Airlock code in the path, using Airlock's own
+parameters and then varying them:
+
+| Fragment | Channels per link | Links | Rate |
+| --- | --- | --- | --- |
+| 16 KiB | 2 | 4 | 18 to 20 MB/s |
+| 32 KiB | 2 | 4 | 17 MB/s |
+| 64 KiB | 2 | 4 | 19 MB/s |
+| 64 KiB | 1 | 4 | 21 MB/s |
+| 64 KiB | 4 | 4 | 21 MB/s |
+| 64 KiB | 2 | 1 | 23 MB/s |
+| 64 KiB | 2 | 8 | 18 MB/s |
+
+Two things fall out of that table.
+
+**The ceiling is the data channel, at roughly 20 MB/s here, and it barely moves.**
+Quadrupling the fragment size changes nothing. Neither does the number of
+channels. Airlock's 11.2 MB/s is a little over half of that ceiling, and the
+remaining gap is its own per-chunk work: reading each sealed chunk from the
+sender's storage, reassembling fragments on the other side, and writing each
+chunk to the receiver's storage.
+
+**The fan-out does not pay for itself in this configuration.** One link measured
+faster than four, and eight measured slowest of all. That is the expected shape
+when both ends share a CPU, and it is exactly why this result must not be used to
+change `LINK_COUNT`. The question the fan-out exists to answer is whether several
+connections beat one *between two machines*, where the ends do not compete, and
+that has not been measured. Measure it there before touching the constant.
+
+## Content type
+
+At 32 MB, sealing only:
+
+| Content | Chunks | Distinct chunks | Rate |
+| --- | --- | --- | --- |
+| Incompressible random | 21 | 21 | 235 MB/s |
+| All zeros | 4 | 1 | 258 MB/s |
+| Repeating log lines | 4 | 4 | 296 MB/s |
+| Repeated 64 KiB blocks | 5 | 5 | 307 MB/s |
+
+Type barely moves the sealing rate, which is expected: AES-GCM does not care what
+it is encrypting. What type moves is **how many distinct chunks come out**, and
+that is what decides how many bytes ever leave the device. Thirty two megabytes of
+zeros reduces to one distinct chunk, so a re-send of it, or a send of anything
+else that contains the same run, transfers nothing.
+
+## Delta
+
+A 16 MB file, then the same file with a 256 KiB slice replaced at its midpoint:
+**7 of 8 chunks were already held**, so one chunk moved for a change of one and a
+half percent of the file. Content-defined chunking re-synchronized immediately
+either side of the edit rather than shifting every boundary after it.
+
+## What these numbers do not tell you
+
+- **Nothing here crossed a network.** No LAN, no tailnet, no second machine.
+- The connection-count sweep is measured in the one configuration where a
+  fan-out is least likely to help. It says nothing about two machines.
+- Chrome only. Firefox and Safari data channel throughput is unmeasured, and
+  Safari's is the one most likely to differ.
+- No mobile device, so nothing about a phone's crypto rate or radio.

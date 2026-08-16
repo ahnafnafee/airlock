@@ -18,9 +18,39 @@ identity. Tailscale already solves all three, so Airlock is what remains once
 Tailscale is assumed: an availability layer, a deduplicating content store, and
 a client good enough that nobody thinks about it.
 
-Store-and-forward, not peer-to-peer. The receiver may be asleep, so bytes wait
-on the server. That single decision makes both clients pure HTTP clients, which
-is why the web app can carry almost the whole product.
+**Transfers are peer to peer. The server is a queue, not a courier.**
+
+File content never touches the server. The sending device chunks, hashes and
+seals locally, then holds the sealed chunks on its own disk. The server records
+that a transfer is pending, who it is for, and how much of it has arrived. When
+the two devices are both online, they connect directly across the tailnet over a
+WebRTC data channel and the bytes move in one hop.
+
+**Resumability is what makes this practical.** The two devices do not have to
+overlap for a whole transfer, only repeatedly. A 20 GB file can cross in five
+separate ten-minute windows, resuming exactly where it stopped, because the
+server holds a progress bitmap over the transfer's chunk list and both ends stage
+their partial work in the Origin Private File System, which survives a reload and
+a reboot.
+
+So the sender is not required to sit and wait. Opening Airlock drains whatever is
+pending to whoever is now reachable.
+
+The honest cost: some overlap must eventually happen. If the sender never opens
+the app again, a queued transfer never completes. And staging costs local disk on
+both ends while a transfer is in flight, on hardware the owner controls rather
+than rented hardware.
+
+On a tailnet the direct path is unusually cheap to reach: ICE finds the `100.x`
+addresses as host candidates, so there is no STUN and no TURN, and the server's
+only role in a transfer is to pass two session descriptions it cannot interpret.
+
+**One deliberate escape hatch.** A per-transfer checkbox, off by default, spools
+the sealed chunks to the server so a transfer completes without the sender ever
+being reachable again. It exists for the case where availability genuinely
+matters more than principle, and it is never used unless it is ticked. That is
+the only path by which content reaches the server, and even then it is ciphertext
+under a key the server does not have.
 
 ### Goals
 
@@ -258,10 +288,28 @@ devices can read.
 
 History is capped at 1000 entries and 90 days, whichever binds first.
 
+### The life of a transfer
+
+1. **Queued.** The sender chunks and seals the file, stages it locally, and tells
+   the server a transfer is pending: recipients, chunk ids, and the sealed
+   metadata, chunk list and thumbnail. No content.
+2. **Announced.** The recipient is notified, by the live event stream if it is
+   connected and by push if it is not. The notification carries the real filename
+   and thumbnail, decrypted on the receiving device.
+3. **Delivered, possibly in pieces.** Whenever both devices are online, they
+   connect directly and the sender sends whatever the progress bitmap says is
+   still missing. An interrupted transfer resumes on the next overlap.
+4. **Completed or declined.** On completion the receiver assembles and saves,
+   both ends drop their staged copies, and a tombstone records it. A decline ends
+   it immediately and nothing further is sent.
+
+A sender never chooses a transport. It picks a destination, and delivery happens
+when delivery becomes possible.
+
 ### Declining
 
-A recipient can decline a transfer, from the notification without opening the
-app, or from a button in the inbox.
+A recipient can decline a transfer, from the live offer, from the notification
+without opening the app, or from a button in the inbox.
 
 Declining is a server-side record, not a dismissed notification. A Decline button
 that only closed a notification would be a dismiss wearing a stronger word: the
@@ -306,21 +354,20 @@ generate them, because it cannot see the image; it only stores what it is given.
 
 ## 6. Relays
 
-An Airlock instance can be configured with peer instances. When a transfer
-completes, the server pushes its records and any chunks the peer lacks to each
-peer, so a transfer reaches devices that talk to a different instance.
+A relay is a second Airlock instance that shares the queue, so devices talking to
+different instances can still reach each other.
 
-Relay links are authenticated the same way clients are: the peer is a tailnet
-node, verified by `WhoIs`, and must appear in the relay allowlist. Relaying does
-not weaken the reachability property, because a relay is just another
-allowlisted caller.
+Because content never passes through a server, a relay forwards **records and
+signalling, not files**: pending transfers, progress bitmaps, presence, and
+session descriptions. Two devices introduced by way of a relay still connect
+directly to each other.
 
-Chunks transfer between relays by the same dedup negotiation clients use, so a
-relay never re-sends a chunk the peer already holds. Ciphertext moves unchanged;
-relays hold no keys and can read nothing.
+Relay links authenticate the way clients do: the peer is a tailnet node verified
+by `WhoIs` and present in the relay allowlist, so relaying does not weaken the
+reachability property.
 
-Clients may be configured with several server URLs and use the first reachable
-one, which is what makes a relay useful when the primary instance is down.
+Clients may be configured with several instance URLs and use the first reachable
+one, which is what makes a relay useful when the primary is down.
 
 ---
 
@@ -349,6 +396,13 @@ DELETE /api/transfer/{id}                 -> 204, or 404 if not this node's tran
 POST   /api/transfer/{id}/decline         -> 204, hides it here and deletes it
                                              once every addressee has declined
 GET    /api/history                       -> [tombstones this node sent or received]
+
+GET    /api/presence                      -> [node names with an open stream]
+POST   /api/signal   {to, kind, payload}  -> 204, relayed to that node's stream;
+                                             the payload is opaque to the server
+GET    /api/queue                         -> [pending transfers this node sent]
+PUT    /api/transfer/{id}/progress        <- base64 bitmap, one bit per chunk,
+                                             written by the receiver as it stages
 
 POST   /api/push/subscribe {sub}          -> 204
 POST   /api/relay/offer    {transfer}     -> {missing: [cid...]}   relay peers only
@@ -469,6 +523,8 @@ iOS-specific code will be written.
 | `web/crypto.js` | KDF hierarchy, convergent sealing, AAD domains |
 | `web/cdc.js` | FastCDC boundary detection |
 | `web/api.js` | Typed wrapper over the HTTP API |
+| `web/peer.js` | WebRTC data channel, live offers, direct chunk transfer |
+| `events.go` | The nudge stream, presence, and signalling relay |
 | `web/app.js` | Application shell and view routing |
 | `web/ui/*.js` | Individual views: send, inbox, history, devices |
 | `web/sw.js` | Decrypt-on-download, push, share target, background fetch |

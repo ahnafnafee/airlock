@@ -69,7 +69,9 @@ func (s *Server) routes() {
 	files := http.FileServerFS(s.cfg.Static)
 	g := s.gate
 
-	s.mux.HandleFunc("GET /api/whoami", g(s.whoami))
+	// Reachable before approval so a new device can render the pairing screen
+	// rather than an error. It reports the approval rather than assuming it.
+	s.mux.HandleFunc("GET /api/whoami", s.identified(s.whoami))
 	s.mux.HandleFunc("GET /api/config", g(s.config))
 	s.mux.HandleFunc("POST /api/check", g(s.postCheck))
 
@@ -100,47 +102,100 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/signal", g(s.signal))
 
 	// The file_handlers launch URL has to render the app rather than 404.
-	s.mux.HandleFunc("GET /open", g(func(w http.ResponseWriter, r *http.Request) {
+	s.mux.HandleFunc("GET /open", s.open(func(w http.ResponseWriter, r *http.Request) {
 		clone := r.Clone(r.Context())
 		clone.URL.Path = "/"
 		files.ServeHTTP(w, clone)
 	}))
-	s.mux.HandleFunc("GET /", g(files.ServeHTTP))
+	s.mux.HandleFunc("GET /", s.open(files.ServeHTTP))
 }
 
 type identKey struct{}
 
-// gate runs before every handler, static assets included. There is deliberately
-// no ungated route on this mux.
+// crossSiteBlocked reports whether a browser has labelled this request as coming
+// from another origin in a way that must not be honored.
+//
+// The identity here belongs to the connection rather than to whoever asked the
+// browser to open it, so an allowlisted device browsing a hostile page would
+// otherwise carry its own authority into a forged request. A cross-site POST
+// needs no preflight and no readable response for its side effect to land, and
+// /api/check is write-once, so one such request could seal a verifier nobody
+// can decrypt.
+//
+// Following a link is not that attack. A top-level navigation that only reads
+// is how anyone opens the app at all, whether from a chat message, a bookmark,
+// a QR code, or the tailnet device list, and turning those away makes the
+// address unusable rather than safe. So a document navigation with a safe
+// method is allowed from any origin and everything else must be same-origin.
+// Framing stays blocked because an embedded page is labelled iframe rather than
+// document.
+//
+// Non-browser callers such as curl and the service worker send no label at all
+// and are unaffected.
+func crossSiteBlocked(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+		return false
+	}
+	topLevel := r.Header.Get("Sec-Fetch-Mode") == "navigate" &&
+		r.Header.Get("Sec-Fetch-Dest") == "document"
+	safe := r.Method == http.MethodGet || r.Method == http.MethodHead
+	return !topLevel || !safe
+}
+
+// gate guards everything that holds data. The allow flag is read from the
+// registry on every request, so a revocation needs no restart and there is no
+// cached decision to expire.
 func (s *Server) gate(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+	return s.identified(func(w http.ResponseWriter, r *http.Request) {
+		id := who(r)
+		if !s.cfg.Devices.Seen(id.Node, id.User).Allowed {
+			http.Error(w, "device not approved", http.StatusForbidden)
+			return
+		}
+		h(w, r)
+	})
+}
+
+// identified resolves the caller and records the device without requiring it to
+// be approved. Registration is not authorization: recording an unapproved
+// device is what lets an approved one offer it on the pairing screen, and a
+// device that has just appeared has to be able to read back that it is waiting.
+// Without that it would have no way to say so, and its owner would meet a bare
+// error where the pairing screen belongs.
+func (s *Server) identified(h http.HandlerFunc) http.HandlerFunc {
+	return s.open(func(w http.ResponseWriter, r *http.Request) {
 		id, ok := s.cfg.Ident(r)
 		if !ok {
 			http.Error(w, "not authorized", http.StatusForbidden)
 			return
 		}
-		// The identity belongs to the connection, not to whoever asked the
-		// browser to open it, so an allowlisted device browsing a hostile page
-		// would otherwise carry its own authority into a forged request. A
-		// cross-site POST needs no preflight and no readable response for its
-		// side effect to land, and /api/check is write-once, so one such request
-		// could seal a verifier nobody can decrypt. Browsers label the origin of
-		// every request they make; non-browser callers such as curl and the
-		// service worker send no label at all and are unaffected.
-		if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+		s.cfg.Devices.Seen(id.Node, id.User)
+		h(w, r.WithContext(context.WithValue(r.Context(), identKey{}, id)))
+	})
+}
+
+// open serves the app shell and its assets: the same bytes for everyone, with
+// no transfer, chunk or device state among them.
+//
+// These cannot be gated on identity even in principle. A module service
+// worker's script request is issued with credentials omitted, so the session
+// cookie is not attached and an already-authenticated page still could not
+// register its own worker. Anything that holds data goes through gate instead.
+func (s *Server) open(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if crossSiteBlocked(r) {
 			http.Error(w, "cross-site request", http.StatusForbidden)
 			return
 		}
-		// Registration is not authorization. Recording an unapproved device is
-		// what lets the pairing screen offer it, and the allow flag is read from
-		// the registry on every request so a revocation needs no restart and
-		// there is no cached decision to expire.
-		dev := s.cfg.Devices.Seen(id.Node, id.User)
-		if !dev.Allowed {
-			http.Error(w, "device not approved", http.StatusForbidden)
-			return
-		}
-		h(w, r.WithContext(context.WithValue(r.Context(), identKey{}, id)))
+		// The assets are embedded in the binary and carry no version in their
+		// names, so nothing distinguishes one build's app.js from the next.
+		// Embedding also leaves every file with a zero modification time, which
+		// gives a browser no validator to ask about and licenses it to guess a
+		// lifetime instead. Together those mean an upgraded server would keep
+		// serving the old client until somebody thought to reload by hand.
+		w.Header().Set("Cache-Control", "no-cache")
+		h(w, r)
 	}
 }
 
@@ -179,16 +234,14 @@ func fail(w http.ResponseWriter, err error) bool {
 
 func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
 	id := who(r)
-	paired := false
+	paired, allowed := false, false
 	for _, d := range s.cfg.Devices.List() {
 		if d.Node == id.Node {
-			paired = d.Paired
+			paired, allowed = d.Paired, d.Allowed
 		}
 	}
-	// allowed is unconditionally true: the gate is the only way into this
-	// handler, and it turns a disallowed device away before it gets here.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"node": id.Node, "user": id.User, "allowed": true, "paired": paired,
+		"node": id.Node, "user": id.User, "allowed": allowed, "paired": paired,
 	})
 }
 

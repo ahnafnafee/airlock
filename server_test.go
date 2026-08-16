@@ -40,7 +40,10 @@ func newTestServerWithLimits(t *testing.T, allow bool, maxRecord int, maxTotal i
 	if err != nil {
 		t.Fatal(err)
 	}
-	static := fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("<h1>hi</h1>")}}
+	static := fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte("<h1>hi</h1>")},
+		"sw.js":      &fstest.MapFile{Data: []byte("// worker")},
+	}
 	srv := NewServer(ServerConfig{
 		Chunks: chunks, Transfers: transfers, Devices: devices, Push: &Pusher{},
 		Events: NewEvents(),
@@ -71,7 +74,7 @@ func do(t *testing.T, s *Server, method, path, body string) *httptest.ResponseRe
 
 func TestGateBlocksEverythingWhenIdentityFails(t *testing.T) {
 	s, _ := newTestServer(t, false)
-	for _, p := range []string{"/", "/index.html", "/api/whoami", "/api/config", "/api/inbox", "/api/devices"} {
+	for _, p := range []string{"/api/whoami", "/api/config", "/api/inbox", "/api/devices"} {
 		if got := do(t, s, "GET", p, "").Code; got != http.StatusForbidden {
 			t.Fatalf("GET %s = %d, want 403", p, got)
 		}
@@ -86,11 +89,19 @@ func TestRevokedDeviceIsBlockedOnItsNextRequest(t *testing.T) {
 	if err := devices.SetAllowed("pixel", false); err != nil {
 		t.Fatal(err)
 	}
-	// No restart, no cache to expire. Static assets are gated too.
-	for _, p := range []string{"/api/whoami", "/api/inbox", "/", "/index.html"} {
+	// No restart and no cache to expire: the flag is read per request.
+	for _, p := range []string{"/api/inbox", "/api/config", "/api/devices"} {
 		if got := do(t, s, "GET", p, "").Code; got != http.StatusForbidden {
 			t.Fatalf("after revoke, GET %s = %d, want 403", p, got)
 		}
+	}
+	// Revocation has to stay visible to the device it happened to. A revoked
+	// device that could not read its own status would show a broken app instead
+	// of the screen that says what to do about it.
+	var me map[string]any
+	json.Unmarshal(do(t, s, "GET", "/api/whoami", "").Body.Bytes(), &me)
+	if me["allowed"] != false {
+		t.Fatalf("whoami after revoke reported allowed = %v", me["allowed"])
 	}
 }
 
@@ -236,6 +247,150 @@ func TestGateRejectsBrowserLabelledCrossSiteRequests(t *testing.T) {
 	}
 	if code := do(t, s, "POST", "/api/check", "real-bytes").Code; code != http.StatusNoContent {
 		t.Fatalf("check should still be unset, got %d", code)
+	}
+}
+
+// A second device meets the pairing screen, not an error. The shell has to
+// load before approval or there is nothing to render the screen with, and
+// whoami has to answer or the shell cannot tell waiting from broken. Everything
+// that holds data still refuses.
+func TestUnapprovedDeviceGetsTheShellAndItsStatus(t *testing.T) {
+	s, devices := newTestServer(t, true)
+	do(t, s, "GET", "/api/whoami", "") // records the device
+	if err := devices.SetAllowed("pixel", false); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := do(t, s, "GET", "/", "").Code; code != http.StatusOK {
+		t.Fatalf("app shell = %d, want 200: an unapproved device cannot render the pairing screen without it", code)
+	}
+
+	w := do(t, s, "GET", "/api/whoami", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("whoami = %d, want 200", w.Code)
+	}
+	var me struct {
+		Node    string `json:"node"`
+		Allowed bool   `json:"allowed"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &me); err != nil {
+		t.Fatal(err)
+	}
+	if me.Allowed {
+		t.Fatal("whoami reported an unapproved device as allowed")
+	}
+	if me.Node == "" {
+		t.Fatal("whoami gave no node name, so the pairing screen cannot name the device to approve")
+	}
+
+	// Asking who you are is also how you get listed for approval.
+	found := false
+	for _, d := range s.cfg.Devices.List() {
+		if d.Node == me.Node {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the device is not in the registry, so no approved device can offer it")
+	}
+
+	for _, path := range []string{"/api/config", "/api/inbox", "/api/devices", "/api/history"} {
+		if code := do(t, s, "GET", path, "").Code; code != http.StatusForbidden {
+			t.Fatalf("%s = %d, want 403 for an unapproved device", path, code)
+		}
+	}
+}
+
+// A module service worker's script request carries no cookie, so the shell and
+// its assets answer without one. Nothing behind that door holds data.
+func TestShellAnswersWithoutIdentity(t *testing.T) {
+	s, _ := newTestServer(t, false)
+	unauthenticated := func(method, path string) int {
+		r := httptest.NewRequest(method, path, nil)
+		r.Header.Set("Sec-Fetch-Site", "same-origin")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		return w.Code
+	}
+	for _, path := range []string{"/", "/open", "/sw.js"} {
+		if code := unauthenticated("GET", path); code != http.StatusOK {
+			t.Fatalf("%s without identity = %d, want 200", path, code)
+		}
+	}
+	for _, path := range []string{"/api/whoami", "/api/config", "/api/inbox"} {
+		if code := unauthenticated("GET", path); code != http.StatusForbidden {
+			t.Fatalf("%s without identity = %d, want 403", path, code)
+		}
+	}
+}
+
+// Embedded assets have no version in their names and no modification time, so
+// without this a browser is free to invent a lifetime for them and keep running
+// an old client against an upgraded server.
+func TestShellAssetsAreRevalidated(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	for _, path := range []string{"/", "/sw.js"} {
+		if got := do(t, s, "GET", path, "").Header().Get("Cache-Control"); got != "no-cache" {
+			t.Fatalf("%s Cache-Control = %q, want no-cache", path, got)
+		}
+	}
+}
+
+// Somebody opening the app by following a link is the normal way in, and a
+// browser labels that arrival cross-site because the previous page was another
+// origin. Refusing it makes the address unusable from a chat message, a
+// bookmark or a QR code, so the read-only top-level navigation is allowed while
+// everything a hostile page can fire without leaving itself is not.
+func TestGateAllowsCrossSiteTopLevelNavigation(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	nav := func(r *http.Request) *http.Request {
+		r.Header.Set("Sec-Fetch-Site", "cross-site")
+		r.Header.Set("Sec-Fetch-Mode", "navigate")
+		r.Header.Set("Sec-Fetch-Dest", "document")
+		return r
+	}
+	cases := []struct {
+		name string
+		req  func() *http.Request
+		want int
+	}{
+		{"the app itself", func() *http.Request {
+			return nav(httptest.NewRequest("GET", "/", nil))
+		}, http.StatusOK},
+		{"the file handler launch path", func() *http.Request {
+			return nav(httptest.NewRequest("GET", "/open", nil))
+		}, http.StatusOK},
+		// A navigation is a whole-tab move the person can see. Framing is not,
+		// and it is how a hostile page would read the app in place, so the
+		// exemption must not extend to it.
+		{"framed in a hostile page", func() *http.Request {
+			r := nav(httptest.NewRequest("GET", "/", nil))
+			r.Header.Set("Sec-Fetch-Dest", "iframe")
+			return r
+		}, http.StatusForbidden},
+		// A cross-site form post arrives labelled as a navigation too, so the
+		// method is what separates reading from writing.
+		{"a form post claiming to be a navigation", func() *http.Request {
+			return nav(httptest.NewRequest("POST", "/api/check", strings.NewReader("evil-bytes")))
+		}, http.StatusForbidden},
+		// Subresources are the actual CSRF surface: fetch from a hostile page
+		// carries the same labels minus the navigation mode.
+		{"a fetch from a hostile page", func() *http.Request {
+			r := httptest.NewRequest("GET", "/api/whoami", nil)
+			r.Header.Set("Sec-Fetch-Site", "cross-site")
+			r.Header.Set("Sec-Fetch-Mode", "cors")
+			r.Header.Set("Sec-Fetch-Dest", "empty")
+			return r
+		}, http.StatusForbidden},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, c.req())
+			if w.Code != c.want {
+				t.Fatalf("got %d, want %d", w.Code, c.want)
+			}
+		})
 	}
 }
 

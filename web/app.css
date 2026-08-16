@@ -144,10 +144,14 @@ nav button[aria-current="page"] { color: var(--bone); border-top-color: var(--so
     order: -1;
     min-height: 100vh;
     flex-direction: column;
-    justify-content: center;
+    /* Aligned to the top, not centered down the rail. Centering reads on a
+       phone, where the bar is the width of the screen, but down the side of a
+       tall window it strands the labels several hundred pixels below the first
+       line they label. */
+    justify-content: flex-start;
     border-top: 0;
     border-right: 1px solid var(--seam);
-    padding: 0 4px;
+    padding: var(--gap) 4px 0;
   }
   nav button {
     flex: 0;

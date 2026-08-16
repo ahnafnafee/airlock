@@ -1,7 +1,7 @@
 # Benchmarks
 
 Several design decisions were left open until they could be measured: whether
-the `host` Tailscale mode really beats `embedded`, whether the sealing toggle
+the `host` Tailscale mode really beats `embedded`, whether disabling sealing
 buys anything at all, how many connections the direct path should open, how many
 workers should seal, and whether the chunker's rolling hash is worth replacing.
 This file records what was measured, on what, and what the numbers say about each
@@ -32,7 +32,7 @@ reported too, because on one of these the spread is the finding.
 ## 1. Server chunk store, measured
 
 ```
-go test -bench=. -benchmem -run='^$' -count=5 ./...
+go test -bench='.' -benchmem -run='^$' -count=5 ./...
 ```
 
 `BenchmarkChunkStorePut` times one `ChunkStore.Put`: a temp file created, the
@@ -325,10 +325,12 @@ line printed with its base URL and tag. So the commands run and the guard works.
 What has not happened is the measurement itself. No part of the table above was
 taken over a tailnet, and loopback throughput says nothing about either mode.
 
-## 4. Sealed against plaintext end to end, not yet measured
+## 4. Sealed against the internal plaintext control, not yet measured
 
-Needs a browser and the same tailnet. Upload one file twice with a warm cache,
-once with the sealing toggle on and once off, and use the Performance panel to
+Needs a browser and the same tailnet. The product UI has no sealing toggle and
+must not gain one for this measurement. Use a local benchmark-only harness that
+calls the upload pipeline once with `MODE_SEALED` and once with `MODE_PLAIN`,
+against disposable data and a warm cache, then use the Performance panel to
 separate time inside `chunkIdentity` and `sealChunk` from time inside `fetch`.
 
 | | Wall clock | Crypto time | Network time |
@@ -338,8 +340,8 @@ separate time inside `chunkIdentity` and `sealChunk` from time inside `fetch`.
 
 Use a file of at least a few hundred MB. At the numbers in section 2 the whole
 crypto contribution for a 100 MB file is about 0.13 seconds, and the part the
-toggle removes from the critical path is about 0.01 seconds. A small file will
-not resolve that above the noise.
+plaintext control removes from the critical path is about 0.01 seconds. A small
+file will not resolve that above the noise.
 
 Separate the two passes in the trace rather than totalling `chunkIdentity` and
 `sealChunk` together. Pass one runs before the first `fetch` and is the only
@@ -1016,26 +1018,26 @@ At eight workers the writes overlap and the same 2 GiB costs 366 ms, which is
 reaches `prepare()`'s wall clock, because the workers have the idle time to
 absorb it.
 
-### What was deliberately not changed
+### Follow-up after removing the cutter copy
 
-`poolSize()` returns `min(8, hardwareConcurrency)`, which is 8 on this machine.
-The measurement says 2. **The constant was left alone anyway**, for two reasons
-that are worth stating rather than quietly acting on:
+The old two-worker knee depended on the old 375 MB/s cutter, exactly as the
+analysis above predicted. After the reusable window landed, the real cutter,
+pool scheduler and crypto were rerun together over a deterministic 256 MiB
+input. This follow-up used `worker_threads` and omitted staging so it isolates
+the new handoff between cutting and sealing:
 
-- The knee is at 2 only because the cutter is slow. Section 6 says nearly four
-  fifths of the cutter's time is I/O and memcpy, and the copy is already named as
-  removable. A pipeline whose main thread got twice as fast would want more
-  workers again, and a constant lowered now would have to be raised back.
-- These are `worker_threads` in one Node process, not Web Workers in a browser
-  tab. The scaling curve should carry over, since it is native crypto on the same
-  cores, but the 20 MB per worker will not: a browser Worker's floor cost is its
-  own, and a phone's is different again.
+| Workers | Median wall clock | MiB/s | Spread |
+| --- | --- | --- | --- |
+| 1 | 443.6 ms | 577.1 | 437.1 to 471.6 ms |
+| 2 | 328.1 ms | 780.2 | 321.6 to 342.5 ms |
+| 4 | **297.8 ms** | **859.5** | 286.0 to 311.9 ms |
+| 8 | 316.7 ms | 808.3 | 291.1 to 332.0 ms |
 
-The trigger for changing it: measure `prepare()` on a phone, on a file of a few
-hundred MB. If the knee is still at 2 there, drop `MAX_WORKERS` to 3, which keeps
-one worker of headroom for a faster cutter at well under half the memory. Phones
-commonly report 8 for `hardwareConcurrency`, so a phone opens the full pool and
-pays for all of it on the device with the least memory to spare.
+The knee moved from two to four. Eight remained slower and held twice the peak
+chunk memory, so `MAX_WORKERS` is now 4. A phone remains worth measuring because
+a browser Worker's base memory and a mobile CPU's JavaScript-to-native balance
+differ from Node, but high-core devices no longer pay for eight workers without
+measured throughput.
 
 ## 8. SeqCDC, considered and rejected on evidence
 
@@ -1060,11 +1062,13 @@ the honest answer is that it is over the line against preparation and under it
 against a transfer. The decision does not turn on picking one, because the same
 table names something better to do first:
 
-**The copying that surrounds the hash costs 1,974 ms, 69 percent more than the
-hash itself.** Removing it is the change `web/cdc.js` already proposes in its own
-`ponytail:` note, a preallocated window with `copyWithin` after each cut. It
-cannot change a single chunk boundary, so it carries none of SeqCDC's risk, and
-it is worth more.
+**The copying that surrounded the hash cost 1,974 ms, 69 percent more than the
+hash itself.** It was removed with a reusable two-window buffer that compacts
+only when its second window fills. On a deterministic 128 MiB input using the
+real defaults and 64 KiB source reads, median `chunkStream` throughput rose from
+702.7 to 1,089.9 MiB/s, a 55 percent improvement. All 65 chunk boundaries were
+identical before and after. The output chunk still owns its buffer, so it can be
+transferred to a seal worker without another structured-clone copy.
 
 **SeqCDC is rejected.** Not because cutting is cheap, but because within cutting
 it is the smaller half, and the larger half is both safer and already specified.
@@ -1080,7 +1084,7 @@ versions of a real file, not with a throughput number.
 **Undecided. The measurement in section 3 has not been taken.** The default
 should not be changed on the strength of the argument alone.
 
-### Is the sealing toggle worth anything?
+### Is disabling sealing worth anything?
 
 **The prediction recorded before the run was that encryption would not be
 measurable against network time. The conclusion holds. The reasoning behind it
@@ -1106,11 +1110,10 @@ unoverlapped, and pass one is the hash, which the toggle cannot remove. So:
 - The remaining 0.466 ms per MiB, the AES-GCM itself, is already hidden behind
   four in-flight uploads and would only surface on a link past 12 gigabits.
 
-So the toggle stays, and it is not a performance setting. Turning sealing off
-buys well under one percent of a transfer and gives up the entire threat model.
-The UI reflects that: the control is labeled by what it does to secrecy, its off
-state states the consequence in `--breach` rather than softening it, and no
-speed claim appears anywhere near it.
+So the product control is gone. Turning sealing off buys well under one percent
+of a transfer and gives up the entire threat model. `MODE_PLAIN` stays only as
+the internal benchmark baseline and as a refusal fixture; the Send view always
+selects `MODE_SEALED`.
 
 **Open question this file leaves behind.** Every crypto number here was taken on
 a desktop i9-14900K. A phone is the case where the ratio is thinnest and it is
@@ -1127,39 +1130,32 @@ is cheap once two devices share a tailnet.
 
 ### How many workers should seal?
 
-**The knee is at 2 on this machine. `poolSize()` asks for 8.**
+**The updated knee is at 4 on this machine, and `poolSize()` is capped at 4.**
 
-The cap itself is vindicated. `sealPool`'s comment predicts that a machine with
-four times the cores would hold four times the memory for no more throughput than
-memory bandwidth allows, and section 7's first table shows exactly that: 16
-workers reach 3,121 MB/s against 8 workers' 3,137 MB/s, at nearly twice the peak
-memory.
+The original two-worker result was real for the original cutter: its repeated
+window rebuild fed one worker slowly enough that additional workers mostly
+contended with the main thread. The copy removal changed that balance, so the
+combined cutter-and-pool sweep was rerun rather than carrying the old answer
+forward.
 
-What the comment does not anticipate is that a real file never asks the pool for
-that. The main thread reads and cuts at 375 MB/s and a single worker seals and
-stages at 449 MB/s, so the pool is starved from the first chunk to the last, and
-six of its eight workers are memory that never becomes throughput. Preparation at
-8 workers is 15 percent slower than at 2 and holds 100 MB more.
-
-The constant is unchanged, because the knee is at 2 only for as long as the
-cutter is slow, and because a Node thread's memory is not a browser Worker's.
-Section 7 records the trigger: measure `prepare()` on a phone, and if the knee is
-still at 2, drop `MAX_WORKERS` to 3.
+Four workers now deliver 859.5 MiB/s against two workers' 780.2 and eight
+workers' 808.3. Capping at four takes the fastest measured point and halves the
+maximum worker-held chunk memory from the old cap. The remaining uncertainty is
+mobile Web Workers, which still need the hardware check in section 7.
 
 ### Is SeqCDC worth adopting?
 
 **No, on the evidence in section 8.** The rolling hash it would replace is 20
 percent of preparing a file and under 3 percent of sending one over a tailnet.
-The copying that surrounds the hash costs 69 percent more than the hash does, is
-already named for removal in `web/cdc.js`, and cannot move a chunk boundary,
-where SeqCDC's whole risk is that a badly chosen sequence length moves all of
-them and says nothing.
+The copying that surrounded the hash cost 69 percent more than the hash did. It
+has now been removed without moving a chunk boundary, while SeqCDC's whole risk
+is that a badly chosen sequence length moves all of them and says nothing.
 
-**The reasoning this contradicts is the assumption that cutting is where the CPU
-goes when a file is prepared.** It is not. Reading the file is a larger share
-than the rolling hash, and so is the memcpy the chunker does around it. Any
-future attempt to make preparation faster should start from section 6's table
-rather than from the intuition that content-defined chunking is expensive.
+**The reasoning this contradicts is the assumption that the rolling hash is the
+transfer bottleneck.** The avoidable copy around it was larger and is now gone.
+The updated local pipeline still prepares at hundreds of MiB/s against a browser
+transport near 20 MB/s, so changing the boundary algorithm would add dedup risk
+without moving end-to-end throughput on the measured system.
 
 **Open question this leaves behind.** Every number in sections 6, 7 and 8 was
 taken on Node on a desktop i9-14900K, and the shares are what matter rather than

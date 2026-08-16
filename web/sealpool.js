@@ -10,15 +10,13 @@
 // thread boundary once, going in, and never comes back.
 
 // Every busy worker holds a chunk and its sealed copy, so the pool is capped
-// rather than opened at the core count. At the largest chunk the server permits
-// that is on the order of a hundred megabytes at this cap, and a machine with
-// four times the cores would hold four times that for no more throughput than
-// memory bandwidth already allows.
-const MAX_WORKERS = 8;
+// rather than opened at the core count. After the cutter's repeated window copy
+// was removed, four workers measured fastest; eight were slower and held twice
+// the peak chunk memory. Re-measure on mobile hardware before raising this.
+const MAX_WORKERS = 4;
 const DEFAULT_CORES = 4;
 
-export function poolSize() {
-  const cores = globalThis.navigator?.hardwareConcurrency;
+export function poolSize(cores = globalThis.navigator?.hardwareConcurrency) {
   return Math.max(1, Math.min(MAX_WORKERS, Number.isInteger(cores) ? cores : DEFAULT_CORES));
 }
 

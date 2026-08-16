@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sealPool } from './sealpool.js';
+import { poolSize, sealPool } from './sealpool.js';
 
 // A fake worker that echoes back a deterministic "sealed" value after a delay,
 // so ordering and concurrency are observable.
@@ -40,6 +40,12 @@ function manualWorkerFactory(record) {
 }
 
 const fresh = () => ({ inFlight: 0, peak: 0, terminated: 0, posted: [], workers: [] });
+
+test('the pool stops at the measured four-worker knee', () => {
+  assert.equal(poolSize(2), 2);
+  assert.equal(poolSize(64), 4);
+  assert.equal(poolSize(null), 4);
+});
 
 test('results come back keyed by index regardless of completion order', async () => {
   const record = fresh();

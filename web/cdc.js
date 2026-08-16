@@ -76,7 +76,7 @@ export function cutPoint(buf, start, end, p) {
 }
 
 // chunkStream yields plaintext chunks from a ReadableStream of Uint8Array. It
-// holds at most one maximum-sized window plus the incoming slice, so a 20 GB
+// holds at most two maximum-sized windows plus the incoming slice, so a 20 GB
 // file costs the same memory as a 20 MB one.
 //
 // The buffer is refilled to at least max before every cut, which is what makes
@@ -86,52 +86,54 @@ export function cutPoint(buf, start, end, p) {
 export async function* chunkStream(stream, p) {
   checkParams(p);
   const reader = stream.getReader();
-  let buf = new Uint8Array(0);
+  // Two windows let several average-sized cuts advance before the unread tail
+  // has to move back to the front. The old concatenation rebuilt a full max
+  // window for every cut, moving about 5.5 bytes for each byte delivered under
+  // the default parameters. This buffer copies each input byte in once, each
+  // output byte out once, and compacts only when the second window fills.
+  const buf = new Uint8Array(p.max * 2);
+  let start = 0;
+  let end = 0;
+  let pending = new Uint8Array(0);
+  let pendingAt = 0;
   let done = false;
 
   while (true) {
-    if (!done && buf.length < p.max) {
-      // Collect the incoming slices and join them once. Growing the window on
-      // every read instead would copy the entire window per read, and a browser
-      // hands out reads of tens of kilobytes against a multi-megabyte window, so
-      // that is on the order of a hundred full-window copies per chunk. The
-      // bytes are identical either way, so boundaries are unaffected.
-      const parts = [buf];
-      let total = buf.length;
-      while (total < p.max) {
+    while (!done && end - start < p.max) {
+      if (end === buf.length) {
+        buf.copyWithin(0, start, end);
+        end -= start;
+        start = 0;
+      }
+
+      if (pendingAt === pending.length) {
         const r = await reader.read();
         if (r.done) { done = true; break; }
-        parts.push(r.value);
-        total += r.value.length;
+        pending = r.value;
+        pendingAt = 0;
+        if (pending.length === 0) continue;
       }
-      if (parts.length > 1) {
-        const joined = new Uint8Array(total);
-        let off = 0;
-        for (const part of parts) { joined.set(part, off); off += part.length; }
-        buf = joined;
-      }
-    }
-    if (buf.length === 0) return;
 
-    const n = cutPoint(buf, 0, buf.length, p);
-    // The chunk is copied out and the window becomes a view of what is left,
-    // rather than the other way round. A chunk that owns its whole buffer can be
-    // handed to a seal worker in a transfer list instead of being structured
-    // cloned into it, and that clone is a second full copy of the file. A view
-    // could not be: transferring it would detach the window this loop is still
-    // cutting from, and the file would end at the first chunk.
-    //
-    // The remainder is copied anyway by the next refill, which joins it with
-    // what it reads, so this costs no copy that was not already being paid.
-    // ponytail: the window is rebuilt by concatenation on every refill rather
-    // than held in a preallocated max-plus-slice buffer. The ceiling is that one
-    // copy of the remainder per chunk, on top of the chunk's own. Lift it with a
-    // fill offset and copyWithin after each cut, and the index bookkeeping that
-    // comes with them.
-    const chunk = buf.slice(0, n);
-    buf = buf.subarray(n);
+      const take = Math.min(
+        p.max - (end - start),
+        buf.length - end,
+        pending.length - pendingAt,
+      );
+      buf.set(pending.subarray(pendingAt, pendingAt + take), end);
+      pendingAt += take;
+      end += take;
+    }
+    if (end === start) return;
+
+    const n = cutPoint(buf, start, end, p);
+    // Copy the chunk out so it owns its buffer and can be transferred to a seal
+    // worker. Transferring a view would detach this reusable cutting window and
+    // end the file at the first chunk.
+    const chunk = buf.slice(start, start + n);
+    start += n;
+    if (start === end) start = end = 0;
     yield chunk;
-    if (done && buf.length === 0) return;
+    if (done && start === end) return;
   }
 }
 

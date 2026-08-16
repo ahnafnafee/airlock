@@ -12,6 +12,7 @@
 import { api } from './api.js';
 import { newConnection, negotiate, receive } from './peer.js';
 import { openStage, indexesFrom } from './staging.js';
+import { transfersActive } from './wake.js';
 import {
   DOMAIN, MODE_SEALED, modeOf, openRecord, loadMaster, b64decode, b64encode,
 } from './crypto.js';
@@ -217,11 +218,25 @@ export function makeSessions(deps) {
   // the body starts, so a second caller in the same turn sees the slot taken.
   function claim(node, body) {
     if (sessions.has(node)) return null;
-    const session = Promise.resolve().then(body).finally(() => {
+    const session = Promise.resolve().then(() => awake(body)).finally(() => {
       if (sessions.get(node) === session) sessions.delete(node);
     });
     sessions.set(node, session);
     return session;
+  }
+
+  // The screen is kept on for exactly as long as a session is running, and the
+  // claim above is the one place every session of either direction passes
+  // through. The release is in a finally because a session that fails is the
+  // ordinary case: without it the device would never sleep again while the tab
+  // is open, which is the sort of battery complaint nobody thinks to report.
+  async function awake(body) {
+    await transfersActive(1);
+    try {
+      return await body();
+    } finally {
+      await transfersActive(-1);
+    }
   }
 
   // A handshake that lands after its deadline still holds a live connection, and

@@ -187,7 +187,13 @@ async function announce() {
       ...base, body: 'A file is waiting. Unlock this device to open it.',
     });
   }
-  if (!newest || !newest.complete) {
+  // Named from the metadata record, not from the server's completeness. Complete
+  // means the server holds every chunk, which is only ever true of a transfer
+  // held on the server; a directly delivered one would otherwise never name
+  // itself, and every notification for the product's default would read as the
+  // same anonymous nudge. The record is sealed and this device has the key, so
+  // the filename is opened here and never learned by the server.
+  if (!newest || !newest.meta) {
     return self.registration.showNotification('Airlock', { ...base, body: 'A file is waiting' });
   }
 

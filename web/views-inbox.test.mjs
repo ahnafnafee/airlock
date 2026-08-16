@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DOMAIN, MODE_PLAIN, MODE_SEALED, b64encode, deriveMaster, sealRecord,
-} from '../crypto.js';
+} from './crypto.js';
 
 // A view registers itself against the app shell the moment it is imported, and
 // the shell reaches for a document. These are the few calls that path makes, and
@@ -45,7 +45,7 @@ function stubDocument() {
 }
 
 stubDocument();
-const { readRow } = await import('./inbox.js');
+const { readRow } = await import('./views/inbox.js');
 
 const SALT = b64encode(new Uint8Array(16).fill(3));
 const mk = await deriveMaster('correct horse battery staple', SALT);

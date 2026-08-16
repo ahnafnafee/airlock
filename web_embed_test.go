@@ -167,3 +167,30 @@ func TestEveryLaunchPathStagesRatherThanUploads(t *testing.T) {
 		t.Error("web/views/send.js exports a send function, so a launch path can upload without a staged confirmation")
 	}
 }
+
+// Test code must not ship inside the binary. The embed directive names most
+// assets individually but pulls web/views in as a whole directory, so a test
+// file placed beside a view is served to every client and carried in every
+// release. Test files live at web/*.test.mjs, which is also the only place the
+// declared gate command looks, so a stray one under web/views would both ship
+// and never run.
+func TestNoTestCodeIsEmbedded(t *testing.T) {
+	var shipped []string
+	err := fs.WalkDir(webFS, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.Contains(d.Name(), ".test.") {
+			shipped = append(shipped, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shipped) > 0 {
+		t.Fatalf("test files are embedded in the binary and served to clients: %v.\n"+
+			"Move them to web/*.test.mjs, which is outside the embedded directories "+
+			"and inside the glob the test gate runs.", shipped)
+	}
+}

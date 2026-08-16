@@ -54,6 +54,14 @@ func hostListener() (net.Listener, IdentityFunc, error) {
 	if len(st.TailscaleIPs) == 0 {
 		return nil, nil, errors.New("tailscaled reports no tailnet address")
 	}
+	// HTTPS Certificates off in the admin console is the failure that otherwise
+	// starts cleanly and then fails every single TLS handshake, which reads as a
+	// broken browser rather than a missing setting.
+	if len(st.CertDomains) == 0 {
+		return nil, nil, errors.New(
+			"this tailnet has no HTTPS certificate domains. Enable HTTPS Certificates " +
+				"in the Tailscale admin console under Settings, Features, then restart")
+	}
 
 	users, err := resolveAllowedUsers(ctx, lc)
 	if err != nil {
@@ -61,16 +69,27 @@ func hostListener() (net.Listener, IdentityFunc, error) {
 	}
 	log.Printf("host mode, allowing tailnet users %v", sortedKeys(users))
 
-	// Bind the tailnet address specifically rather than every interface, so the
-	// listener is never reachable from the LAN even by accident.
-	addr := net.JoinHostPort(st.TailscaleIPs[0].String(), "443")
-	raw, err := net.Listen("tcp", addr)
+	// Bind the tailnet addresses specifically rather than every interface, so
+	// the listener is never reachable from the LAN even by accident. Every
+	// address, not just the first, because a client that resolves the node's
+	// name to the tailnet IPv6 address would otherwise find nothing listening.
+	ips := make([]string, 0, len(st.TailscaleIPs))
+	for _, ip := range st.TailscaleIPs {
+		ips = append(ips, ip.String())
+	}
+	raw, err := listenAll(listenAddrs(ips, *port), *port)
 	if err != nil {
-		return nil, nil, fmt.Errorf("listen %s: %w", addr, err)
+		return nil, nil, err
 	}
 	// GetCertificate fetches and renews the tailnet certificate through the
 	// daemon, so there is no rotation to schedule here.
 	ln := tls.NewListener(raw, &tls.Config{GetCertificate: lc.GetCertificate})
+
+	// The MagicDNS name is the only URL that works: GetCertificate has no
+	// certificate for an IP literal, so reaching the same listener by address
+	// fails during the handshake.
+	name := strings.TrimSuffix(st.CertDomains[0], ".")
+	log.Printf("open https://%s:%d/ on any device on your tailnet", name, *port)
 	return ln, identityFromWhoIs(lc, users), nil
 }
 
@@ -100,9 +119,9 @@ func embeddedListener() (net.Listener, IdentityFunc, error) {
 	// ListenTLS serves the tailnet certificate for <hostname>.<tailnet>.ts.net.
 	// It requires HTTPS Certificates to be enabled in the admin console; without
 	// that the browser has no secure context and the client design collapses.
-	ln, err := ts.ListenTLS("tcp", ":443")
+	ln, err := ts.ListenTLS("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
-		return nil, nil, fmt.Errorf("listen tls: %w", err)
+		return nil, nil, fmt.Errorf("listen tls on port %d: %w", *port, err)
 	}
 	return ln, identityFromWhoIs(lc, users), nil
 }
@@ -110,6 +129,14 @@ func embeddedListener() (net.Listener, IdentityFunc, error) {
 func identityFromWhoIs(lc whoIser, users map[string]bool) IdentityFunc {
 	nodes := splitSet(*allowNodes)
 	return func(r *http.Request) (Identity, bool) {
+		if isLoopback(r.RemoteAddr) {
+			// A tailnet identity cannot be derived from a loopback connection.
+			// Logged distinctly because the symptom, 403 on everything
+			// including static assets, otherwise reads as a permissions bug.
+			log.Printf("refusing a loopback request from %s: reach Airlock by its "+
+				"tailnet name rather than through a local proxy", r.RemoteAddr)
+			return Identity{}, false
+		}
 		whois, err := lc.WhoIs(r.Context(), r.RemoteAddr)
 		if err != nil || whois.Node == nil || whois.UserProfile == nil {
 			return Identity{}, false

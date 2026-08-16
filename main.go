@@ -13,9 +13,13 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,9 +29,10 @@ var webFS embed.FS
 
 var (
 	authMode        = flag.String("auth", "tailscale", `authentication mode: "tailscale" or "token"`)
-	dataDir         = flag.String("data", "./data", "data directory")
+	dataDir         = flag.String("data", defaultDataDir(), "data directory")
 	hostname        = flag.String("hostname", "airlock", "tsnet node name")
 	addr            = flag.String("addr", "127.0.0.1:8080", "listen address, token mode only")
+	port            = flag.Int("port", 443, "HTTPS port on the tailnet address")
 	maxChunkBytes   = flag.Int64("max-chunk", 16<<20, "maximum bytes per chunk")
 	maxTotalBytes   = flag.Int64("max-total", 200<<30, "maximum bytes stored across all chunks")
 	maxChunksPer    = flag.Int("max-chunks-per-transfer", 200000, "maximum chunks in one transfer")
@@ -55,6 +60,158 @@ var cdcDefaults = CDCParams{
 	Max:    8 << 20,
 	MaskS:  (1 << 22) - 1,
 	MaskL:  (1 << 20) - 1,
+}
+
+// defaultDataDir picks a per-platform location so the binary works with no
+// flags. A relative default breaks the moment something other than a shell
+// starts it: a scheduled task inherits System32, a launch agent inherits /. The
+// quiet failure is worse than the loud one, because a different working
+// directory creates a fresh salt and an empty check.bin, which looks like data
+// loss or a wrong passphrase rather than a path mistake.
+func defaultDataDir() string {
+	switch runtime.GOOS {
+	case "windows":
+		// LOCALAPPDATA rather than the Roaming profile that UserConfigDir
+		// returns. A roaming profile would try to sync the whole store.
+		if base, err := os.UserCacheDir(); err == nil {
+			return filepath.Join(base, "Airlock")
+		}
+	case "darwin":
+		if base, err := os.UserConfigDir(); err == nil {
+			return filepath.Join(base, "Airlock")
+		}
+	default:
+		if base := os.Getenv("XDG_DATA_HOME"); base != "" {
+			return filepath.Join(base, "airlock")
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			// Not ~/.config: this is bulk data, not configuration.
+			return filepath.Join(home, ".local", "share", "airlock")
+		}
+	}
+	return "data"
+}
+
+// listenAddrs pairs every tailnet address with the serving port. Binding only
+// the first one leaves the tailnet IPv6 address dark, and a client that resolves
+// to it fails with no diagnosis.
+func listenAddrs(ips []string, port int) []string {
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		out = append(out, net.JoinHostPort(ip, strconv.Itoa(port)))
+	}
+	return out
+}
+
+// listenAll binds every address or none. A partial bind would present itself as
+// a working server while one of the node's own addresses stayed dark, which is
+// the failure this whole path exists to remove. port is named separately from
+// the addresses only so the error can suggest the flag that fixes it.
+func listenAll(addrs []string, port int) (net.Listener, error) {
+	lns := make([]net.Listener, 0, len(addrs))
+	for _, a := range addrs {
+		ln, err := net.Listen("tcp", a)
+		if err != nil {
+			for _, open := range lns {
+				open.Close()
+			}
+			return nil, fmt.Errorf("cannot listen on %s: %w\n"+
+				"Something else on this machine already holds port %d, often "+
+				"tailscale serve. Start Airlock on a free port with --port.",
+				a, err, port)
+		}
+		lns = append(lns, ln)
+	}
+	return newMultiListener(lns), nil
+}
+
+// multiListener presents several listeners as one, because http.Serve takes a
+// single listener and a tailnet node has both an IPv4 and an IPv6 address.
+type multiListener struct {
+	lns    []net.Listener
+	accept chan acceptResult
+	done   chan struct{}
+	once   sync.Once
+}
+
+type acceptResult struct {
+	conn net.Conn
+	err  error
+}
+
+func newMultiListener(lns []net.Listener) net.Listener {
+	m := &multiListener{
+		lns:    lns,
+		accept: make(chan acceptResult),
+		done:   make(chan struct{}),
+	}
+	for _, ln := range lns {
+		go func(ln net.Listener) {
+			for {
+				conn, err := ln.Accept()
+				select {
+				case m.accept <- acceptResult{conn, err}:
+				case <-m.done:
+					if conn != nil {
+						conn.Close()
+					}
+					return
+				}
+				if err != nil {
+					// ponytail: any accept error retires this address, and
+					// http.Serve then stops the whole server on the error it
+					// was just handed. The ceiling is that a transient
+					// per-socket error takes everything down instead of being
+					// retried. Upgrade by retrying with a backoff when the
+					// error reports Timeout, and surfacing only permanent ones.
+					return
+				}
+			}
+		}(ln)
+	}
+	return m
+}
+
+func (m *multiListener) Accept() (net.Conn, error) {
+	select {
+	case r := <-m.accept:
+		return r.conn, r.err
+	case <-m.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (m *multiListener) Close() error {
+	var first error
+	m.once.Do(func() {
+		close(m.done)
+		for _, ln := range m.lns {
+			if err := ln.Close(); err != nil && first == nil {
+				first = err
+			}
+		}
+	})
+	return first
+}
+
+// Addr reports the first bound address. net.Listener has room for exactly one,
+// and the startup log prints the URL that actually works rather than this.
+func (m *multiListener) Addr() net.Addr { return m.lns[0].Addr() }
+
+// isLoopback reports whether a request arrived over the loopback interface,
+// where no tailnet identity exists to derive. A hostname that is not an IP
+// literal counts as not loopback: a proxied request carrying a name is the case
+// this cannot decide, and refusing it here would be a guess.
+func isLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 func main() {

@@ -419,9 +419,19 @@ export function makeSessions(deps) {
     return false;
   }
 
+  // Where this device staged the sealed chunks. They are written before the
+  // transfer exists, because the ids that name a transfer come from the same
+  // pass that seals them, so the directory is named by an id minted during that
+  // pass and the sealed metadata carries it. A transfer prepared before that
+  // field existed staged under the transfer's own id, which is also what a
+  // malformed field falls back to rather than building a path out of it.
+  function stageOf(meta, transferId) {
+    return TRANSFER_ID.test(meta.stage || '') ? meta.stage : transferId;
+  }
+
   async function sendTo(info, mk, node) {
-    const stage = await openStage(info.id);
     const meta = await openMeta(mk, info);
+    const stage = await openStage(stageOf(meta, info.id));
     const controller = new AbortController();
     const { links, close } = await withTimeout(
       transport.open(node, info.id, controller.signal),

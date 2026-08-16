@@ -229,22 +229,31 @@ async function sendNow(files) {
       const opts = {
         mk: state.mk, mode: state.mode, to, cdc: state.config.cdc, api,
         onProgress: (p) => {
-          if (!strip) strip = renderStrip(progress, p.total);
           last = p;
-          // Held chunks were never uploaded and must never render as stored:
-          // the two colors mean different things and the distinction is the
-          // whole point of the strip.
-          strip.setRange(0, p.held, 'held');
-          strip.setRange(p.held, p.held + p.sent, 'stored');
-          // The chunks on the wire go last, so that inside a segment shared by
-          // several chunks the state that is moving is the one you see.
-          strip.setRange(p.held + p.sent, p.held + p.sent + p.inflight, 'sending');
-          // On the direct path nothing is held and nothing is on a wire, so the
-          // strip fills as chunks are sealed onto this device and the caption
-          // counts the same thing the segments do.
-          status.textContent = onServer
-            ? `${file.name} · ${humanSize(file.size)} · ${p.held} of ${p.total} held`
-            : `${file.name} · ${humanSize(file.size)} · ${p.sent} of ${p.total} sealed`;
+          // A file's chunk count is not known until it has been cut, and the
+          // direct path cuts, seals and stages in one pass, so the strip is
+          // built when the total arrives rather than drawn against a guess from
+          // the file size. A strip with the wrong number of segments is the one
+          // thing this element must never be.
+          if (!strip && p.total) strip = renderStrip(progress, p.total);
+          if (strip) {
+            // Held chunks were never uploaded and must never render as stored:
+            // the two colors mean different things and the distinction is the
+            // whole point of the strip.
+            strip.setRange(0, p.held, 'held');
+            strip.setRange(p.held, p.held + p.sent, 'stored');
+            // The chunks on the wire go last, so that inside a segment shared by
+            // several chunks the state that is moving is the one you see.
+            strip.setRange(p.held + p.sent, p.held + p.sent + p.inflight, 'sending');
+          }
+          // On the direct path nothing is held and nothing is on a wire: the
+          // count is chunks sealed onto this device. Until the file has been cut
+          // there is no total to count against, so the caption counts alone and
+          // is the only live feedback that pass has.
+          const counted = onServer
+            ? `${p.held} of ${p.total} held`
+            : (p.total ? `${p.sent} of ${p.total} sealed` : `${p.sent} sealed`);
+          status.textContent = `${file.name} · ${humanSize(file.size)} · ${counted}`;
         },
       };
       const r = onServer

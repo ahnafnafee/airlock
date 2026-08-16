@@ -114,15 +114,23 @@ export async function* chunkStream(stream, p) {
     if (buf.length === 0) return;
 
     const n = cutPoint(buf, 0, buf.length, p);
-    yield buf.subarray(0, n);
-    // slice rather than subarray: a view would keep the whole original buffer
-    // alive and defeat the streaming property. This is one copy of the remainder
-    // per chunk, not per read.
-    // ponytail: a preallocated max-plus-slice buffer with a fill offset and
-    // copyWithin after each cut removes this copy too. Not worth the index
-    // bookkeeping until profiling on a real upload says the remainder copy is
-    // the bottleneck rather than hashing or encryption.
-    buf = buf.slice(n);
+    // The chunk is copied out and the window becomes a view of what is left,
+    // rather than the other way round. A chunk that owns its whole buffer can be
+    // handed to a seal worker in a transfer list instead of being structured
+    // cloned into it, and that clone is a second full copy of the file. A view
+    // could not be: transferring it would detach the window this loop is still
+    // cutting from, and the file would end at the first chunk.
+    //
+    // The remainder is copied anyway by the next refill, which joins it with
+    // what it reads, so this costs no copy that was not already being paid.
+    // ponytail: the window is rebuilt by concatenation on every refill rather
+    // than held in a preallocated max-plus-slice buffer. The ceiling is that one
+    // copy of the remainder per chunk, on top of the chunk's own. Lift it with a
+    // fill offset and copyWithin after each cut, and the index bookkeeping that
+    // comes with them.
+    const chunk = buf.slice(0, n);
+    buf = buf.subarray(n);
+    yield chunk;
     if (done && buf.length === 0) return;
   }
 }

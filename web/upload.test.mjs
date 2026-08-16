@@ -1,10 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { uploadThroughServer, queueForDelivery } from './upload.js';
-import { deriveMaster, MODE_SEALED, MODE_PLAIN, b64encode } from './crypto.js';
+import {
+  DOMAIN, chunkIdentity, openRecord, sealChunk, deriveMaster,
+  MODE_SEALED, MODE_PLAIN, b64encode,
+} from './crypto.js';
 
 const CDC = { min: 64, normal: 128, max: 512, maskS: (1 << 9) - 1, maskL: (1 << 7) - 1 };
 const mkP = deriveMaster('test passphrase', b64encode(new Uint8Array(16).fill(3)));
+// The id the fake server hands back for every transfer it creates.
+const TRANSFER = 'a'.repeat(32);
 
 function fakeFile(bytes, name = 'f.bin', type = 'application/octet-stream') {
   return {
@@ -32,9 +37,9 @@ function fakeApi(held = new Set()) {
       // reject.
       if (cids.length < 1) throw new Error('507: storage quota exceeded');
       calls.created.push({ cids, to });
-      return { id: 'a'.repeat(32), missing: cids.filter((c) => !held.has(c)) };
+      return { id: TRANSFER, missing: cids.filter((c) => !held.has(c)) };
     },
-    async putRecord(id, kind, bytes) { calls.records.push({ kind, length: bytes.length }); },
+    async putRecord(id, kind, bytes) { calls.records.push({ id, kind, bytes }); },
     async deleteTransfer(id) { calls.deleted.push(id); },
     async putChunk(cid, transferId, bytes) {
       // The transfer id is not optional: the server refuses a chunk without it,
@@ -51,24 +56,78 @@ function fakeApi(held = new Set()) {
 // The direct path writes into this device's own staging area, keyed by the
 // chunk's position in the transfer, which is the only key the peer protocol
 // ever asks for.
-// failAt makes one position's write reject, the way a dead staging worker or an
+// failAt makes one position's write reject, the way a dead seal worker or an
 // exhausted origin quota does.
 function fakeStage(failAt = -1) {
   const staged = new Map();
   const clears = [];
+  const keys = [];
+  const put = async (index, bytes) => {
+    if (index === failAt) throw new Error('the staging worker stopped');
+    staged.set(index, bytes);
+  };
   return {
     staged,
     clears,
-    async open() {
+    keys,
+    put,
+    async open(key) {
+      keys.push(key);
       return {
-        put: async (index, bytes) => {
-          if (index === failAt) throw new Error('the staging worker stopped');
-          staged.set(index, bytes);
-        },
+        put,
         clear: async () => { clears.push(staged.size); staged.clear(); },
       };
     },
   };
+}
+
+// Stands in for the worker pool. The real one seals in a worker and writes the
+// sealed bytes into staging from there, and neither a Worker nor an origin
+// private file system exists here. What these tests hold to account is what
+// reaches staging and in what shape, so this does the same work on this thread
+// and against the same crypto.
+function fakePool(stage, size = 4) {
+  let mk = null;
+  let mode = null;
+  let inFlight = 0;
+  // The real pool holds a caller with a chunk until a worker is free, which is
+  // the backpressure that keeps the cutting thread from running away with the
+  // whole file in memory. A fake without it would let this suite pass a
+  // preparation that queues everything.
+  const waiting = [];
+  const pool = {
+    size,
+    peak: 0,
+    closed: 0,
+    async init(key, m) { mk = key; mode = m; },
+    async seal(index, plain) {
+      if (inFlight >= size) await new Promise((resolve) => waiting.push(resolve));
+      inFlight++;
+      pool.peak = Math.max(pool.peak, inFlight);
+      try {
+        const { h, cid } = await chunkIdentity(mk, mode, plain);
+        const sealed = await sealChunk(mk, mode, h, cid, plain);
+        // Closing the real pool terminates its workers, so nothing it was
+        // holding reaches the stage afterwards. Without the same rule here a
+        // chunk could land after the caller had already cleared up.
+        if (pool.closed) throw new Error('the seal pool was closed');
+        await stage.put(index, sealed);
+        return { index, h, cid };
+      } finally {
+        inFlight--;
+        waiting.shift()?.();
+      }
+    },
+    close() { pool.closed++; },
+  };
+  return pool;
+}
+
+// The queued path's two injected collaborators, wired to each other. `opts` is
+// what queueForDelivery is handed; `pool` is the same pool, for a test that
+// wants to hold it to account.
+function queued(stage, pool = fakePool(stage)) {
+  return { pool, opts: { openStage: stage.open, newPool: () => pool } };
 }
 
 function pseudoRandom(n, seed = 5) {
@@ -232,8 +291,7 @@ test('a queued transfer stages every chunk and sends the server none of them', a
   const api = fakeApi();
   const stage = fakeStage();
   const r = await queueForDelivery(fakeFile(pseudoRandom(20000, 41)), {
-    mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api,
-    openStage: stage.open,
+    mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...queued(stage).opts,
   });
   assert.ok(r.total > 1, 'the fixture must produce several chunks');
   assert.equal(api.calls.created.length, 1);
@@ -248,6 +306,66 @@ test('a queued transfer stages every chunk and sends the server none of them', a
     'every position in the transfer must have a staged chunk behind it');
 });
 
+test('the file is read once, and the chunks are sealed several at a time', async () => {
+  // The two halves of this task. A second read of a file that may be twenty
+  // gigabytes is the largest single cost there was, and sealing one chunk at a
+  // time uses one core of however many the device has.
+  const api = fakeApi();
+  const stage = fakeStage();
+  const data = pseudoRandom(20000, 61);
+  let reads = 0;
+  const file = fakeFile(data);
+  const stream = file.stream.bind(file);
+  file.stream = () => { reads++; return stream(); };
+
+  const wiring = queued(stage);
+  const r = await queueForDelivery(file, {
+    mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...wiring.opts,
+  });
+  assert.equal(reads, 1, 'the file must be opened exactly once');
+  assert.ok(r.total > 4, 'the fixture must produce more chunks than the pool has workers');
+  assert.ok(wiring.pool.peak > 1, `peak concurrency was ${wiring.pool.peak}, so sealing is serial`);
+  assert.ok(
+    wiring.pool.peak <= wiring.pool.size,
+    `peak concurrency was ${wiring.pool.peak}, above the pool size`);
+  assert.equal(wiring.pool.closed, 1, 'the pool must be closed when the pass ends');
+});
+
+test('the stage is named by the id the sealed metadata carries', async () => {
+  // The chunks are staged before the transfer exists, so the directory cannot be
+  // named by the transfer's id. Nothing else records where they went: a sender
+  // that could not find them again would offer a transfer whose every position
+  // answers with nothing.
+  const api = fakeApi();
+  const stage = fakeStage();
+  await queueForDelivery(fakeFile(pseudoRandom(20000, 67)), {
+    mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...queued(stage).opts,
+  });
+  assert.equal(stage.keys.length, 1);
+  assert.match(stage.keys[0], /^[0-9a-f]{32}$/, 'the stage id must be a well formed id');
+  assert.notEqual(stage.keys[0], TRANSFER, 'the stage cannot be named by an id it predates');
+
+  const record = api.calls.records.find((x) => x.kind === 'meta');
+  const meta = JSON.parse(new TextDecoder().decode(
+    await openRecord(await mkP, DOMAIN.META, TRANSFER, record.bytes)));
+  assert.equal(meta.stage, stage.keys[0]);
+  assert.equal(meta.name, 'f.bin', 'the rest of the record must be unchanged');
+});
+
+test('a transfer sent through the server names no staging directory', async () => {
+  // The field is where this device put the chunks. On the server path there are
+  // no staged chunks, and a record naming a directory that does not exist would
+  // send a later reader looking for one.
+  const api = fakeApi();
+  await uploadThroughServer(fakeFile(pseudoRandom(5000, 71)), {
+    mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api,
+  });
+  const record = api.calls.records.find((x) => x.kind === 'meta');
+  const meta = JSON.parse(new TextDecoder().decode(
+    await openRecord(await mkP, DOMAIN.META, TRANSFER, record.bytes)));
+  assert.equal('stage' in meta, false);
+});
+
 test('a queued transfer stages a repeated chunk at every position it occupies', async () => {
   // The peer asks for chunk 7 of this transfer by position. Staging under the
   // chunk id instead, or claiming an id the way the server path does so it goes
@@ -260,8 +378,7 @@ test('a queued transfer stages a repeated chunk at every position it occupies', 
   const api = fakeApi();
   const stage = fakeStage();
   const r = await queueForDelivery(fakeFile(data), {
-    mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api,
-    openStage: stage.open,
+    mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...queued(stage).opts,
   });
   assert.ok(new Set(api.calls.created[0].cids).size < r.total, 'the fixture must repeat chunks');
   assert.equal(stage.staged.size, r.total);
@@ -282,8 +399,7 @@ test('a queued transfer stages chunks the server already holds', async () => {
   const api = fakeApi(held);
   const stage = fakeStage();
   const r = await queueForDelivery(fakeFile(data), {
-    mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api,
-    openStage: stage.open,
+    mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...queued(stage).opts,
   });
   assert.equal(
     api.calls.created[0].cids.filter((cid) => !held.has(cid)).length, 0,
@@ -291,43 +407,61 @@ test('a queued transfer stages chunks the server already holds', async () => {
   assert.equal(stage.staged.size, r.total);
 });
 
-test('a staging failure takes the transfer and the partial stage back down', async () => {
-  // The transfer is created before the first chunk is staged, so a write that
-  // fails part way leaves a transfer on the queue whose stage has holes in it.
-  // Left alone, every later drain offers it, reaches a position with nothing
-  // behind it, fails the session and cools the peer off, forever, and nothing
-  // ever sweeps the chunks it did write. The failure has to undo both.
+test('a staging failure clears the partial stage and tells the server nothing', async () => {
+  // The chunks are staged before the transfer is created, which is what makes a
+  // failure part way through cheap to undo: no transfer sits on the queue with
+  // holes in its stage, offered by every later drain and failing forever. What
+  // is left is the chunks that did land, which nothing else would ever sweep.
   const api = fakeApi();
   const stage = fakeStage(2);
+  const wiring = queued(stage);
   await assert.rejects(
     queueForDelivery(fakeFile(pseudoRandom(20000, 47)), {
-      mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api,
-      openStage: stage.open,
+      mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...wiring.opts,
     }),
     // Rethrown as it was, so the caption names the reason the write failed
     // rather than the cleanup that followed it.
     /staging worker stopped/,
   );
-  assert.equal(api.calls.created.length, 1, 'the transfer must have been created, or this test asserts nothing');
-  assert.deepEqual(api.calls.deleted, ['a'.repeat(32)], 'the transfer must not stay on the queue');
-  assert.deepEqual(stage.clears, [2], 'the two chunks that did land must be cleared');
+  assert.equal(api.calls.created.length, 0, 'the server must never hear about it');
+  assert.deepEqual(api.calls.deleted, []);
+  assert.equal(stage.clears.length, 1, 'the chunks that did land must be cleared');
+  assert.equal(stage.staged.size, 0);
+  assert.equal(wiring.pool.closed, 1, 'a failed pass must still close the pool');
+});
+
+test('a transfer the server refuses leaves nothing staged behind it', async () => {
+  // Everything is on disk by the time the server is asked, so a refusal here is
+  // a stage with no transfer to read it. Nothing else sweeps one.
+  const api = fakeApi();
+  api.createTransfer = async () => { throw new Error('507: storage quota exceeded'); };
+  const stage = fakeStage();
+  await assert.rejects(
+    queueForDelivery(fakeFile(pseudoRandom(20000, 51)), {
+      mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...queued(stage).opts,
+    }),
+    /storage quota/,
+  );
+  assert.equal(stage.clears.length, 1);
   assert.equal(stage.staged.size, 0);
 });
 
-test('cleanup failing over a staging failure still reports the staging failure', async () => {
-  // A device offline enough to fail a stage write is a device whose DELETE may
+test('cleanup failing over a record failure still reports the record failure', async () => {
+  // A device offline enough to fail a record write is a device whose DELETE may
   // fail too. Neither best-effort step may replace the reason the send failed.
   const api = fakeApi();
+  api.putRecord = async () => { throw new Error('503: unreachable'); };
   api.deleteTransfer = async () => { throw new Error('503: unreachable'); };
-  const stage = fakeStage(1);
+  const stage = fakeStage();
   await assert.rejects(
     queueForDelivery(fakeFile(pseudoRandom(20000, 53)), {
-      mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api,
-      openStage: stage.open,
+      mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...queued(stage).opts,
     }),
-    /staging worker stopped/,
+    /unreachable/,
   );
-  assert.deepEqual(stage.clears, [1], 'the stage is still cleared when the delete fails');
+  assert.equal(api.calls.created.length, 1, 'the transfer must exist, or this test asserts nothing');
+  assert.equal(stage.clears.length, 1, 'the stage is still cleared when the delete fails');
+  assert.equal(stage.staged.size, 0);
 });
 
 test('a queued empty file is refused before the server hears about it', async () => {
@@ -335,7 +469,7 @@ test('a queued empty file is refused before the server hears about it', async ()
   const stage = fakeStage();
   await assert.rejects(
     queueForDelivery(fakeFile(new Uint8Array(0), 'empty.txt'), {
-      mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api, openStage: stage.open,
+      mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api, ...queued(stage).opts,
     }),
     /empty file/,
   );

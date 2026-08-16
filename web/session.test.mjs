@@ -20,11 +20,16 @@ const PEER = 'pixel';
 const key = await crypto.subtle.importKey(
   'raw', new Uint8Array(32), 'HKDF', false, ['deriveBits', 'deriveKey']);
 
-const META = b64encode(await sealRecord(
+const STAGE = 'd'.repeat(32);
+
+const metaRecord = async (extra = {}) => b64encode(await sealRecord(
   key, MODE_SEALED, DOMAIN.META, ID,
   new TextEncoder().encode(JSON.stringify({
-    name: 'holiday.jpg', size: 9, mime: 'image/jpeg',
+    name: 'holiday.jpg', size: 9, mime: 'image/jpeg', ...extra,
   }))));
+
+const META = await metaRecord();
+const META_STAGED = await metaRecord({ stage: STAGE });
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Long enough for a chain of real subtle-crypto promises to land, which is what
@@ -85,6 +90,9 @@ function harness(overrides = {}) {
   };
   const stage = overrides.stage || fakeStage();
   const progressOf = overrides.progressOf || (() => new Uint8Array(0));
+  // Which directory each side asked for. The sender's is named by the sealed
+  // metadata rather than by the transfer, so the key is worth recording.
+  log.stages = [];
 
   const api = {
     // A fresh copy per call, and a null list stays null: that is what the wire
@@ -122,7 +130,7 @@ function harness(overrides = {}) {
   const sessions = makeSessions({
     api,
     transport,
-    openStage: async () => stage,
+    openStage: async (key) => { log.stages.push(key); return stage; },
     negotiate: overrides.negotiate
       || (async () => ({ accepted: true, sent: CIDS.length, held: 0 })),
     receive: overrides.receive || (async () => ({ accepted: true, received: 0 })),
@@ -224,6 +232,23 @@ test('staged chunks are dropped once the recipient confirms every one', async ()
 
   await h.sessions.startSend(ID);
   assert.equal(stage.cleared, 1);
+});
+
+test('the sender reads the stage the sealed metadata names', async () => {
+  // The sealed chunks are staged before the transfer exists, so the directory is
+  // not named by the transfer's id. A sender that opened the transfer's id
+  // instead would find an empty stage, offer a file whose every position answers
+  // with nothing, and fail the session against a peer that was right there.
+  const h = harness({ info: { ...SENDING, meta: META_STAGED } });
+  await h.sessions.startSend(ID);
+  assert.deepEqual(h.log.stages, [STAGE]);
+});
+
+test('a transfer whose metadata names no stage falls back to its own id', async () => {
+  // What a transfer prepared before the field existed looks like.
+  const h = harness({ info: SENDING });
+  await h.sessions.startSend(ID);
+  assert.deepEqual(h.log.stages, [ID]);
 });
 
 test('a refusal is final and is not offered again', async () => {

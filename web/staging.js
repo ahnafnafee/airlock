@@ -49,12 +49,40 @@ export async function stageDir(transferId) {
   return staging.getDirectoryHandle(checkedId(transferId), { create: true });
 }
 
-// Writes leave this thread. A chunk is written with createSyncAccessHandle
-// rather than createWritable, and that call is only allowed inside a dedicated
-// worker: on the page it rejects with InvalidStateError. This is not a
-// performance choice. Safari did not ship createWritable until 26.0, so on any
-// earlier iOS the sync handle is the only way to write into the origin private
-// file system at all, which is why one write path serves every browser.
+// The one place a chunk reaches disk. Both workers that stage bytes call it: the
+// one the page posts received chunks to, and the seal workers, which write the
+// chunk they have just sealed rather than sending it back to be written
+// somewhere else.
+//
+// createSyncAccessHandle is callable only from a dedicated worker global scope,
+// so this throws on the page. That is not only a performance choice: Safari did
+// not ship createWritable until 26.0, so on any earlier iOS the sync handle is
+// the only way to write into the origin private file system at all, which is why
+// one write path serves every browser.
+export async function writeStaged(transferId, index, bytes) {
+  // The directory is resolved per write rather than held, because a stage
+  // cleared between two writes would leave a cached handle naming a directory
+  // that no longer exists, and the write would land nowhere.
+  const dir = await stageDir(transferId);
+  const handle = await dir.getFileHandle(String(index), { create: true });
+  // The spec permits one open sync handle per file at a time, so the handle is
+  // opened and closed around each write rather than held, since chunks are
+  // separate files and several may be written concurrently.
+  const access = await handle.createSyncAccessHandle();
+  try {
+    access.write(bytes, { at: 0 });
+    // A rewrite of an index whose file was left longer by an interrupted earlier
+    // write would otherwise keep the stale tail and read back as a chunk that is
+    // not the one written.
+    access.truncate(bytes.byteLength);
+    access.flush();
+  } finally {
+    access.close();
+  }
+}
+
+// Writes leave this thread, because of the rule above. The page hands a chunk to
+// the staging worker and waits for its reply.
 //
 // Reads stay here. getFile, keys and getFileHandle are callable from the page,
 // so the sending half and the bitmap never pay for a round trip.

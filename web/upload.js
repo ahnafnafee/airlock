@@ -1,7 +1,8 @@
 import { chunkFile } from './cdc.js';
 import {
-  DOMAIN, chunkIdentity, sealChunk, sealRecord, packHashes,
+  DOMAIN, chunkIdentity, hex, sealChunk, sealRecord, packHashes,
 } from './crypto.js';
+import { sealPool, poolSize } from './sealpool.js';
 import { makeThumbnail } from './thumb.js';
 
 // A file leaves this device one of two ways, and which one is the owner's choice
@@ -10,13 +11,14 @@ import { makeThumbnail } from './thumb.js';
 // online. uploadThroughServer is the exception, taken when the sender would
 // rather not have to be reachable again.
 //
-// Both run two passes over the file. Pass one computes every chunk id and throws
-// the bytes away, so memory stays flat regardless of file size. Pass two
-// re-reads the file and seals what has to move. Keeping pass one's bytes to
-// avoid the second read would mean holding the whole file in memory, which fails
-// at exactly the sizes this product exists for. Re-reading from disk is far
-// cheaper than either destination, and chunking is deterministic so the second
-// pass cuts at identical boundaries.
+// The direct path reads the file once, sealing and staging as it cuts. The
+// server path reads it twice: pass one computes every chunk id and throws the
+// bytes away, and only then can it ask which of them the server lacks, which is
+// the question that decides what pass two seals and sends. Keeping pass one's
+// bytes to avoid the second read would mean holding the whole file in memory,
+// which fails at exactly the sizes this product exists for. Re-reading from disk
+// is far cheaper than the wire, and chunking is deterministic so the second pass
+// cuts at identical boundaries.
 
 // Four in flight. Measured guidance puts a 110 MB upload at roughly 22 seconds
 // sequential and 12 seconds at three, with little left to win past four. Peak
@@ -49,9 +51,88 @@ async function withRetry(fn) {
   }
 }
 
-// Everything both paths do before a sealed chunk has anywhere to go: name every
-// chunk, create the transfer, and check the id the server answered with. The
-// sealed records are written by the caller rather than here, so the first
+// A transfer must name at least one chunk. The server enforces that too, but it
+// reports the refusal as a storage quota failure, which says nothing true about
+// a zero-byte file. Refused here so the reason reaching the caption is the
+// actual one.
+// ponytail: empty files cannot be sent at all. The ceiling is the server rule
+// that a transfer names at least one chunk; lifting it means letting the create
+// path accept an empty chunk list and teaching the receiving side to rebuild a
+// zero-byte file from an empty chunk list.
+function checkNotEmpty(count) {
+  if (count === 0) throw new Error('an empty file has no chunks to send');
+}
+
+function checkTransferId(id) {
+  if (!TRANSFER_ID.test(id || '')) {
+    throw new Error('the server returned a malformed transfer id');
+  }
+  return id;
+}
+
+// The staging directory is named by an id minted here rather than by the
+// transfer's, because the sealed chunks are written before the transfer exists:
+// the ids that name a transfer come from the same pass that seals them. The
+// sealed metadata carries this name, which is how the sender finds the chunks
+// again after the page has been closed and reopened.
+const newStageId = () => hex(crypto.getRandomValues(new Uint8Array(16)));
+
+const workerPool = () => sealPool(poolSize(), () => new Worker(
+  new URL('./seal-worker.js', import.meta.url), { type: 'module' }));
+
+// prepare makes one pass over the file. Chunks are cut on this thread, sealed by
+// the pool, and written straight into staging by the worker that sealed them,
+// which is where the sender reads them from when the peer is reachable. Naming
+// every chunk in one pass and sealing in a second was a second full read of a
+// file that may be twenty gigabytes, for nothing.
+export async function prepare(file, {
+  mk, mode, cdc, stageId, newPool = workerPool, onProgress = () => {},
+}) {
+  const pool = newPool();
+  const cids = [];
+  const hashes = [];
+  // Bounded rather than awaited only at the end. Awaiting at the end would queue
+  // every chunk of the file, which is the memory the streaming chunker exists to
+  // avoid. One more than the pool holds, so a worker that finishes has the next
+  // chunk waiting rather than idling while this thread reads and cuts it, at a
+  // cost of one chunk of memory.
+  const limit = Math.max(1, pool.size || 1) + 1;
+  const pending = new Set();
+  let sealed = 0;
+  let index = 0;
+
+  try {
+    await pool.init(mk, mode, stageId);
+    for await (const plain of chunkFile(file, cdc)) {
+      const i = index++;
+      const p = pool.seal(i, plain).then((r) => {
+        cids[r.index] = r.cid;
+        hashes[r.index] = r.h;
+        // Counted as chunks land rather than reported as the index that landed,
+        // because completion order is not submission order and a count that
+        // went backwards would paint the strip backwards.
+        onProgress(++sealed);
+      }).finally(() => pending.delete(p));
+      // The race and the all below both handle every member of the set, but a
+      // chunk that fails while the loop is between them has nothing waiting on
+      // it and would surface as an unhandled rejection rather than as the
+      // failure it is.
+      p.catch(() => {});
+      pending.add(p);
+      if (pending.size >= limit) await Promise.race(pending);
+    }
+    await Promise.all(pending);
+  } finally {
+    // Including on the way out of a failure: a pool left open is a set of
+    // workers holding chunks for a transfer that is not happening.
+    pool.close();
+  }
+  return { cids, hashes };
+}
+
+// Everything the server path does before a sealed chunk has anywhere to go: name
+// every chunk, create the transfer, and check the id the server answered with.
+// The sealed records are written by the caller rather than here, so the first
 // progress report lands before those round trips instead of after them.
 async function begin(file, opts) {
   const { mk, mode, to, cdc, api } = opts;
@@ -61,23 +142,10 @@ async function begin(file, opts) {
     ids.push(await chunkIdentity(mk, mode, plain));
   }
 
-  // A transfer must name at least one chunk. The server enforces that too, but
-  // it reports the refusal as a storage quota failure, which says nothing true
-  // about a zero-byte file. Refuse here so the reason reaching the caption is
-  // the actual one.
-  // ponytail: empty files cannot be sent at all. The ceiling is the server rule
-  // that a transfer names at least one chunk; lifting it means letting the
-  // create path accept an empty chunk list and teaching the receiving side to
-  // rebuild a zero-byte file from an empty chunk list.
-  if (ids.length === 0) {
-    throw new Error('an empty file has no chunks to send');
-  }
+  checkNotEmpty(ids.length);
 
   const { id, missing } = await api.createTransfer(ids.map((x) => x.cid), to);
-  if (!TRANSFER_ID.test(id || '')) {
-    throw new Error('the server returned a malformed transfer id');
-  }
-  return { ids, id, missing };
+  return { ids, id: checkTransferId(id), missing };
 }
 
 // The exception, chosen per transfer. The sealed chunks are spooled to the
@@ -111,7 +179,7 @@ export async function uploadThroughServer(file, opts) {
   // already-held chunks rather than a stalled bar.
   onProgress({ ...progress });
 
-  await uploadRecords(api, mk, mode, id, file, ids);
+  await uploadRecords(api, mk, mode, id, file, ids.map((x) => x.h));
 
   if (wanted.size === 0) return progress;
 
@@ -148,48 +216,77 @@ export async function uploadThroughServer(file, opts) {
 // ids, and the sealed records the recipient needs to make sense of them. Not one
 // byte of content reaches it.
 //
+// The chunks are staged first and the transfer is created once they are all
+// down, which is the only order available: a transfer is named by its chunk ids
+// and those come from the same pass that seals them. It is also the safer order,
+// because a preparation that fails part way is a transfer the server was never
+// told about rather than one sitting on the queue with holes in its stage.
+//
 // The transfer joins the server's queue the moment it is created, so what is
 // written here is what the direct session reads back when the recipient is
 // reachable, whether that is a second later or after this page has been closed
 // and reopened.
 export async function queueForDelivery(file, opts) {
-  const { mk, mode, cdc, api, openStage, onProgress = () => {} } = opts;
+  const {
+    mk, mode, to, cdc, api, openStage, newPool, onProgress = () => {},
+  } = opts;
 
-  const { ids, id } = await begin(file, opts);
+  const stageId = newStageId();
+  const stage = await openStage(stageId);
 
   // Nothing is held and nothing is in flight. Held means a chunk the recipient
   // already has, and no recipient has been asked yet: the dedup question is put
   // to the peer over the wire when the session runs, never to the server, which
   // is not the recipient and has no say in what this device must be able to hand
-  // over itself.
-  const progress = { id, total: ids.length, held: 0, sent: 0, inflight: 0 };
+  // over itself. Nothing is in flight either, because sealing onto this device's
+  // own disk is not a chunk in transit and must never paint as one.
+  //
+  // The total is unknown until the file has been cut, which is the price of
+  // cutting and sealing in the same pass, so it stays zero until it is known.
+  const progress = { id: null, total: 0, held: 0, sent: 0, inflight: 0 };
+
+  // Every position is staged, including the repeats. The peer asks for chunk 7
+  // of this transfer by position, so a file that repeats a chunk has to answer
+  // for each place it appears, and a position left empty because some other
+  // transfer happened to hold that id is a chunk this device could never hand
+  // over.
+  let cids;
+  let hashes;
+  try {
+    ({ cids, hashes } = await prepare(file, {
+      mk,
+      mode,
+      cdc,
+      stageId,
+      newPool,
+      onProgress: (sealed) => {
+        progress.sent = sealed;
+        onProgress({ ...progress });
+      },
+    }));
+    checkNotEmpty(cids.length);
+  } catch (err) {
+    // Nothing has reached the server yet, so there is no transfer to take back
+    // down, but the chunks that did land have nothing that will ever read them.
+    // Best effort, because the reason the caller needs is the original one.
+    await stage.clear().catch(() => {});
+    throw err;
+  }
+
+  progress.total = cids.length;
   onProgress({ ...progress });
 
-  await uploadRecords(api, mk, mode, id, file, ids);
-
-  const stage = await openStage(id);
   try {
-    let index = 0;
-    for await (const plain of chunkFile(file, cdc)) {
-      const { h, cid } = ids[index];
-      // Written under its position, not its id, and every position is written.
-      // The peer asks for chunk 7 of this transfer by position, so a file that
-      // repeats a chunk has to answer for each place it appears, and a position
-      // left empty because the server happened to hold that id is a chunk this
-      // device could never hand over.
-      await stage.put(index, await sealChunk(mk, mode, h, cid, plain));
-      progress.sent = ++index;
-      onProgress({ ...progress });
-    }
+    const { id } = await api.createTransfer(cids, to);
+    progress.id = checkTransferId(id);
+    await uploadRecords(api, mk, mode, id, file, hashes, stageId);
   } catch (err) {
-    // The transfer was created before the first chunk was staged, so a staging
-    // failure part way through leaves a transfer on the queue whose stage has
-    // holes in it. Every later drain would offer it, reach a position with no
-    // file behind it, fail the session, cool the peer off and come back for it
-    // forever, and nothing sweeps the partial stage. Undone here so a staging
-    // failure is a transfer that simply did not send. Both steps are best
-    // effort, because the reason the caller needs is the original one.
-    await api.deleteTransfer(id).catch(() => {});
+    // From here on a transfer may exist on the queue whose records are missing,
+    // and every later drain would offer it and fail. Undone so a failure here is
+    // a transfer that simply did not send. A transfer whose id came back
+    // malformed is the one that cannot be, because deleting it would mean
+    // building a URL out of the very string that was refused.
+    if (progress.id) await api.deleteTransfer(progress.id).catch(() => {});
     await stage.clear().catch(() => {});
     throw err;
   }
@@ -197,15 +294,22 @@ export async function queueForDelivery(file, opts) {
   return progress;
 }
 
-async function uploadRecords(api, mk, mode, id, file, ids) {
+async function uploadRecords(api, mk, mode, id, file, hashes, stage = null) {
   const meta = await sealRecord(mk, mode, DOMAIN.META, id, enc(JSON.stringify({
     name: file.name,
     size: file.size,
     mime: file.type || 'application/octet-stream',
+    // Where this device staged the sealed chunks, on the direct path only. The
+    // chunks are written before the transfer exists, so the directory cannot be
+    // named by the transfer's id, and this is what lets the sender find them
+    // again after a reload. It rides in the sealed record rather than in a
+    // second store, so it lasts exactly as long as the transfer does and the
+    // server never learns it. The recipient has no use for it and ignores it.
+    ...(stage ? { stage } : {}),
   })));
   await withRetry(() => api.putRecord(id, 'meta', meta));
 
-  const list = await sealRecord(mk, mode, DOMAIN.LIST, id, packHashes(ids.map((x) => x.h)));
+  const list = await sealRecord(mk, mode, DOMAIN.LIST, id, packHashes(hashes));
   await withRetry(() => api.putRecord(id, 'chunklist', list));
 
   // The server can never make this: it has never seen the image. A transfer

@@ -83,6 +83,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/chunk/{cid}", g(s.getChunk))
 	s.mux.HandleFunc("GET /api/inbox", g(s.inbox))
 	s.mux.HandleFunc("GET /api/history", g(s.history))
+	s.mux.HandleFunc("POST /api/push/subscribe", g(s.subscribe))
 
 	// The file_handlers launch URL has to render the app rather than 404.
 	s.mux.HandleFunc("GET /open", g(func(w http.ResponseWriter, r *http.Request) {
@@ -394,6 +395,22 @@ func (s *Server) inbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, list)
+}
+
+// subscribe records the caller's push endpoint. The node comes from the gate's
+// verified identity rather than the body, so no device can register itself as
+// another and collect that device's wake-ups.
+func (s *Server) subscribe(w http.ResponseWriter, r *http.Request) {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 8192))
+	if err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	if err := s.cfg.Push.Subscribe(who(r).Node, raw); err != nil {
+		http.Error(w, "bad subscription", http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) history(w http.ResponseWriter, r *http.Request) {

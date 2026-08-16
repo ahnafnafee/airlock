@@ -88,6 +88,34 @@ function enterApp() {
   $('app').hidden = false;
   const first = location.hash.slice(1);
   showView(views.has(first) ? first : views.keys().next().value);
+  subscribePush();
+}
+
+// The VAPID public key is base64url with the padding stripped, and
+// applicationServerKey wants the raw bytes.
+function urlBase64ToUint8Array(base64) {
+  const padded = (base64 + '='.repeat((4 - base64.length % 4) % 4))
+    .replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(padded);
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+
+// Push is an enhancement, never a gate: every failure here is logged and the app
+// carries on unnotified rather than refusing to open.
+async function subscribePush() {
+  if (!state.config.vapidKey || !('Notification' in window)) return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    if (await Notification.requestPermission() !== 'granted') return;
+    const sub = await reg.pushManager.getSubscription()
+      || await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(state.config.vapidKey),
+      });
+    await api.subscribePush(sub);
+  } catch (err) {
+    console.warn('push subscription failed', err);
+  }
 }
 
 async function registerWorker() {

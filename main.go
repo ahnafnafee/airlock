@@ -93,7 +93,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	pusher := &Pusher{}
+	pusher, err := NewPusher(*dataDir, *vapidSubject)
+	if err != nil {
+		return err
+	}
 
 	var ln net.Listener
 	var ident IdentityFunc

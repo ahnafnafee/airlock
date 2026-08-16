@@ -19,6 +19,20 @@ self.addEventListener('fetch', (event) => {
   }
 });
 
+self.addEventListener('push', (event) => {
+  event.waitUntil(announce());
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil((async () => {
+    for (const client of await self.clients.matchAll({ type: 'window' })) {
+      if (client.url.startsWith(self.location.origin)) return client.focus();
+    }
+    return self.clients.openWindow('/');
+  })());
+});
+
 // getOk stops a refused request from arriving as a parse failure two lines
 // later, where the message would name JSON rather than the status that actually
 // ended the download.
@@ -37,6 +51,28 @@ async function getOk(path) {
 async function openSealed(mk, domain, id, record) {
   if (modeOf(record) !== MODE_SEALED) throw new Error('this transfer is not sealed');
   return openRecord(mk, domain, id, record);
+}
+
+// The push itself carries nothing. Everything shown here is decrypted on this
+// device, which is the only place the filename exists in the clear. An unsealed
+// meta record is refused for the same reason a download refuses one: its name
+// would be whatever the writer chose, and a notification is a very good place
+// to put a name nobody can vouch for.
+async function announce() {
+  let body = 'A file is waiting';
+  try {
+    const mk = await loadMaster();
+    const [newest] = await (await getOk('/api/inbox')).json();
+    if (mk && newest && newest.complete) {
+      const meta = JSON.parse(new TextDecoder().decode(
+        await openSealed(mk, DOMAIN.META, newest.id, b64decode(newest.meta))));
+      body = meta.name;
+    }
+  } catch {
+    // Locked device, or a fetch that failed because Tailscale is down. The
+    // generic line still tells the owner something arrived.
+  }
+  return self.registration.showNotification('Airlock', { body, tag: 'inbox' });
 }
 
 async function download(id) {

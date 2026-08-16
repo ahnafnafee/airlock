@@ -16,11 +16,16 @@ async function req(path, init = {}) {
 
 const json = async (path, init) => (await req(path, init)).json();
 
-const sendJSON = (path, body) => json(path, {
+const postJSON = (path, body) => req(path, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(body),
 });
+
+// Split from postJSON because not every POST answers with a body, and asking an
+// empty 204 for its JSON fails as loudly as a real error while the write it
+// reports on actually succeeded.
+const sendJSON = async (path, body) => (await postJSON(path, body)).json();
 
 const sendBytes = (path, bytes, method = 'PUT') =>
   req(path, { method, body: bytes });
@@ -55,4 +60,8 @@ export const api = {
 
   inbox: () => json('/api/inbox'),
   history: () => json('/api/history'),
+
+  // The node this endpoint belongs to comes from the connection, not from here,
+  // so the body is only the browser's own PushSubscription.
+  subscribePush: (sub) => postJSON('/api/push/subscribe', sub),
 };

@@ -1,0 +1,419 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { makeSessions } from './session.js';
+import { bitmapOf } from './staging.js';
+import { DOMAIN, MODE_SEALED, b64encode, sealRecord } from './crypto.js';
+
+// These test the five ways this module can go wrong, against fakes for
+// everything it reaches outside itself. There is no RTCPeerConnection in Node
+// and no origin private file system, but neither is where the bugs are: the
+// bugs are in when a session may start, when a staged chunk may be deleted, and
+// what is written down after a session that failed.
+
+const ID = 'a'.repeat(32);
+const CIDS = ['a'.repeat(64), 'b'.repeat(64), 'c'.repeat(64)];
+const ME = 'desktop';
+const PEER = 'pixel';
+
+const key = await crypto.subtle.importKey(
+  'raw', new Uint8Array(32), 'HKDF', false, ['deriveBits', 'deriveKey']);
+
+const META = b64encode(await sealRecord(
+  key, MODE_SEALED, DOMAIN.META, ID,
+  new TextEncoder().encode(JSON.stringify({
+    name: 'holiday.jpg', size: 9, mime: 'image/jpeg',
+  }))));
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Long enough for a chain of real subtle-crypto promises to land, which is what
+// separates "this session has not started yet" from "this session was refused".
+const settle = () => sleep(50);
+
+// The default transfer is one arriving here. A test about sending overrides both
+// ends, because which side this device is on decides everything below.
+const SENDING = { sender: ME, to: [PEER] };
+
+function fakeStage(held = []) {
+  const store = new Map(held.map((i) => [i, new Uint8Array([i])]));
+  const stage = {
+    store,
+    cleared: 0,
+    put: async (i, bytes) => { store.set(i, bytes); },
+    get: async (i) => {
+      if (!store.has(i)) throw new Error(`chunk ${i} is not staged`);
+      return store.get(i);
+    },
+    has: async (i) => store.has(i),
+    held: async () => new Set(store.keys()),
+    bitmap: async (count) => bitmapOf(new Set(store.keys()), count),
+    clear: async () => { stage.cleared++; store.clear(); },
+  };
+  return stage;
+}
+
+function fakeChannel() {
+  return {
+    readyState: 'open',
+    bufferedAmount: 0,
+    addEventListener() {},
+    removeEventListener() {},
+    send() {},
+  };
+}
+
+// One device's worth of fakes. Everything a test wants to vary is an override,
+// and everything a test wants to assert on is recorded on `log`.
+function harness(overrides = {}) {
+  const log = {
+    opens: [], accepts: [], answers: [], progress: [], aborted: 0,
+  };
+  const info = {
+    id: ID,
+    sender: PEER,
+    to: [ME],
+    declined: [],
+    cids: CIDS,
+    meta: META,
+    ...overrides.info,
+  };
+  const stage = overrides.stage || fakeStage();
+  const progressOf = overrides.progressOf || (() => new Uint8Array(0));
+
+  const api = {
+    // A fresh copy per call, and a null list stays null: that is what the wire
+    // carries for a slice the server never allocated.
+    transfer: async () => ({
+      ...info,
+      to: Array.isArray(info.to) ? [...info.to] : info.to,
+      declined: Array.isArray(info.declined) ? [...info.declined] : info.declined,
+    }),
+    presence: async () => overrides.online || [PEER],
+    queue: async () => overrides.queue || [],
+    getProgress: async (id, node) => progressOf(node),
+    putProgress: async (id, bitmap) => { log.progress.push({ id, bitmap }); },
+    signal: async () => {},
+    whoami: async () => ({ node: ME }),
+  };
+
+  const channel = fakeChannel();
+  const opened = () => ({ channel, close: () => {} });
+
+  const transport = {
+    open: overrides.open || (async (node, id, signal) => {
+      log.opens.push({ node, id });
+      signal?.addEventListener('abort', () => { log.aborted++; });
+      return opened();
+    }),
+    accept: overrides.accept || (async (msg, signal) => {
+      log.accepts.push(msg);
+      signal?.addEventListener('abort', () => { log.aborted++; });
+      return opened();
+    }),
+    answer: async (msg) => { log.answers.push(msg); },
+  };
+
+  const sessions = makeSessions({
+    api,
+    transport,
+    openStage: async () => stage,
+    negotiate: overrides.negotiate
+      || (async () => ({ accepted: true, sent: CIDS.length, held: 0 })),
+    receive: overrides.receive || (async () => ({ accepted: true, received: 0 })),
+    loadMaster: async () => (overrides.locked ? null : key),
+    identity: async () => ME,
+    handshakeMs: overrides.handshakeMs ?? 200,
+    flushMs: 50,
+    cooldownMs: overrides.cooldownMs ?? 0,
+    confirmTries: overrides.confirmTries ?? 2,
+    confirmGapMs: 0,
+    presencePollMs: 0,
+    wait: () => Promise.resolve(),
+    now: overrides.now || (() => Date.now()),
+  });
+
+  return { sessions, api, transport, stage, log, info, channel };
+}
+
+const offerFrom = (node = PEER, transfer = ID) => b64encode(new TextEncoder().encode(
+  JSON.stringify({ kind: 'offer', from: node, transfer, sdp: 'v=0' })));
+
+test('a peer gets one session at a time', async () => {
+  let release = null;
+  let holding = true;
+  const h = harness({
+    info: SENDING,
+    open: (node, id) => {
+      h.log.opens.push({ node, id });
+      const opened = { channel: h.channel, close: () => {} };
+      if (!holding) return Promise.resolve(opened);
+      return new Promise((resolve) => { release = () => resolve(opened); });
+    },
+    handshakeMs: 0,
+  });
+
+  // Two concurrent offers to the same device. A second channel would interleave
+  // its chunk frames with the first and corrupt both transfers.
+  const first = h.sessions.startSend(ID);
+  const second = h.sessions.startSend(ID);
+  await settle();
+  assert.equal(h.log.opens.length, 1);
+
+  holding = false;
+  release();
+  await Promise.all([first, second]);
+
+  // And the slot is given back, so the next drain is not blocked forever.
+  await h.sessions.startSend(ID);
+  assert.equal(h.log.opens.length, 2);
+});
+
+test('a receiver writes its progress after a session that failed', async () => {
+  const stage = fakeStage([0, 1]);
+  const h = harness({
+    stage,
+    receive: async () => { throw new Error('the connection dropped'); },
+  });
+
+  await h.sessions.handleSignal(offerFrom());
+
+  // Two of three chunks landed before the drop. Without this write the sender
+  // has no way to learn that and would start again from nothing.
+  assert.equal(h.log.progress.length, 1);
+  assert.equal(h.log.progress[0].id, ID);
+  assert.deepEqual([...h.log.progress[0].bitmap], [0b011]);
+});
+
+test('a receiver writes its progress after a session that succeeded', async () => {
+  const stage = fakeStage([0, 1, 2]);
+  const h = harness({ stage });
+  await h.sessions.handleSignal(offerFrom());
+  assert.equal(h.log.progress.length, 1);
+  assert.deepEqual([...h.log.progress[0].bitmap], [0b111]);
+});
+
+test('staged chunks survive a session the recipient has not confirmed', async () => {
+  const stage = fakeStage([0, 1, 2]);
+  // The recipient reports two of three. A chunk whose delivery failed after it
+  // left this device is exactly this case, and deleting here would lose it.
+  const h = harness({
+    info: SENDING,
+    stage,
+    progressOf: () => new Uint8Array([0b011]),
+  });
+
+  await h.sessions.startSend(ID);
+  assert.equal(stage.cleared, 0);
+  assert.equal(stage.store.size, 3);
+});
+
+test('staged chunks are dropped once the recipient confirms every one', async () => {
+  const stage = fakeStage([0, 1, 2]);
+  const h = harness({
+    info: SENDING,
+    stage,
+    progressOf: () => new Uint8Array([0b111]),
+  });
+
+  await h.sessions.startSend(ID);
+  assert.equal(stage.cleared, 1);
+});
+
+test('a refusal is final and is not offered again', async () => {
+  const h = harness({
+    info: SENDING,
+    negotiate: async () => ({ accepted: false, sent: 0, held: 0, reason: 'not now' }),
+  });
+
+  await h.sessions.startSend(ID);
+  await h.sessions.startSend(ID);
+  // Re-offering would deliver a file the recipient said no to.
+  assert.equal(h.log.opens.length, 1);
+});
+
+test('a failure is retried where a refusal is not', async () => {
+  let attempts = 0;
+  const h = harness({
+    info: SENDING,
+    negotiate: async () => {
+      attempts++;
+      throw new Error('the connection dropped');
+    },
+  });
+
+  await h.sessions.startSend(ID);
+  await h.sessions.startSend(ID);
+  assert.equal(attempts, 2);
+});
+
+test('a failed peer is left alone until its cooldown expires', async () => {
+  let clock = 1000;
+  const h = harness({
+    info: SENDING,
+    negotiate: async () => { throw new Error('the connection dropped'); },
+    cooldownMs: 5000,
+    now: () => clock,
+  });
+
+  await h.sessions.startSend(ID);
+  await h.sessions.startSend(ID);
+  assert.equal(h.log.opens.length, 1);
+
+  clock += 5001;
+  await h.sessions.startSend(ID);
+  assert.equal(h.log.opens.length, 2);
+});
+
+test('a handshake that never completes releases the peer', async () => {
+  let working = false;
+  const h = harness({
+    info: SENDING,
+    open: (node, id, signal) => {
+      h.log.opens.push({ node, id });
+      signal?.addEventListener('abort', () => { h.log.aborted++; });
+      if (working) return Promise.resolve({ channel: h.channel, close: () => {} });
+      // A peer that answered the signal and then went quiet.
+      return new Promise(() => {});
+    },
+    handshakeMs: 30,
+  });
+
+  const outcome = await Promise.race([
+    h.sessions.startSend(ID).then(() => 'settled'),
+    sleep(1000).then(() => 'hung'),
+  ]);
+  assert.equal(outcome, 'settled');
+  // The abandoned connection is told to close: nothing else ever will.
+  assert.equal(h.log.aborted, 1);
+
+  working = true;
+  await h.sessions.startSend(ID);
+  assert.equal(h.log.opens.length, 2);
+});
+
+test('an offer whose chunk list is not the transfer is refused', async () => {
+  let handlers = null;
+  const h = harness({
+    receive: async (channel, given) => {
+      handlers = given;
+      return { accepted: false, received: 0 };
+    },
+  });
+
+  await h.sessions.handleSignal(offerFrom());
+  assert.deepEqual(await handlers.onOffer({ cids: CIDS }), { accept: true });
+
+  const wrong = await handlers.onOffer({ cids: ['d'.repeat(64)] });
+  assert.equal(wrong.accept, false);
+});
+
+test('an offer for a transfer this device already declined is refused', async () => {
+  let handlers = null;
+  const h = harness({
+    info: { declined: [ME] },
+    receive: async (channel, given) => {
+      handlers = given;
+      return { accepted: false, received: 0 };
+    },
+  });
+
+  await h.sessions.handleSignal(offerFrom());
+  const decision = await handlers.onOffer({ cids: CIDS });
+  assert.equal(decision.accept, false);
+});
+
+test('a chunk index outside the transfer is not staged', async () => {
+  const stage = fakeStage();
+  let handlers = null;
+  const h = harness({
+    stage,
+    receive: async (channel, given) => {
+      handlers = given;
+      return { accepted: true, received: 0 };
+    },
+  });
+
+  await h.sessions.handleSignal(offerFrom());
+  await handlers.onChunk(CIDS.length, new Uint8Array([1]));
+  await handlers.onChunk(-1, new Uint8Array([1]));
+  await handlers.onChunk(1.5, new Uint8Array([1]));
+  assert.equal(stage.store.size, 0);
+
+  await handlers.onChunk(2, new Uint8Array([1]));
+  assert.equal(stage.store.size, 1);
+});
+
+test('an offer from anyone but the transfer sender is ignored', async () => {
+  const h = harness({});
+  // The relay hands the payload over without stamping an identity onto it, so
+  // the claim is checked against the server's own record of who sent this.
+  await h.sessions.handleSignal(offerFrom('laptop'));
+  assert.equal(h.log.accepts.length, 0);
+  assert.equal(h.log.progress.length, 0);
+});
+
+test('a malformed signalling payload is dropped rather than acted on', async () => {
+  const h = harness({});
+  await h.sessions.handleSignal('not base64 at all !!');
+  await h.sessions.handleSignal(b64encode(new TextEncoder().encode('{')));
+  // A transfer id that would become a path segment if it were ever trusted.
+  await h.sessions.handleSignal(b64encode(new TextEncoder().encode(JSON.stringify({
+    kind: 'offer', from: PEER, transfer: '../../etc', sdp: 'v=0',
+  }))));
+  assert.equal(h.log.accepts.length, 0);
+});
+
+test('an answer is handed to the transport and starts no session', async () => {
+  const h = harness({});
+  await h.sessions.handleSignal(b64encode(new TextEncoder().encode(JSON.stringify({
+    kind: 'answer', from: PEER, transfer: ID, sdp: 'v=0',
+  }))));
+  assert.equal(h.log.answers.length, 1);
+  assert.equal(h.log.accepts.length, 0);
+});
+
+test('a drain offers every queued transfer and survives one that fails', async () => {
+  const second = 'b'.repeat(32);
+  let calls = 0;
+  const h = harness({
+    info: SENDING,
+    queue: [{ id: ID, to: [PEER], declined: [] }, { id: second, to: [PEER], declined: [] }],
+    negotiate: async () => {
+      calls++;
+      if (calls === 1) throw new Error('the connection dropped');
+      return { accepted: true, sent: 0, held: CIDS.length };
+    },
+  });
+
+  await h.sessions.drainQueue();
+  assert.equal(h.log.opens.length, 2);
+});
+
+test('a list the server never allocated arrives as null and is still a list', async () => {
+  // Go marshals a slice it never allocated as null, so "declined" on a transfer
+  // nobody has refused is literally null on the wire. Reading it as an array
+  // without this is a crash on the first transfer anyone ever sends.
+  const stage = fakeStage([0, 1, 2]);
+  const h = harness({
+    info: { sender: ME, to: [PEER], declined: null },
+    stage,
+    queue: [{ id: ID, to: null, declined: null }],
+    progressOf: () => new Uint8Array([0b111]),
+  });
+
+  await h.sessions.drainQueue();
+  assert.equal(h.log.opens.length, 1);
+  assert.equal(stage.cleared, 1);
+});
+
+test('a locked device offers nothing, because it cannot open the metadata', async () => {
+  const h = harness({ info: SENDING, locked: true });
+  await h.sessions.startSend(ID);
+  assert.equal(h.log.opens.length, 0);
+});
+
+test('a malformed transfer id never reaches a URL', async () => {
+  const h = harness({ info: SENDING });
+  await assert.rejects(() => h.sessions.startSend('../../etc/passwd'));
+  await assert.rejects(() => h.sessions.startSend('A'.repeat(32)));
+  await assert.rejects(() => h.sessions.startSend(''));
+});

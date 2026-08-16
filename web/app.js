@@ -3,6 +3,7 @@ import {
   saveMaster, loadMaster, b64decode, kvGet, kvPut,
 } from './crypto.js';
 import { api, ApiError } from './api.js';
+import { requestPersistence } from './staging.js';
 
 export const state = { mk: null, mode: MODE_SEALED, config: null, me: null };
 
@@ -101,13 +102,45 @@ function enterApp() {
     if (event.data?.type === 'show' && views.has(event.data.view)) showView(event.data.view);
   });
   listen();
+  // Delivery is peer to peer, so an open app is one that both sends what it owes
+  // and takes what is owed to it. Every failure in here is logged: a device that
+  // cannot run sessions is still a device that can browse its inbox.
+  startSessions().catch((err) => console.warn('session setup failed', err));
+}
+
+// Loaded here rather than imported at the top so the peer connection and the
+// whole direct-transfer path stay out of the boot path, which is the one an
+// unlock has to wait behind.
+async function startSessions() {
+  const loading = import('./session.js');
+  // Registered before anything is awaited, so a peer that offers the moment this
+  // stream opens is answered rather than missed.
+  onSignal(async (payload) => {
+    try {
+      await (await loading).handleSignal(payload);
+    } catch (err) {
+      console.warn('a signal could not be handled', err);
+    }
+  });
+
+  const { drainQueue } = await loading;
+  // Asked for before anything is staged, so a queued transfer is not evicted
+  // between the two devices being online.
+  await requestPersistence();
+  drainQueue();
+  onInbox(() => drainQueue());
 }
 
 const listeners = new Set();
+const signalListeners = new Set();
 
 // A view calls this to be told when something arrives. The event carries no
 // detail, so the handler re-reads whatever it needs.
 export function onInbox(fn) { listeners.add(fn); }
+
+// A signal is the opposite: it carries the whole payload, because a session
+// description has nowhere else to be read from.
+export function onSignal(fn) { signalListeners.add(fn); }
 
 // The open stream is what makes the inbox live without asking for a
 // notification permission. Push stays for the case this cannot cover: an app
@@ -116,6 +149,12 @@ function listen() {
   const source = new EventSource('/api/events');
   source.addEventListener('inbox', () => {
     for (const fn of listeners) fn();
+  });
+  // The payload is base64 because an SSE data field ends at the first newline
+  // and a session description is full of them. It is passed on untouched: the
+  // encoding is the stream's problem and the contents are the session's.
+  source.addEventListener('signal', (event) => {
+    for (const fn of signalListeners) fn(event.data);
   });
   // EventSource reconnects on its own after a drop, so there is nothing to
   // schedule here. This only reports a stream the browser gave up on.

@@ -65,6 +65,19 @@ export const api = {
   inbox: () => json('/api/inbox'),
   history: () => json('/api/history'),
 
+  // The four calls direct delivery is made of. presence says who can be reached
+  // right now, signal hands one opaque string to one of them, queue says what
+  // this device still owes, and the two progress calls are how a sender learns
+  // what actually landed. A signal to a device with no open stream answers 503,
+  // which is not an error to hide: it is how the sender decides to stay queued.
+  presence: () => json('/api/presence'),
+  signal: (to, payload) => postJSON('/api/signal', { to, payload }),
+  queue: () => json('/api/queue'),
+  putProgress: (id, bitmap) => sendBytes(`/api/transfer/${id}/progress`, bitmap),
+  getProgress: async (id, node) =>
+    new Uint8Array(await (await req(
+      `/api/transfer/${id}/progress?node=${encodeURIComponent(node)}`)).arrayBuffer()),
+
   // The node this endpoint belongs to comes from the connection, not from here,
   // so the body is only the browser's own PushSubscription.
   subscribePush: (sub) => postJSON('/api/push/subscribe', sub),

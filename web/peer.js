@@ -95,6 +95,11 @@ export function receive(channel, { onOffer, has, onChunk }) {
   return new Promise((resolve, reject) => {
     let pending = null;
     let received = 0;
+    // The event dispatcher does not await this handler, so a DONE can be
+    // delivered while an onChunk write is still in flight. Every write is
+    // chained onto this promise, which keeps them in arrival order and gives
+    // completion something to wait on.
+    let writes = Promise.resolve();
 
     channel.onmessage = async (event) => {
       try {
@@ -107,8 +112,8 @@ export function receive(channel, { onOffer, has, onChunk }) {
             : new Uint8Array(event.data);
           const index = pending;
           pending = null;
-          await onChunk(index, bytes);
-          received++;
+          writes = writes.then(() => onChunk(index, bytes)).then(() => { received++; });
+          await writes;
           return;
         }
 
@@ -132,6 +137,10 @@ export function receive(channel, { onOffer, has, onChunk }) {
           return;
         }
         if (frame.type === WIRE.DONE) {
+          // The transfer is not done until the last body is written. Resolving
+          // ahead of the writes would report a short count and would let a
+          // failed write be swallowed by an already settled promise.
+          await writes;
           resolve({ accepted: true, received });
         }
       } catch (err) {

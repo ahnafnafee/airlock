@@ -144,3 +144,55 @@ test('a body arriving after its chunk completes is ignored', async () => {
 
   assert.deepEqual(got, [[0, bodies[0]]]);
 });
+
+// A real data channel delivers each message as its own task and never waits for
+// the handler it called, so DONE can land while an onChunk write is still in
+// flight. These two drive receive directly with that timing, which pipePair's
+// microtask delivery hides.
+function deliverInOrder(recv) {
+  const deliver = (data) => { recv.onmessage({ data }); };
+  deliver(JSON.stringify({ type: WIRE.OFFER, ...MANIFEST }));
+  return new Promise((r) => setTimeout(r, 0)).then(() => {
+    for (let i = 0; i < bodies.length; i++) {
+      deliver(JSON.stringify({ type: WIRE.CHUNK, index: i }));
+      deliver(bodies[i]);
+    }
+    deliver(JSON.stringify({ type: WIRE.DONE }));
+  });
+}
+
+test('completion waits for every chunk write to land', async () => {
+  const [, recv] = pipePair();
+  const written = [];
+  const receiving = receive(recv, {
+    onOffer: async () => ({ accept: true }),
+    has: async () => false,
+    onChunk: async (i, bytes) => {
+      await new Promise((r) => setTimeout(r, 5));
+      written.push([i, bytes]);
+    },
+  });
+  await deliverInOrder(recv);
+  const result = await receiving;
+
+  assert.equal(result.accepted, true);
+  assert.equal(result.received, bodies.length);
+  assert.deepEqual(written, bodies.map((b, i) => [i, b]));
+});
+
+test('a chunk write that fails fails the transfer', async () => {
+  // Resolving on DONE ahead of the writes would settle the promise first and
+  // turn this rejection into a silent success.
+  const [, recv] = pipePair();
+  const receiving = receive(recv, {
+    onOffer: async () => ({ accept: true }),
+    has: async () => false,
+    onChunk: async (i) => {
+      await new Promise((r) => setTimeout(r, 5));
+      if (i === 1) throw new Error('the store refused the chunk');
+    },
+  });
+  await deliverInOrder(recv);
+
+  await assert.rejects(receiving, /the store refused the chunk/);
+});

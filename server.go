@@ -356,13 +356,15 @@ func (s *Server) putProgress(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getProgress(w http.ResponseWriter, r *http.Request) {
-	// A sender asks for a recipient's progress, so the node is a parameter here
-	// rather than the caller.
+	// Two different nodes. The caller is the authenticated device asking, and it
+	// has to be able to see the transfer at all. The node parameter is whose
+	// progress is being read, which a sender legitimately asks about for each of
+	// its recipients.
 	node := r.URL.Query().Get("node")
 	if node == "" {
 		node = who(r).Node
 	}
-	bitmap, err := s.cfg.Transfers.Progress(r.PathValue("id"), node)
+	bitmap, err := s.cfg.Transfers.Progress(r.PathValue("id"), who(r).Node, node)
 	if fail(w, err) {
 		return
 	}

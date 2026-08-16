@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -571,7 +572,7 @@ func TestProgressIsPerRecipient(t *testing.T) {
 	if err := tr.SetProgress(rec.ID, "desktop", []byte{0b01}); err != nil {
 		t.Fatal(err)
 	}
-	desktop, err := tr.Progress(rec.ID, "desktop")
+	desktop, err := tr.Progress(rec.ID, "pixel", "desktop")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -579,7 +580,7 @@ func TestProgressIsPerRecipient(t *testing.T) {
 		t.Fatalf("desktop progress = %v", desktop)
 	}
 	// One device holding a chunk says nothing about another.
-	laptop, err := tr.Progress(rec.ID, "laptop")
+	laptop, err := tr.Progress(rec.ID, "pixel", "laptop")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -595,6 +596,70 @@ func TestProgressRejectsAWrongSizedBitmap(t *testing.T) {
 	// would leave a bitmap whose bits do not line up with the chunk list.
 	if err := tr.SetProgress(rec.ID, "desktop", []byte{0, 0, 0}); !errors.Is(err, ErrBadID) {
 		t.Fatalf("err = %v, want ErrBadID", err)
+	}
+}
+
+// Progress is a read over the same resource as SetProgress, so it needs the same
+// scoping. This is the third time this class has appeared here: history, then
+// delete, then this. See TestEveryIdTakingMethodIsScoped for the tripwire.
+func TestProgressReadRequiresVisibility(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1)})
+	if err := tr.SetProgress(rec.ID, "desktop", []byte{1}); err != nil {
+		t.Fatal(err)
+	}
+
+	// An unrelated device knowing the id is not authorization. A 128-bit random
+	// id is not a control once it reaches a log or a screenshot.
+	if _, err := tr.Progress(rec.ID, "laptop", "desktop"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound for a device the transfer never involved", err)
+	}
+	// The sender legitimately reads each recipient's progress.
+	if _, err := tr.Progress(rec.ID, "pixel", "desktop"); err != nil {
+		t.Fatalf("the sender should be able to read progress: %v", err)
+	}
+	// So does the recipient, about itself.
+	if _, err := tr.Progress(rec.ID, "desktop", "desktop"); err != nil {
+		t.Fatalf("the recipient should be able to read its own progress: %v", err)
+	}
+}
+
+// A tripwire rather than a test of behavior. Every exported method here that
+// acts on a single transfer must refuse a caller the transfer does not involve,
+// and that has now been forgotten three times. Adding a method changes the
+// count, which fails this test and forces a decision about scoping rather than
+// letting the omission ship quietly.
+func TestEveryIdTakingMethodIsScoped(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1)})
+	const stranger = "laptop"
+
+	refusals := map[string]error{
+		"Delete":      tr.Delete(rec.ID, stranger),
+		"Decline":     tr.Decline(rec.ID, stranger),
+		"SetProgress": tr.SetProgress(rec.ID, stranger, []byte{1}),
+	}
+	for name, err := range refusals {
+		if !errors.Is(err, ErrNotFound) {
+			t.Errorf("%s(%q) = %v, want ErrNotFound", name, stranger, err)
+		}
+	}
+	if _, err := tr.Progress(rec.ID, stranger, "desktop"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Progress = %v, want ErrNotFound", err)
+	}
+	if _, err := tr.Get(rec.ID); err != nil {
+		t.Fatal("a refused call must not have modified anything")
+	}
+
+	// Get and OpenRecord are deliberately unscoped: the HTTP layer gates them,
+	// and the relay path needs them. If that changes, scope them and move them
+	// into the table above.
+	const exportedMethods = 14
+	if got := reflect.TypeOf(tr).NumMethod(); got != exportedMethods {
+		t.Fatalf("Transfers has %d exported methods, expected %d. "+
+			"If you added one that acts on a single transfer, scope it with "+
+			"visibleTo and add it to this test before updating the count.",
+			got, exportedMethods)
 	}
 }
 

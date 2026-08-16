@@ -462,7 +462,31 @@ func (t *Transfers) SetProgress(id, node string, bitmap []byte) error {
 // Progress reports what a recipient has staged. A recipient that has written
 // nothing yet is not an error: it has nothing, which is what an empty bitmap
 // says.
-func (t *Transfers) Progress(id, node string) ([]byte, error) {
+//
+// caller and node are different people. caller is the authenticated device
+// asking, and it must be able to see the transfer at all. node is whose progress
+// is being read, which a sender legitimately asks about for each of its
+// recipients.
+//
+// The scoping is not optional just because a transfer id is 128 random bits.
+// Treating an unguessable id as the only control is a capability URL, and it
+// stops being a control the first time an id reaches a log, a screenshot, or a
+// bug report.
+func (t *Transfers) Progress(id, caller, node string) ([]byte, error) {
+	info, err := t.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if !visibleTo(info.Sender, info.To, caller) {
+		return nil, ErrNotFound
+	}
+	return t.progressOf(id, node)
+}
+
+// progressOf is the unscoped read. Expiry and completeness checks are the
+// server's own work rather than something done for a device, so they go through
+// here, exactly as the sweep goes through remove rather than Delete.
+func (t *Transfers) progressOf(id, node string) ([]byte, error) {
 	dir, err := t.transferDir(id)
 	if err != nil {
 		return nil, err
@@ -507,7 +531,7 @@ func (t *Transfers) fullyDelivered(info *TransferInfo) bool {
 		if contains(info.Declined, node) {
 			continue
 		}
-		bitmap, err := t.Progress(info.ID, node)
+		bitmap, err := t.progressOf(info.ID, node)
 		if err != nil || len(bitmap) != want {
 			return false
 		}

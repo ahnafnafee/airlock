@@ -285,7 +285,7 @@ git commit -m "feat(events): presence and an opaque signalling relay"
 
 **Interfaces:**
 - New: `func (t *Transfers) SetProgress(id, node string, bitmap []byte) error`
-- New: `func (t *Transfers) Progress(id, node string) ([]byte, error)`
+- New: `func (t *Transfers) Progress(id, caller, node string) ([]byte, error)`, scoped to the caller, with an unscoped `progressOf` for the server's own use
 - New: `func (t *Transfers) Queue(sender string) ([]*TransferInfo, error)`
 - New routes: `PUT /api/transfer/{id}/progress`, `GET /api/transfer/{id}/progress`, `GET /api/queue`
 
@@ -407,7 +407,25 @@ func (t *Transfers) SetProgress(id, node string, bitmap []byte) error {
 	return atomicWrite(filepath.Join(dir, progressName(node)), bitmap)
 }
 
-func (t *Transfers) Progress(id, node string) ([]byte, error) {
+// caller and node are different people. caller is the authenticated device
+// asking and must be able to see the transfer; node is whose progress is read,
+// which a sender legitimately asks about for each recipient. A 128-bit random
+// id is not a substitute for this check: an unguessable id stops being a control
+// the moment it reaches a log or a screenshot.
+func (t *Transfers) Progress(id, caller, node string) ([]byte, error) {
+	info, err := t.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if !visibleTo(info.Sender, info.To, caller) {
+		return nil, ErrNotFound
+	}
+	return t.progressOf(id, node)
+}
+
+// progressOf is the unscoped read, for the server's own completeness checks,
+// exactly as the sweep uses remove rather than Delete.
+func (t *Transfers) progressOf(id, node string) ([]byte, error) {
 	dir, err := t.transferDir(id)
 	if err != nil {
 		return nil, err

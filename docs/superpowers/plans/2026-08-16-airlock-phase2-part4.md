@@ -256,6 +256,8 @@ So: the sending device as the title, the filename and size as the body, the tran
 
 **The thumbnail cannot be a `blob:` URL.** Notification images are fetched by the browser process rather than by page script, and a blob URL minted inside a worker is not reliably reachable from there. The worker serves it from a same-origin route it intercepts instead, exactly as it already does for `/dl/{id}`.
 
+**Do not touch the download's `Content-Disposition`.** It comes from `contentDisposition()` in `web/naming.js`, which is covered by `web/naming.test.mjs`. Building that header inline is how a file called `holiday photo.jpg` ends up saved as `holiday%20photo.jpg`: the plain parameter is an ASCII fallback carrying the name literally, and only the starred parameter is percent-encoded. Leave the import and the call alone.
+
 - [ ] **Step 1: Confirm the icons**
 
 The icons are already generated and committed: `web/icon-192.png`, `web/icon-512.png`, `web/icon-maskable.png` and `web/icon-badge.png`. Do not write a new generator.

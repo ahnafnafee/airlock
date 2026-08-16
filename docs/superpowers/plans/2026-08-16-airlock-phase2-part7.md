@@ -430,3 +430,106 @@ git commit -m "docs: host on windows, macos or linux, with a vps as the recommen
 - [ ] Run embedded mode once, on any platform, with no `TS_AUTHKEY`. If it blocks printing an interactive login URL, it is unusable as a service and the docs must not recommend it.
 
 Record each result in `docs/benchmarks.md` or a sibling `docs/platform-notes.md`, and correct any document that stated an unverified item as fact.
+
+---
+
+### Task 41: Anything is a file
+
+**Files:**
+- Modify: `web/views/send.js`
+- Test: `web/upload.test.mjs`, `web/naming.test.mjs`
+
+**Nothing in the transfer path restricts a file type, and nothing should.** Chunks are bytes, `upload.js` falls back to `application/octet-stream` when the browser cannot identify a file, and the share target accepts `*/*`. The enumerated list in `file_handlers` is not a restriction: Chrome requires concrete MIME types there, and it only decides which types get an Open with entry. Drag and drop and the Windows context menu cover every other type.
+
+This task closes the two places where an unusual input is still handled badly, and adds the tests that say so.
+
+**A dropped folder currently yields nothing useful.** `dataTransfer.files` does not contain a directory's contents. Depending on the browser it is either empty, in which case the drop silently does nothing, or it contains the folder itself as a zero-byte entry, which stages a bogus transfer named after the folder. Both are bad, and the second is worse because it looks like it worked.
+
+- [ ] **Step 1: Walk dropped directories**
+
+Use `DataTransferItem.webkitGetAsEntry()`, which is what actually exposes directory contents, and fall back to `dataTransfer.files` when it is unavailable.
+
+```js
+// A dropped folder is not in dataTransfer.files. Without walking the entries,
+// dropping one either does nothing or stages the folder as a zero-byte file
+// named after itself, which looks like it worked.
+async function filesFromDrop(dataTransfer) {
+  const entries = [...(dataTransfer.items || [])]
+    .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
+    .filter(Boolean);
+  if (entries.length === 0) return [...dataTransfer.files];
+
+  const out = [];
+  const walk = async (entry, prefix) => {
+    if (entry.isFile) {
+      const file = await new Promise((res, rej) => entry.file(res, rej));
+      // Keep the folder structure in the name, since a transfer is a flat list
+      // of files and the path is the only thing carrying that information.
+      out.push(prefix ? new File([file], prefix + file.name, { type: file.type }) : file);
+      return;
+    }
+    const reader = entry.createReader();
+    // readEntries returns at most 100 per call and signals the end with an
+    // empty batch, so a folder of 500 files needs five calls.
+    for (;;) {
+      const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+      if (batch.length === 0) break;
+      for (const child of batch) await walk(child, `${prefix}${entry.name}/`);
+    }
+  };
+  for (const entry of entries) await walk(entry, '');
+  return out;
+}
+```
+
+Wire the drop handler to `await filesFromDrop(e.dataTransfer)`. Add `webkitdirectory` as a second picker button labelled `or a folder`, so the same capability exists without a mouse.
+
+- [ ] **Step 2: Add the round-trip tests**
+
+Append to `web/upload.test.mjs`, using the existing fake file and api helpers:
+
+```js
+test('a file with no extension and no detected type transfers', async () => {
+  // Common for archives, disk images, and anything from a unix machine. The
+  // browser reports an empty type and there is nothing to infer from the name.
+  const api = fakeApi();
+  const file = fakeFile(pseudoRandom(9000, 31), 'Makefile', '');
+  const r = await upload(file, { mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api });
+  assert.equal(r.sent, r.total);
+  assert.ok(r.total > 0);
+});
+
+test('unusual names and types reach the sealed metadata unchanged', async () => {
+  for (const [name, type] of [
+    ['日本語のファイル.txt', 'text/plain'],
+    ['🎉 party.gif', 'image/gif'],
+    ['a.b.c.d.tar.zst', 'application/zstd'],
+    ["it's a file, isn't it.bin", ''],
+    ['.hidden', ''],
+    ['CON', ''],
+    ['x'.repeat(200) + '.dat', 'application/octet-stream'],
+  ]) {
+    const api = fakeApi();
+    const r = await upload(fakeFile(pseudoRandom(3000, 7), name, type), {
+      mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api,
+    });
+    assert.ok(r.total > 0, `no chunks for ${name}`);
+    assert.equal(r.sent, r.total, `not everything sent for ${name}`);
+  }
+});
+```
+
+- [ ] **Step 3: Verify by hand**
+
+1. Drop a folder containing nested subfolders. Every file inside appears staged, with its path in the name, and no zero-byte entry named after the folder.
+2. Drop a file with no extension. It transfers and downloads with the same name.
+3. Send a file named with emoji and a space. It arrives with the name intact, not percent-encoded.
+4. Send a 0-byte file. It arrives as a 0-byte file.
+5. Send a `.exe`, a `.dmg` and a file with a made-up extension. Nothing refuses any of them.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add web/views/send.js web/upload.test.mjs
+git commit -m "feat(send): accept dropped folders and cover unusual names and types"
+```

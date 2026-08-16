@@ -4,9 +4,8 @@
 **Status:** revised for the full feature set, superseding the store-and-forward-only v1
 
 A self-hosted encrypted file transfer system. One Go binary, one installable web
-app, no native clients. Files move between the owner's devices through an
-inbox that only Tailscale-verified devices can reach, and that the host itself
-cannot read.
+app, no native clients. Files move directly between the owner's devices across a
+tailnet. The server queues and introduces them, and never holds their contents.
 
 ---
 
@@ -15,8 +14,8 @@ cannot read.
 Blip moves files between a person's devices over direct peer-to-peer links. Most
 of its engineering solves NAT traversal, transport encryption, and device
 identity. Tailscale already solves all three, so Airlock is what remains once
-Tailscale is assumed: an availability layer, a deduplicating content store, and
-a client good enough that nobody thinks about it.
+Tailscale is assumed: a queue that says who owes what to whom, a way for two
+devices to find each other, and a client fast enough that nobody thinks about it.
 
 **Transfers are peer to peer. The server is a queue, not a courier.**
 
@@ -75,14 +74,17 @@ features at once:
 
 | Feature | Falls out as |
 | --- | --- |
-| **Dedup** | Identical chunks produce identical ids, so the server stores one copy |
-| **Delta sync** | A changed file shares most chunk ids with its old version, so only changed chunks upload |
+| **Dedup** | Identical chunks produce identical ids, so a receiver that already holds one asks for nothing |
+| **Delta sync** | A changed file shares most chunk ids with its old version, so only the changed chunks cross |
 | **Resume after a drop** | Ask which ids are present, send the rest |
-| **Resume after a full page reload** | Same question. Re-chunking is deterministic, so no client state needs to survive the reload at all |
+| **Resume across sessions** | The same question, answered from a progress bitmap and local staging, so a transfer survives both devices closing |
 
-The last row is why the redesign is worth its cost. In the random-IV design,
-resume-after-reload required persisting upload state in IndexedDB and asking the
-user to reselect the file. Here it requires nothing.
+The last row is what makes queued peer-to-peer delivery practical rather than a
+compromise: two devices need to overlap repeatedly, not continuously.
+
+The question is identical whether it is asked of a peer over a data channel or of
+the server on the one opt-in path where it holds content. That is why there is
+one mechanism here and not two.
 
 ### Content-defined chunking
 
@@ -352,23 +354,42 @@ generate them, because it cannot see the image; it only stores what it is given.
 
 ---
 
-## 6. Relays
+## 6. Throughput
 
-A relay is a second Airlock instance that shares the queue, so devices talking to
-different instances can still reach each other.
+The product is moving large files quickly over a LAN, so the constraints that
+matter are the ones that bind at gigabit speeds rather than at internet speeds.
 
-Because content never passes through a server, a relay forwards **records and
-signalling, not files**: pending transfers, progress bitmaps, presence, and
-session descriptions. Two devices introduced by way of a relay still connect
-directly to each other.
+**One data channel is not enough.** A single WebRTC data channel typically caps
+well below a LAN link, because SCTP flow control and the message-oriented API get
+in the way. Airlock opens several channels on one connection and stripes chunks
+across them by index, each with its own send buffer and backpressure. This is the
+same reason a torrent client opens several connections.
 
-Relay links authenticate the way clients do: the peer is a tailnet node verified
-by `WhoIs` and present in the relay allowlist, so relaying does not weaken the
-reachability property.
+**Ordering is pure overhead here.** Chunks carry their index and are reassembled
+by it, so an ordered channel buys nothing and costs head-of-line blocking.
+Channels are opened unordered and still reliable.
 
-Clients may be configured with several instance URLs and use the first reachable
-one, which is what makes a relay useful when the primary is down.
+**Sealing is parallel, cutting is not.** A content-defined boundary depends on
+the bytes before it, so cutting is inherently sequential. Hashing and sealing a
+chunk depend on nothing but that chunk, so they run in a worker pool while the
+main thread keeps cutting.
 
+**The file is read once.** Chunks are sealed and staged in the same pass that
+cuts them, and sent from staging. An earlier design read the file twice, once to
+compute ids and once to seal, which is a second full read of a 20 GB file for
+nothing.
+
+**The device is kept awake for the duration.** A screen wake lock is held while a
+transfer is in flight, because the common way a large transfer fails is the
+sending device going to sleep halfway. No web API can keep a closed application
+running; this covers the case where it is open and idle.
+
+**What makes large transfers survive** is not speed but the three properties
+already in the design: resume from a persisted progress bitmap, memory that stays
+flat regardless of file size, and per-chunk authentication so a damaged chunk
+fails by itself instead of poisoning the file.
+
+---
 ---
 
 ## 7. HTTP API

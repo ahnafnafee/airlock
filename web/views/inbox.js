@@ -83,24 +83,46 @@ async function openMeta(mk, t) {
 registerView('inbox', 'Inbox', (panel) => {
   const list = el('ul', { class: 'rows' });
   panel.append(el('h2', {}, 'Inbox'), list);
+
+  // Which refresh owns the list. Rows are built before anything on screen is
+  // touched, and a run that is overtaken while awaiting drops its work rather
+  // than appending it under a newer one's. Two triggers can now land in the same
+  // turn, and the interleaved alternative shows every row twice.
+  let generation = 0;
+
   refresh();
   // The nudge says only that something changed, so the list is re-read rather
   // than patched from the event.
   onInbox(() => refresh());
+  // The second trigger, and the one no server event can stand in for. The inbox
+  // nudge is published once per transfer, when its meta record lands, and that
+  // is always before the peer offer that finds this device has no room. Without
+  // this a row rendered at nudge time would never start showing the storage note
+  // and, worse, would never stop showing it once space was freed and the
+  // transfer taken. Dynamically imported for the same reason the rest of this
+  // module reaches for session.js that way: the direct-transfer path stays out
+  // of the boot path.
+  import('../session.js')
+    .then(({ onStorageNote }) => onStorageNote(() => refresh()))
+    // A list that repaints on the inbox nudge alone is still a list. Worth a
+    // line, because the note it can no longer retire is one a person acts on.
+    .catch((err) => console.warn('the storage note will not repaint', err));
 
   async function refresh() {
+    const mine = ++generation;
     let transfers;
     try {
       transfers = await api.inbox();
     } catch (err) {
+      if (mine !== generation) return;
       // An empty list would read as an empty inbox, which is a different fact.
       list.replaceChildren(el('li', { class: 'bad' }, `The inbox did not load. ${err.message}`));
       return;
     }
-    list.replaceChildren();
 
     if (transfers.length === 0) {
-      list.append(el('li', { class: 'muted' },
+      if (mine !== generation) return;
+      list.replaceChildren(el('li', { class: 'muted' },
         'Nothing waiting. Anything sent from another device lands here.'));
       return;
     }
@@ -116,9 +138,12 @@ registerView('inbox', 'Inbox', (panel) => {
       console.warn('the storage note was not read', err);
     }
 
+    const rows = [];
     for (const t of transfers) {
-      list.append(await row(t, shortfallFor));
+      rows.push(await row(t, shortfallFor));
     }
+    if (mine !== generation) return;
+    list.replaceChildren(...rows);
   }
 
   async function row(t, shortfallFor = () => 0) {

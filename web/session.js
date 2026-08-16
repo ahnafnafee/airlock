@@ -443,6 +443,46 @@ export function makeSessions(deps) {
   // already know how to write one and this module does not.
   const shortfalls = new Map();
 
+  // A shortfall changes on this device's own clock, and nothing on the server
+  // ever says so. The inbox nudge is published once per transfer, when its meta
+  // record lands, which is always before the peer offer that discovers there is
+  // no room: a view that samples the map only on that nudge would render the
+  // note before there is one and never again. So the map pushes, and it pushes
+  // on the clear as well as on the set, since a row that keeps asking for space
+  // while the chunks are landing is the same lie in the other direction.
+  const noteListeners = new Set();
+
+  function onStorageNote(fn) {
+    noteListeners.add(fn);
+    return () => noteListeners.delete(fn);
+  }
+
+  // Fired only when the map actually moved, so an ordinary accepted offer, which
+  // clears a shortfall this transfer never had, costs no repaint.
+  function announceNote() {
+    for (const fn of noteListeners) {
+      try {
+        fn();
+      } catch (err) {
+        // A view that throws while repainting is that view's problem. Letting it
+        // out here would fail the offer and turn a cosmetic fault into a refused
+        // transfer.
+        console.warn('a storage note listener failed', err);
+      }
+    }
+  }
+
+  function setShortfall(transferId, bytes) {
+    if (shortfalls.get(transferId) === bytes) return;
+    shortfalls.set(transferId, bytes);
+    announceNote();
+  }
+
+  function clearShortfall(transferId) {
+    if (!shortfalls.delete(transferId)) return;
+    announceNote();
+  }
+
   // The one place a peer slot is taken. Two channels to the same device would
   // interleave chunk frames and corrupt both transfers, so a peer that is
   // already busy is skipped rather than queued behind. The map is written before
@@ -702,7 +742,7 @@ export function makeSessions(deps) {
           // on and all a peer is owed about how full this disk is.
           const short = await shortfall(frame.size);
           if (short > 0) {
-            shortfalls.set(info.id, short);
+            setShortfall(info.id, short);
             return {
               accept: false,
               reason: 'the receiving device is out of space',
@@ -711,8 +751,9 @@ export function makeSessions(deps) {
           }
           // Cleared on the way in rather than on the way out, so a transfer that
           // is being taken stops claiming a shortfall from the moment it is
-          // accepted rather than when it finishes.
-          shortfalls.delete(info.id);
+          // accepted rather than when it finishes, and the surface showing that
+          // claim is repainted rather than left to sample it again.
+          clearShortfall(info.id);
           return { accept: true };
         },
         has: (i) => stage.has(i),
@@ -872,12 +913,14 @@ export function makeSessions(deps) {
 
   // How many bytes short this device was the last time it refused this transfer
   // for want of room, or 0 if it never did. Read by the inbox row, which is the
-  // one surface the transfer already has on the device that has to act.
+  // one surface the transfer already has on the device that has to act. A row
+  // that is already on screen learns when this answer changes from
+  // onStorageNote rather than by asking again.
   function shortfallFor(transferId) {
     return shortfalls.get(transferId) || 0;
   }
 
-  return { startSend, handleSignal, drainQueue, shortfallFor };
+  return { startSend, handleSignal, drainQueue, shortfallFor, onStorageNote };
 }
 
 // The app's own instance. Its identity is read once and cached: it names this
@@ -904,4 +947,6 @@ const live = makeSessions({
   identity,
 });
 
-export const { startSend, handleSignal, drainQueue, shortfallFor } = live;
+export const {
+  startSend, handleSignal, drainQueue, shortfallFor, onStorageNote,
+} = live;

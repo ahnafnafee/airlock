@@ -543,6 +543,78 @@ test('space freed after a refusal clears the note the row was showing', async ()
   assert.equal(h.sessions.shortfallFor(ID), 0);
 });
 
+test('a shortfall is announced when it appears and again when it is retired', async () => {
+  // The row that carries this note is rendered on the inbox nudge, which the
+  // server publishes once per transfer and always before the offer that
+  // discovers the disk is full. Sampling alone would show the note never, then
+  // keep showing it after the transfer had been taken, so the map has to say
+  // when it moves in either direction.
+  let short = 4096;
+  let handlers = null;
+  const h = harness({
+    shortfall: async () => short,
+    receive: async (channel, given) => {
+      handlers = given;
+      return { accepted: false, received: 0 };
+    },
+  });
+
+  const seen = [];
+  h.sessions.onStorageNote(() => seen.push(h.sessions.shortfallFor(ID)));
+
+  await h.sessions.handleSignal(offerFrom());
+  await handlers.onOffer({ cids: CIDS, size: 9e12 });
+  assert.deepEqual(seen, [4096]);
+
+  short = 0;
+  await h.sessions.handleSignal(offerFrom());
+  await handlers.onOffer({ cids: CIDS, size: 9e12 });
+  // The listener reads the same answer the row will, so what it saw is what the
+  // row would have painted: the note, then no note.
+  assert.deepEqual(seen, [4096, 0]);
+});
+
+test('an offer this device always had room for announces nothing', async () => {
+  // The clear runs on every accepted offer. A transfer that never claimed a
+  // shortfall has nothing to retire, and a repaint per accepted offer would be
+  // an inbox re-read per transfer for no change on screen.
+  let handlers = null;
+  const h = harness({
+    shortfall: async () => 0,
+    receive: async (channel, given) => {
+      handlers = given;
+      return { accepted: true, received: 0 };
+    },
+  });
+
+  let announced = 0;
+  h.sessions.onStorageNote(() => { announced++; });
+
+  await h.sessions.handleSignal(offerFrom());
+  await handlers.onOffer({ cids: CIDS, size: 9 });
+  assert.equal(announced, 0);
+});
+
+test('a listener that throws does not fail the offer it was told about', async () => {
+  // The listener is a view repainting. A fault in there is cosmetic, and letting
+  // it out of the offer handler would turn it into a refused transfer.
+  let handlers = null;
+  const h = harness({
+    shortfall: async () => 4096,
+    receive: async (channel, given) => {
+      handlers = given;
+      return { accepted: false, received: 0 };
+    },
+  });
+
+  h.sessions.onStorageNote(() => { throw new Error('the view fell over'); });
+
+  await h.sessions.handleSignal(offerFrom());
+  const decision = await handlers.onOffer({ cids: CIDS, size: 9e12 });
+  assert.equal(decision.retryable, true);
+  assert.equal(h.sessions.shortfallFor(ID), 4096);
+});
+
 test('a staged write refused for quota drops the partial stage and records nothing', async () => {
   // A stage that can never be completed holds exactly the disk that ran out, and
   // a bitmap written over it would claim positions this device no longer has.

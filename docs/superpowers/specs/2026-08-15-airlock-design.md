@@ -181,6 +181,30 @@ things from one dependency:
 
 Static assets embed into the binary. Deploy is one binary plus a systemd unit.
 
+### Where the server runs
+
+Anywhere on the tailnet, including a machine that is also a client.
+
+Since content moves peer to peer, the server is an identity gate, a queue, a
+presence table and a signalling postbox. It needs almost no disk and almost no
+bandwidth. That makes the old assumption of a Linux VPS with systemd a
+recommendation rather than a requirement.
+
+**A rented always-on box is still the recommendation**, because a queue is only
+useful when it is reachable, and a desktop that sleeps takes the ability to
+*start* new transfers with it. Transfers already in flight are unaffected, since
+those are between the two devices.
+
+**A machine can be both server and client.** Running the binary on a desktop and
+opening the app in that desktop's own browser is a supported, ordinary setup, not
+a development shortcut.
+
+**Running with no flags must work.** The binary picks a per-platform data
+directory, uses the host's Tailscale daemon, and serves on the tailnet address.
+A person should be able to download it, run it, and open the URL it prints.
+Anything that requires reading documentation before the first successful run is a
+defect in the defaults.
+
 ### Tailscale is the default, not the only mode
 
 - `--auth=tailscale` (default): tsnet node, `WhoIs` per request, allowlist.

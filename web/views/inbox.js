@@ -144,7 +144,9 @@ registerView('inbox', 'Inbox', (panel) => {
       // Flattened away when there is none, so a row without a thumbnail keeps
       // exactly the shape it had.
       thumbEl || [],
-      el('div', {}, el('div', { class: 'name' }, name), detailNode),
+      // The text block absorbs the row's free space so the thumbnail stays
+      // against the name it belongs to rather than drifting to the far side.
+      el('div', { class: 'rowtext' }, el('div', { class: 'name' }, name), detailNode),
       actions);
   }
 });

@@ -47,11 +47,30 @@ export async function makeThumbnail(file) {
   }
 }
 
+// A decode that never finishes must not outlive this. The upload seals and
+// stores the thumbnail before the first chunk goes up, so a promise that never
+// settles would hold an entire transfer open with no error and nothing on
+// screen to explain it. The bound is generous for grabbing one frame out of a
+// local file, and expiry costs only the picture, which most files do not have
+// in the first place.
+const VIDEO_TIMEOUT_MS = 5000;
+
 function videoFrame(file) {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(file);
     const video = document.createElement('video');
-    const done = (value) => { URL.revokeObjectURL(url); resolve(value); };
+    let settled = false;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      URL.revokeObjectURL(url);
+      // Detach the source so a decode still running has nothing left to hold.
+      video.removeAttribute('src');
+      video.load();
+      resolve(value);
+    };
+    const timer = setTimeout(() => done(null), VIDEO_TIMEOUT_MS);
 
     video.muted = true;
     video.preload = 'metadata';

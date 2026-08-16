@@ -1,5 +1,6 @@
 import {
-  DOMAIN, openChunk, openRecord, unpackHashes, modeOf, loadMaster, b64decode,
+  DOMAIN, MODE_SEALED, openChunk, openRecord, unpackHashes, modeOf, loadMaster,
+  b64decode,
 } from './crypto.js';
 
 // Registered with {type:'module'} so these imports work.
@@ -27,6 +28,17 @@ async function getOk(path) {
   return res;
 }
 
+// The mode byte decides whether the rest of a record is authenticated at all,
+// and it carries no tag of its own. A plaintext record opens with no key, so
+// its contents are whatever the writer chose, and a plaintext chunk is returned
+// unverified. Every record a download rests on is therefore required to be
+// sealed before it is opened, which is the same gate verifyCheck applies for
+// the same reason.
+async function openSealed(mk, domain, id, record) {
+  if (modeOf(record) !== MODE_SEALED) throw new Error('this transfer is not sealed');
+  return openRecord(mk, domain, id, record);
+}
+
 async function download(id) {
   // This id comes from whatever navigated here, so it is the least trustworthy
   // one in the app and is checked before it reaches a URL.
@@ -41,12 +53,9 @@ async function download(id) {
 
     const listRecord = new Uint8Array(
       await (await getOk(`/api/transfer/${id}/chunklist`)).arrayBuffer());
-    // The mode byte on the record says which scheme sealed this transfer, so a
-    // reader never has to be told.
-    const mode = modeOf(listRecord);
-    const hashes = unpackHashes(await openRecord(mk, DOMAIN.LIST, id, listRecord));
+    const hashes = unpackHashes(await openSealed(mk, DOMAIN.LIST, id, listRecord));
     const meta = JSON.parse(new TextDecoder().decode(
-      await openRecord(mk, DOMAIN.META, id, b64decode(info.meta))));
+      await openSealed(mk, DOMAIN.META, id, b64decode(info.meta))));
 
     if (hashes.length !== info.cids.length) {
       throw new Error('the chunk list and the server record disagree on length');
@@ -68,8 +77,10 @@ async function download(id) {
         if (!res.ok) { controller.error(new Error(`chunk ${i}: ${res.status}`)); return; }
         const sealed = new Uint8Array(await res.arrayBuffer());
         // Throws if the chunk was substituted, reordered, or corrupted: its key
-        // derives from the hash the sealed list gives for this position.
-        controller.enqueue(await openChunk(mk, mode, hashes[i], info.cids[i], sealed));
+        // derives from the hash the sealed list gives for this position. The
+        // mode is the constant the guard above already established, never a
+        // byte the server had a say in.
+        controller.enqueue(await openChunk(mk, MODE_SEALED, hashes[i], info.cids[i], sealed));
       },
     });
 

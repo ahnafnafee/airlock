@@ -1,6 +1,6 @@
 import { registerView, state, el } from '../app.js';
 import { api } from '../api.js';
-import { DOMAIN, openRecord, b64decode } from '../crypto.js';
+import { DOMAIN, MODE_SEALED, openRecord, modeOf, b64decode } from '../crypto.js';
 
 function humanSize(bytes) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -15,6 +15,38 @@ function ago(iso) {
   if (mins < 60) return `${mins}m ago`;
   if (mins < 1440) return `${Math.round(mins / 60)}h ago`;
   return `${Math.round(mins / 1440)}d ago`;
+}
+
+// openMeta returns either the transfer's meta record or the reason the row
+// cannot vouch for one.
+//
+// The mode byte decides whether the record is authenticated at all, and it
+// carries no tag of its own. A plaintext record opens with no key, so its name
+// and size would be whatever the writer chose, and a forged one would render as
+// an ordinary row under a filename an attacker picked. Nothing in this build
+// ever sends unsealed, so an unsealed record is refused and labeled with the
+// words the visual spec reserves for exactly that state.
+async function openMeta(mk, t) {
+  const unvouched = `from ${t.sender} · sealed with a different passphrase`;
+  let record;
+  try {
+    record = b64decode(t.meta);
+  } catch {
+    return { detail: unvouched };
+  }
+  if (modeOf(record) !== MODE_SEALED) {
+    return { detail: 'Not sealed. Anyone with access to the server can read this.' };
+  }
+  try {
+    return {
+      meta: JSON.parse(new TextDecoder().decode(
+        await openRecord(mk, DOMAIN.META, t.id, record))),
+    };
+  } catch {
+    // Sealed under a different passphrase, or tampered with. Say so rather than
+    // showing a name we cannot vouch for.
+    return { detail: unvouched };
+  }
 }
 
 registerView('inbox', 'Inbox', (panel) => {
@@ -50,17 +82,14 @@ registerView('inbox', 'Inbox', (panel) => {
     let openable = false;
 
     if (t.complete) {
-      try {
-        const meta = JSON.parse(new TextDecoder().decode(
-          await openRecord(state.mk, DOMAIN.META, t.id, b64decode(t.meta))));
+      const { meta, detail: refusal } = await openMeta(state.mk, t);
+      if (meta) {
         name = meta.name;
         detail = `${humanSize(meta.size)} · from ${t.sender} · ${ago(t.createdAt)}`;
         openable = true;
-      } catch {
-        // Sealed under a different passphrase, or tampered with. Say so rather
-        // than showing a name we cannot vouch for.
+      } else {
         name = 'Cannot open';
-        detail = `from ${t.sender} · sealed with a different passphrase`;
+        detail = refusal;
       }
     } else {
       // Counted over positions rather than as the id count minus the length of

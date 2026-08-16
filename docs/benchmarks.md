@@ -179,14 +179,23 @@ below aborts on the ones it can see, so these are the setup steps it cannot do
 for you. The first is the dangerous one, because it is the only one that can
 still produce a plausible-looking number.
 
-**The two modes do not share a URL.** `host` binds the server machine's own
-tailnet address, so it answers on that machine's tailnet name. `embedded` joins
-as its own tsnet node named by `-hostname`, default `airlock`, so it answers on
-`airlock.<tailnet>.ts.net`. Take the base URL for each mode from that mode's own
-startup, and do not reuse the first one for the second run. If the first server
-is still up when the second run starts, reusing its URL measures the first mode
-twice and reports the two as identical, which is a wrong answer that looks like
-a finding.
+**The mode is chosen by `-tailscale-mode`, and the two modes do not share a
+URL.** Start the server with `-tailscale-mode=host` for the first three runs and
+`-tailscale-mode=embedded` for the second three. The flag defaults to `host`, so
+a second server started without it is a second host-mode server, and the
+comparison quietly becomes host against host. Nothing downstream can catch that:
+the script cannot tell which mode answered, and two host runs agreeing to within
+a few percent is exactly what a real finding of "the modes are equivalent" would
+also look like.
+
+The two modes answer on different names, which is the other half of the same
+trap. `host` binds the server machine's own tailnet address, so it answers on
+that machine's tailnet name. `embedded` joins as its own tsnet node named by
+`-hostname`, default `airlock`, so it answers on `airlock.<tailnet>.ts.net`.
+Take the base URL for each mode from that mode's own startup, and do not reuse
+the first one for the second run. If the first server is still up when the
+second run starts, reusing its URL measures the first mode twice and reports the
+two as identical, which is a wrong answer that looks like a finding.
 
 **The client device must be allowed through the gate**, or every request is 403
 before the body is read. Two separate checks can produce that 403. The tailnet
@@ -243,15 +252,23 @@ for id in $ids; do
 done | sort | uniq -c
 end=$(date +%s%3N)
 
-echo "1 GiB in $((end - start)) ms = $((1024 * 1000 / (end - start))) MB/s"
+echo "$BASE tag=$TAG: 1 GiB in $((end - start)) ms = $((1024 * 1000 / (end - start))) MB/s"
 ```
 
 Run each mode three times with a fresh tag every time, and report the median:
 
 ```bash
-./benchmode.sh https://<host-mode-base> a1     # then a2, a3
-./benchmode.sh https://<embedded-mode-base> b1 # then b2, b3
+./benchmode.sh https://<host-mode-base> a1     # server started -tailscale-mode=host,     then a2, a3
+./benchmode.sh https://<embedded-mode-base> b1 # server started -tailscale-mode=embedded, then b2, b3
 ```
+
+The result line repeats the base URL and the tag so the transcript of a run
+carries the two facts that separate it from the other mode's runs, rather than
+leaving them to the operator's memory. For the mode itself, keep the server's
+own startup line with each number: it logs `host mode, allowing tailnet users
+[...]` or `embedded mode, allowing tailnet users [...]` before it serves
+anything. `/api/whoami` cannot stand in for that, because it reports the calling
+client's node and user, not the server's mode.
 
 **Read the count line before the throughput line.** A healthy run prints exactly
 `128 204 8388608` and nothing else. Any other status code appearing there means
@@ -293,10 +310,13 @@ that has nothing to do with either.
 
 ### What has and has not been verified here
 
-The command block above was executed end to end before publication, against a
-token-mode server on loopback: 128 of 128 requests returned 204 having uploaded
-8,388,608 bytes each, the `missing` guard correctly refused a reused tag, and
-the throughput line printed. So the commands run and the guard works.
+The command block above was executed end to end before publication, byte for
+byte as printed, against a token-mode server on loopback. The token went in
+through a `curl` config file rather than an edit to the script, since on a
+tailnet the identity comes from the network and the block needs no auth flags of
+its own. 128 of 128 requests returned 204 having uploaded 8,388,608 bytes each,
+the `missing` guard correctly refused a reused tag and exited 1, and the result
+line printed with its base URL and tag. So the commands run and the guard works.
 
 What has not happened is the measurement itself. No part of the table above was
 taken over a tailnet, and loopback throughput says nothing about either mode.

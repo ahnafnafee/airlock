@@ -106,6 +106,31 @@ That last one failed the first time it was run and is the reason
 ones it reopens from. Worth re-running after any change to the event stream or
 the queue drain.
 
+### Dedup, delta sync, history and background receive
+
+All measured, not inferred.
+
+- **Delta sync.** A 16 MB file, then the same file with a 256 KB slice replaced
+  at its midpoint. The second send reported **7 of 8 chunks already here**, so
+  content-defined chunking held its boundaries either side of the edit and one
+  chunk moved. The strip renders the stored segment at the position of the edit.
+  It did not before: it painted held chunks as a block from the start, so every
+  delta looked like a change at the tail whatever had changed.
+- **Dedup across devices.** Device A handed a 3 MB file to device B over the
+  peer path. B assembled it and uploaded it to the server, a fresh store at
+  **0 of 3**. A then offered the same bytes, sealed independently on its own
+  hardware, and the server recognized all of them: **3 of 3 already here**. Two
+  devices sealing one plaintext under one master key produce identical content
+  ids, which is what makes dedup a property of the household rather than of a
+  single device.
+- **Transfer history.** Deleting a transfer leaves a tombstone that still names
+  the file, because the sealed metadata travels with it. The row reads
+  `doc-v2.bin / sent, cleared just now`.
+- **Silent background receive.** With the receiving tab backgrounded
+  (`document.hidden` true before, during and after), a 3 MB direct transfer
+  arrived over the peer path with the server holding none of it, and the
+  assembled bytes matched the sender's hash. The tab was never focused.
+
 ## Not verified
 
 Nothing below has been run. Do not state any of it as fact in another document.

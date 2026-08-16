@@ -1,4 +1,4 @@
-import { registerView, showView, state, el } from '../app.js';
+import { registerView, showView, state, el, onInbox } from '../app.js';
 import { api } from '../api.js';
 import { uploadThroughServer, queueForDelivery } from '../upload.js';
 import { openStage } from '../staging.js';
@@ -243,12 +243,89 @@ registerView('send', 'Send', (panel) => {
     await sendNow(files);
   });
 
-  api.devices().then((devices) => {
-    for (const d of devices) {
-      if (d.node === state.me.node || !d.allowed) continue;
-      recipient.append(el('option', { value: d.node }, d.node));
+  // The picker is a view of a list the server owns, and that list changes while
+  // this view exists: a phone approved from the Devices view next door, or from
+  // another tab, has to become selectable without a reload. Nothing tells a
+  // person to reload, so a picker built once at mount is a device that cannot be
+  // reached at all.
+  //
+  // Which run owns the picker. A run overtaken while it awaited drops its result
+  // rather than drawing it over a newer one's.
+  let generation = 0;
+
+  async function refreshRecipients() {
+    const mine = ++generation;
+    let devices;
+    try {
+      devices = await api.devices();
+    } catch (err) {
+      // The options on screen are the last list the server confirmed. Emptying
+      // them because one request failed would turn a chosen destination into
+      // every device without anyone choosing that.
+      console.warn('the recipient list was not refreshed', err);
+      return;
     }
-  }).catch(() => {});
+    if (mine !== generation) return;
+    paintRecipients(devices);
+  }
+
+  // A device that cannot read what it is sent is not a destination, and neither
+  // is this device: a transfer addressed to yourself has nowhere to go.
+  function paintRecipients(devices) {
+    const reachable = devices
+      .filter((d) => d.allowed && d.node !== state.me?.node)
+      .map((d) => d.node);
+    // The first option is the standing "All my devices" entry rather than a
+    // device, so the comparison starts past it.
+    const drawn = [...recipient.children].slice(1).map((o) => o.value);
+    // Nothing is touched when nothing changed, so a refresh cannot close an open
+    // dropdown or disturb a selection that was never in question.
+    if (drawn.length === reachable.length
+      && drawn.every((node, i) => node === reachable[i])) return;
+
+    const chosen = recipient.value;
+    recipient.replaceChildren(el('option', { value: '' }, 'All my devices'));
+    for (const node of reachable) recipient.append(el('option', { value: node }, node));
+    // The selection survives the rebuild. Resetting it because a list reloaded
+    // would send the next press of Send somewhere nobody picked, which is a
+    // worse fault than the staleness this refresh exists to cure.
+    recipient.value = reachable.includes(chosen) ? chosen : '';
+    // Losing the destination is the one case the selection cannot be kept, and
+    // it is said out loud: quietly widening one device to all of them is exactly
+    // the silent change the line above refuses to make.
+    if (chosen && recipient.value !== chosen) {
+      status.className = 'data bad';
+      status.textContent = `${chosen} can no longer be reached, so no device is chosen.`;
+    }
+  }
+
+  refreshRecipients();
+
+  // Being shown is the trigger that matters, because app.js mounts a view at
+  // most once: leaving for the Devices view, approving a phone and coming back
+  // does not mount this panel again. There is no hook for a view being shown, so
+  // the signal is the attribute showView actually writes.
+  //
+  // ponytail: reading showView's own attribute write is a stand-in for a hook
+  // app.js does not offer. An onShow(fn) beside onInbox, or a mount that is
+  // handed a show callback, would say this directly and let both views that
+  // need it drop the observer.
+  new MutationObserver(() => { if (!panel.hidden) refreshRecipients(); })
+    .observe(panel, { attributes: true, attributeFilter: ['hidden'] });
+  // A window returning to the front has been away long enough for anything to
+  // have changed, including while this very panel stayed on screen.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && !panel.hidden) refreshRecipients();
+  });
+  // The one change the server announces. A device approved while this was open
+  // makes itself known by sending something, and replying to it needs that
+  // device in this picker.
+  //
+  // ponytail: an approval is not announced at all, so a phone approved from
+  // another machine while this screen sits untouched is learned on the next
+  // gesture rather than at once. Closing that gap means the server publishing a
+  // devices event alongside the inbox one.
+  onInbox(() => refreshRecipients());
 
   for (const type of ['dragenter', 'dragover']) {
     drop.addEventListener(type, () => drop.classList.add('over'));

@@ -1,4 +1,4 @@
-import { registerView, state, el } from '../app.js';
+import { registerView, state, el, onInbox } from '../app.js';
 import { api } from '../api.js';
 
 function ago(iso) {
@@ -26,23 +26,60 @@ registerView('devices', 'Devices', (panel) => {
     el('h2', {}, 'Devices'),
     el('p', { class: 'muted' }, provenance()),
     list);
+  // Which run owns the list. A run overtaken while it awaited drops its rows
+  // rather than drawing them over a newer one's, now that a click and a repaint
+  // can land in the same turn.
+  let generation = 0;
+  // Whether the rows on screen came from the server, which decides what a later
+  // failure is allowed to do to them.
+  let loaded = false;
+
   refresh();
+  // A device the server learns about is one this list has to show without a
+  // reload, and app.js mounts a view at most once: leaving this panel and coming
+  // back does not build it again. There is no hook for a view being shown, so
+  // the signal is the attribute showView actually writes.
+  //
+  // ponytail: the send view watches the same attribute for the same reason, and
+  // the two copies exist because app.js offers no onShow(fn) for either of them
+  // to subscribe to. One hook there replaces both observers.
+  new MutationObserver(() => { if (!panel.hidden) refresh(); })
+    .observe(panel, { attributes: true, attributeFilter: ['hidden'] });
+  // A window returning to the front has been away long enough for a device to
+  // have been approved elsewhere while this panel stayed on screen.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && !panel.hidden) refresh();
+  });
+  // The one change the server announces. It says only that something arrived, so
+  // the list is re-read rather than patched from the event.
+  //
+  // ponytail: an approval or a revocation is announced by nothing, so a change
+  // made from another machine is learned on the next gesture rather than at
+  // once. Closing that gap means the server publishing a devices event.
+  onInbox(() => refresh());
 
   async function refresh() {
+    const mine = ++generation;
     let devices;
     try {
       devices = await api.devices();
     } catch (err) {
+      if (mine !== generation) return;
+      // Rows already drawn are the last list the server confirmed, and a refresh
+      // nobody asked for may not replace a real list with an error.
+      if (loaded) {
+        console.warn('the device list was not refreshed', err);
+        return;
+      }
       // An empty list would read as "nothing has ever reached this server",
       // which cannot be true of the device reading the list.
       list.replaceChildren(
         el('li', { class: 'bad' }, `The device list did not load. ${err.message}`));
       return;
     }
-    list.replaceChildren();
-    for (const d of devices) {
-      list.append(row(d));
-    }
+    if (mine !== generation) return;
+    loaded = true;
+    list.replaceChildren(...devices.map((d) => row(d)));
   }
 
   function row(d) {

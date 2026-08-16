@@ -533,3 +533,121 @@ test('unusual names and types reach the sealed metadata unchanged', async () => 
 git add web/views/send.js web/upload.test.mjs
 git commit -m "feat(send): accept dropped folders and cover unusual names and types"
 ```
+
+---
+
+### Task 42: iOS
+
+**Files:**
+- Create: `web/ios.js`, `web/ios.test.mjs`
+- Modify: `web/app.js`, `web/index.html`, `web/sw.js`, `web/session.js`, `web/manifest.webmanifest`
+- Modify: `README.md`
+
+**iOS is a supported platform with a narrower shape: installed to the Home Screen only, floor iOS 18.4.** Read section 8 of the design spec for the reasoning before starting. The short version is that three things are broken below 18.4 and two capabilities are cut outright.
+
+**Nothing here is a second code path where one shape can serve everywhere.** Two of the iOS constraints are already global in the plan, deliberately: OPFS writes go through a worker's sync access handle because Safari had no alternative before 26.0, and the service worker constructs its own download stream because no Safari can transfer one. Do not add an iOS branch for either.
+
+- [ ] **Step 1: Detection, and the install gate**
+
+`web/ios.js`:
+
+```js
+// Airlock runs on iOS only as a Home Screen web app. A Safari tab cannot request
+// push at all, its wake lock does not work, and its staged transfers can be
+// evicted after seven days without interaction.
+//
+// The reason this is a hard gate rather than a nudge: a Home Screen web app has
+// its own storage partition. It shares no IndexedDB, OPFS or service worker
+// registration with the same origin in a tab, so a passphrase set up in Safari
+// simply does not exist in the installed app. Letting someone pair in a tab
+// would silently waste that setup.
+export function isIOS(nav = navigator) {
+  const ua = nav.userAgent || '';
+  return /iPad|iPhone|iPod/.test(ua)
+    || (ua.includes('Macintosh') && nav.maxTouchPoints > 1);
+}
+
+export function isStandalone(win = window) {
+  return win.matchMedia?.('(display-mode: standalone)').matches
+    || win.navigator.standalone === true;
+}
+
+// iOS has no beforeinstallprompt, so the app cannot offer to install itself and
+// has to explain the manual steps instead.
+export function needsInstallGate(nav = navigator, win = window) {
+  return isIOS(nav) && !isStandalone(win);
+}
+```
+
+Tests in `web/ios.test.mjs` cover: an iPhone user agent in a tab needs the gate; the same in standalone does not; an iPad reporting as Macintosh with touch points is detected; a desktop is never gated.
+
+In `web/app.js`, check `needsInstallGate()` before the unlock flow and show the install screen instead. **This has to come before pairing**, not after, or the passphrase lands in the wrong storage partition.
+
+- [ ] **Step 2: The install screen**
+
+A panel in `index.html`, hidden by default, using the existing tokens and no new ones:
+
+> **Add Airlock to your Home Screen**
+>
+> iOS only lets a web app receive notifications and hold storage reliably once it is installed.
+>
+> 1. Tap the Share button in Safari's toolbar
+> 2. Scroll down and tap **Add to Home Screen**
+> 3. Open Airlock from your Home Screen and come back to this step
+>
+> Set your passphrase after installing, not before: an installed app has its own private storage and cannot see anything set up in the browser tab.
+
+- [ ] **Step 3: Storage preflight**
+
+Before accepting a queued transfer, on every platform but load-bearing here:
+
+```js
+// The quota is not the constraint on iOS, free disk is. Since iOS 17 the
+// per-origin ceiling is up to 60% of total disk, so estimate() on a 128 GB phone
+// reports something like 76 GB while 12 GB is actually free. That number is a
+// policy ceiling, not a reservation, and a write still fails when the disk is
+// full, with no prompt and no way for the user to grant more.
+export async function hasRoomFor(bytes, factor = 1.15) {
+  if (!navigator.storage?.estimate) return true;
+  const { quota = 0, usage = 0 } = await navigator.storage.estimate();
+  return quota - usage > bytes * factor;
+}
+```
+
+Refuse up front with a clear message naming the shortfall, rather than failing at 90 percent. Catch `QuotaExceededError` on every staged write, fail the transfer cleanly, and delete the partial stage so nothing half-written looks complete.
+
+Call `navigator.storage.persist()` at startup and branch on the boolean. WebKit shows no prompt and grants it heuristically, with installed apps being the heuristic.
+
+- [ ] **Step 4: Notifications degrade to an announcement**
+
+`actions`, `image`, `icon`, `badge`, `renotify`, `requireInteraction` and `vibrate` are all ignored on iOS, and `tag` does not coalesce. So on iOS the notification announces and the decision happens in the app:
+
+- Body carries the filename, size and sender. No image, no buttons.
+- The tap opens the app on the transfer, where Accept and Decline live alongside the thumbnail.
+- Set the Home Screen badge to the pending inbound count with `navigator.setAppBadge`. It is the one rich affordance that works, and it should be used on every platform that has it, not only here.
+
+Keep the rich notification from task 25 for platforms that honour it. Feature-detect rather than sniffing: read `Notification.prototype` for `actions` support and fall back.
+
+- [ ] **Step 5: Reduce the link count**
+
+Use `linkCountFor()` from task 34. WebKit publishes no per-page connection limit and iOS is reported as less reliable with several at once, so it opens one. A phone's link cannot use four anyway.
+
+- [ ] **Step 6: Verify on a real device, and write down what happens**
+
+Six of these are unverified and two are load-bearing. Do not document iOS receive as working until V1 passes.
+
+- [ ] **V1, the blocker.** Receive a 200 MB file in the installed app and save it. Service-worker-synthesized downloads have regressed twice in a year and the standalone-mode case traces to a WebKit bug closed to a private radar. **If this fails, iOS is send-only**, and there is no fallback through Safari because of the storage partition. Record the exact iOS version.
+- [ ] **V2.** Start a transfer, lock the screen for two minutes, unlock. Does it continue, resume, or die? If it dies, the wake lock and a visible "keep this screen on" state become required UI rather than polish.
+- [ ] **V3.** Whether Declarative Web Push renders action buttons on 18.4 or later. Assume no until seen.
+- [ ] **V4.** Send a 2 GB file from an iPhone and watch for an iOS-only memory crash, which would point at buffer retention on worker-to-main transfer rather than at the transfer itself.
+- [ ] **V5.** Confirm the file picker reaches Photos, Files and iCloud Drive, and that a file with no extension survives it.
+- [ ] **V6.** Whether the save streams to disk or buffers in memory. If it buffers, iOS gains a hard file-size cap the other platforms do not have, and the preflight factor must rise to 2.15.
+
+Record each in `docs/platform-notes.md` with the device and iOS version, and correct any document that stated an unverified item as fact.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add web/ios.js web/ios.test.mjs web/app.js web/index.html web/sw.js web/session.js web/manifest.webmanifest README.md docs/platform-notes.md
+git commit -m "feat(ios): install gate, storage preflight and announcement-only notifications"
+```

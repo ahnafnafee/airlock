@@ -548,9 +548,64 @@ deterministically and resumes from whatever the server already holds.
 
 ### iOS
 
-Untargeted but functional as an installed PWA, with Web Push from 16.4. No Web
-Share Target on iOS, so sending from the share sheet is unavailable. No
-iOS-specific code will be written.
+A supported platform, with a narrower shape than the others. **Installed to the
+Home Screen only, floor iOS 18.4.**
+
+**Why installed-only.** A Home Screen web app has its own storage partition: it
+shares no cookies, IndexedDB, OPFS or service worker registration with the same
+origin open in a Safari tab. So a passphrase set up in a tab does not exist in
+the installed app. Installing must come before pairing in the onboarding order,
+and a Safari tab gets an "install to continue" screen rather than a degraded
+app. Push cannot even be requested from a tab, and staging in one can be evicted
+after seven days without interaction.
+
+**Why 18.4 rather than the technical floor of 16.4.** Three separate things are
+broken below it: the screen wake lock does not work in installed web apps,
+Declarative Web Push is absent, and `webkitdirectory` silently selects nothing.
+16.4 runs; 18.4 is the first version that is a good product.
+
+**Two capabilities are cut on iOS and cannot be recovered:**
+
+- **The share sheet as a destination.** `share_target` is unimplemented in WebKit
+  with no published position. Sending from Photos into Airlock is not achievable.
+  The inverse works: start in Airlock and use the file picker, which does reach
+  Photos, Files and iCloud Drive.
+- **Action buttons and images in notifications.** `actions`, `image`, `icon`,
+  `badge`, `renotify`, `requireInteraction` and `vibrate` are all ignored, and
+  `tag` does not coalesce. So on iOS a notification announces, and accepting or
+  declining happens in the app after a tap. The thumbnail moves to the arrival
+  screen. The one rich affordance that does work is the Home Screen badge count,
+  which carries the pending-inbound number.
+
+**Three design decisions are forced by iOS and are therefore global**, since a
+second code path is worse than one shape that works everywhere:
+
+- **All OPFS writes happen in a dedicated worker through
+  `createSyncAccessHandle`.** `createWritable` did not exist in Safari before
+  26.0, so below that the worker path is not an optimization, it is the only way
+  to write. One handle per file, held open for the transfer, because the spec
+  permits only one at a time.
+- **The service worker constructs its own download stream.** A `ReadableStream`
+  is not transferable in any Safari, so the page cannot hand one over. The worker
+  pulls from staging or receives buffers over a `MessageChannel` and enqueues
+  them itself.
+- **Resumability is mandatory rather than a nicety.** Whether iOS tears down a
+  peer connection on screen lock is unverified, and eviction and quota failures
+  are real. A transfer that cannot resume is a transfer that fails on a phone.
+
+**Storage: the quota is not the constraint, free disk is.** Since iOS 17 the
+per-origin ceiling is up to 60% of *total* disk, so `navigator.storage.estimate()`
+on a 128 GB phone reports something like 76 GB while 12 GB is actually free. That
+number is a policy ceiling, not a reservation, and writes still fail when the
+disk is full, with no prompt. Preflight every queued transfer against
+`estimate()` and refuse up front rather than failing at 90 percent.
+
+**One thing is unverified and load-bearing.** Whether a service-worker-synthesized
+download completes inside an installed web app on iOS. That path has regressed
+twice in a year and traces to a WebKit bug closed to a private radar. If it
+fails, iOS is send-only, and there is no "open it in Safari instead" escape
+because of the storage partition. **iOS receive is not documented as working
+until this is tested on a real device.**
 
 ---
 

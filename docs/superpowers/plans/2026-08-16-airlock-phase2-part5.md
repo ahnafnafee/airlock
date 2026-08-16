@@ -534,6 +534,8 @@ git commit -m "feat(transfers): per-recipient progress bitmaps and a sender queu
 **Interfaces:**
 - Produces: `openStage(transferId)` returning `{put(index, bytes), get(index), has(index), bitmap(count), clear()}`
 
+**This module runs in a worker.** `createSyncAccessHandle` is worker-only, and on iOS before 26.0 it is the only way to write into OPFS, because Safari shipped `createWritable` in 26.0. Treat the worker requirement as a platform constraint rather than an optimization, and do not add a main-thread write path as a convenience.
+
 **Why the Origin Private File System.** A browser loses its `File` handle when the page closes, so a queued transfer would have nothing left to send and a half-received one nothing to resume from. OPFS is real persistent storage on the device's own disk, readable across sessions, and it is what turns "both devices must be online at once" into "both devices must be online at some point".
 
 The cost is a local copy on the sender until the transfer completes, and partial chunks on the receiver until it does. That is the owner's disk, not rented disk, and it is transient.
@@ -612,11 +614,23 @@ async function stageDir(transferId) {
 export async function openStage(transferId) {
   const dir = await stageDir(transferId);
 
+  // createSyncAccessHandle rather than createWritable, and therefore only
+  // callable from a dedicated worker. This is not a performance choice: Safari
+  // did not ship createWritable until 26.0, so on any earlier iOS this is the
+  // only way to write into the origin private file system at all.
+  //
+  // The spec permits one open sync handle per file at a time, so the handle is
+  // opened and closed around each write rather than held, since chunks are
+  // separate files and several may be written concurrently.
   const put = async (index, bytes) => {
     const handle = await dir.getFileHandle(String(index), { create: true });
-    const writable = await handle.createWritable();
-    await writable.write(bytes);
-    await writable.close();
+    const access = await handle.createSyncAccessHandle();
+    try {
+      access.write(bytes, { at: 0 });
+      access.flush();
+    } finally {
+      access.close();
+    }
   };
 
   const get = async (index) => {

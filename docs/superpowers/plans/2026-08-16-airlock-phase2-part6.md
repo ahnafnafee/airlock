@@ -382,8 +382,24 @@ const SAFE_MAX_MESSAGE = 64 << 10;
 // Channels within a connection still earn their place: they are unordered, so a
 // stalled fragment on one stream does not hold up what is queued behind it.
 export function openChannels(pc, count = CHANNELS_PER_LINK) {
-  return Array.from({ length: count }, (_, i) =>
-    pc.createDataChannel(`airlock-${i}`, { ordered: false }));
+  return Array.from({ length: count }, (_, i) => {
+    const channel = pc.createDataChannel(`airlock-${i}`, { ordered: false });
+    // Without this, Safari hands back a Blob and every chunk needs an extra
+    // async read before it can be decrypted.
+    channel.binaryType = 'arraybuffer';
+    return channel;
+  });
+}
+
+// WebKit publishes no per-page connection limit and practitioner reports have
+// iOS being both more resource constrained and less reliable with several
+// connections at once. Opening four there risks trading a working transfer for
+// throughput that a phone's link cannot use anyway.
+export function linkCountFor(navigatorLike = navigator) {
+  const ua = navigatorLike.userAgent || '';
+  const iOS = /iPad|iPhone|iPod/.test(ua)
+    || (ua.includes('Macintosh') && navigatorLike.maxTouchPoints > 1);
+  return iOS ? 1 : LINK_COUNT;
 }
 
 function fragmentSize(pc) {

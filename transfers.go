@@ -382,9 +382,15 @@ func (t *Transfers) Inbox(node string) ([]*TransferInfo, error) {
 	}
 	out := []*TransferInfo{}
 	for _, info := range all {
-		if visibleTo(info.Sender, info.To, node) && !contains(info.Declined, node) {
-			out = append(out, info)
+		// visibleTo admits the sender on purpose: a transfer this device sent
+		// is one it may still delete, and this list is what the delete button
+		// is attached to. Telling an arrival apart from a send is the view's
+		// job, not this one's, and it has to be done there or a device offers
+		// to save a file it is the source of.
+		if !visibleTo(info.Sender, info.To, node) || contains(info.Declined, node) {
+			continue
 		}
+		out = append(out, info)
 	}
 	return out, nil
 }

@@ -195,6 +195,19 @@ func TestListenAllBindsEveryAddressOrNone(t *testing.T) {
 	retry.Close()
 }
 
+// An empty address list has no first address, so a multiplexer built over it
+// would panic inside Addr rather than report a problem.
+func TestListenAllRefusesAnEmptyAddressList(t *testing.T) {
+	ln, err := listenAll(nil, 443)
+	if err == nil {
+		ln.Close()
+		t.Fatal("listenAll accepted an empty address list")
+	}
+	if ln != nil {
+		t.Fatal("listenAll returned a listener alongside its error")
+	}
+}
+
 func acceptWithin(t *testing.T, ln net.Listener, d time.Duration) (net.Conn, error) {
 	t.Helper()
 	type result struct {

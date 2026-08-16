@@ -108,6 +108,11 @@ func listenAddrs(ips []string, port int) []string {
 // the failure this whole path exists to remove. port is named separately from
 // the addresses only so the error can suggest the flag that fixes it.
 func listenAll(addrs []string, port int) (net.Listener, error) {
+	// Refused rather than tolerated: a listener over nothing has no address to
+	// report, and Addr is on the net.Listener interface every caller may use.
+	if len(addrs) == 0 {
+		return nil, errors.New("no addresses to listen on")
+	}
 	lns := make([]net.Listener, 0, len(addrs))
 	for _, a := range addrs {
 		ln, err := net.Listen("tcp", a)

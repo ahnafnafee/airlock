@@ -4,6 +4,7 @@ import {
 } from './crypto.js';
 import { sealPool, poolSize } from './sealpool.js';
 import { makeThumbnail } from './thumb.js';
+import { rememberOutboundStage } from './local-transfers.js';
 
 // A file leaves this device one of two ways, and which one is the owner's choice
 // per transfer. queueForDelivery is the default: the sealed chunks stay on this
@@ -49,18 +50,6 @@ async function withRetry(fn) {
       delay *= 2;
     }
   }
-}
-
-// A transfer must name at least one chunk. The server enforces that too, but it
-// reports the refusal as a storage quota failure, which says nothing true about
-// a zero-byte file. Refused here so the reason reaching the caption is the
-// actual one.
-// ponytail: empty files cannot be sent at all. The ceiling is the server rule
-// that a transfer names at least one chunk; lifting it means letting the create
-// path accept an empty chunk list and teaching the receiving side to rebuild a
-// zero-byte file from an empty chunk list.
-function checkNotEmpty(count) {
-  if (count === 0) throw new Error('an empty file has no chunks to send');
 }
 
 function checkTransferId(id) {
@@ -151,9 +140,7 @@ async function begin(file, opts) {
     ids.push(await chunkIdentity(mk, mode, plain));
   }
 
-  checkNotEmpty(ids.length);
-
-  const { id, missing } = await api.createTransfer(ids.map((x) => x.cid), to);
+  const { id, missing } = await api.createTransfer(ids.map((x) => x.cid), to, true);
   return { ids, id: checkTransferId(id), missing };
 }
 
@@ -168,67 +155,78 @@ export async function uploadThroughServer(file, opts) {
   const { mk, mode, cdc, api, onProgress = () => {} } = opts;
 
   const { ids, id, missing } = await begin(file, opts);
-  const wanted = new Set(missing);
+  try {
+    const wanted = new Set(missing);
 
-  const progress = {
-    id,
-    total: ids.length,
-    // Counted over positions rather than as ids.length minus the missing set.
-    // A file can hold the same chunk many times, and a repeat the server lacks
-    // is not a dedup hit: subtracting a de-duplicated set size would report a
-    // first upload of a mostly-empty disk image as almost entirely held.
-    held: ids.filter((x) => !wanted.has(x.cid)).length,
-    // Where those chunks sit, not just how many there are. The strip is a row
-    // in file order, so a reader takes a segment's place in it as that chunk's
-    // place in the file. Painting the held ones as a block from the start would
-    // report a file whose middle changed as one whose tail did, which is the
-    // one thing about a delta the strip is uniquely able to show.
-    heldAt: ids.map((x, i) => (wanted.has(x.cid) ? -1 : i)).filter((i) => i >= 0),
-    storedAt: [],
-    inflightAt: [],
-    sent: 0,
-    // How many chunks are on the wire right this instant. The strip paints that
-    // window amber, and amber means in transit and nothing else, so the count
-    // has to come from the uploader rather than be guessed from CONCURRENCY.
-    inflight: 0,
-  };
-  // Report before uploading anything, so a re-send reads as an immediate wave of
-  // already-held chunks rather than a stalled bar.
-  onProgress({ ...progress });
+    const progress = {
+      id,
+      total: ids.length,
+      // Counted over positions rather than as ids.length minus the missing set.
+      // A file can hold the same chunk many times, and a repeat the server lacks
+      // is not a dedup hit: subtracting a de-duplicated set size would report a
+      // first upload of a mostly-empty disk image as almost entirely held.
+      held: ids.filter((x) => !wanted.has(x.cid)).length,
+      // Where those chunks sit, not just how many there are. The strip is a row
+      // in file order, so a reader takes a segment's place in it as that chunk's
+      // place in the file. Painting the held ones as a block from the start would
+      // report a file whose middle changed as one whose tail did, which is the
+      // one thing about a delta the strip is uniquely able to show.
+      heldAt: ids.map((x, i) => (wanted.has(x.cid) ? -1 : i)).filter((i) => i >= 0),
+      storedAt: [],
+      inflightAt: [],
+      sent: 0,
+      // How many chunks are on the wire right this instant. The strip paints that
+      // window amber, and amber means in transit and nothing else, so the count
+      // has to come from the uploader rather than be guessed from CONCURRENCY.
+      inflight: 0,
+    };
+    // Report before uploading anything, so a re-send reads as an immediate wave of
+    // already-held chunks rather than a stalled bar.
+    onProgress({ ...progress });
 
-  await uploadRecords(api, mk, mode, id, file, ids.map((x) => x.h));
+    if (wanted.size > 0) {
+      const inflight = new Set();
+      let index = 0;
+      for await (const plain of chunkFile(file, cdc)) {
+        const { h, cid } = ids[index++];
+        if (!wanted.has(cid)) continue;
+        // Claim it, so a chunk that occurs several times in one file goes up once.
+        wanted.delete(cid);
 
-  if (wanted.size === 0) return progress;
-
-  const inflight = new Set();
-  let index = 0;
-  for await (const plain of chunkFile(file, cdc)) {
-    const { h, cid } = ids[index++];
-    if (!wanted.has(cid)) continue;
-    // Claim it, so a chunk that occurs several times in one file goes up once.
-    wanted.delete(cid);
-
-    const sealed = await sealChunk(mk, mode, h, cid, plain);
-    // Reported on entry as well as on completion, so the strip can light the
-    // window that is actually moving instead of only the one that has landed.
-    const at = index - 1;
-    progress.inflight++;
-    progress.inflightAt.push(at);
-    onProgress({ ...progress, inflightAt: [...progress.inflightAt], storedAt: [...progress.storedAt] });
-    const p = withRetry(() => api.putChunk(cid, id, sealed))
-      .then(() => { progress.sent++; progress.storedAt.push(at); })
-      .finally(() => {
-        inflight.delete(p);
-        progress.inflight--;
-        progress.inflightAt = progress.inflightAt.filter((i) => i !== at);
+        const sealed = await sealChunk(mk, mode, h, cid, plain);
+        // Reported on entry as well as on completion, so the strip can light the
+        // window that is actually moving instead of only the one that has landed.
+        const at = index - 1;
+        progress.inflight++;
+        progress.inflightAt.push(at);
         onProgress({ ...progress, inflightAt: [...progress.inflightAt], storedAt: [...progress.storedAt] });
-      });
-    inflight.add(p);
-    if (inflight.size >= CONCURRENCY) await Promise.race(inflight);
-  }
-  await Promise.all(inflight);
+        const p = withRetry(() => api.putChunk(cid, id, sealed))
+          .then(() => { progress.sent++; progress.storedAt.push(at); })
+          .finally(() => {
+            inflight.delete(p);
+            progress.inflight--;
+            progress.inflightAt = progress.inflightAt.filter((i) => i !== at);
+            onProgress({ ...progress, inflightAt: [...progress.inflightAt], storedAt: [...progress.storedAt] });
+          });
+        inflight.add(p);
+        if (inflight.size >= CONCURRENCY) await Promise.race(inflight);
+      }
+      await Promise.all(inflight);
+    }
 
-  return progress;
+    // Metadata is the announcement trigger. Publish it only after every held
+    // chunk and supporting record is ready, so the first Inbox repaint can save.
+    await uploadRecords(api, mk, mode, id, file, ids.map((x) => x.h));
+
+    return progress;
+  } catch (err) {
+    // begin returned a validated id, so every failure from here leaves a real
+    // partial transfer behind. Deletion is best effort and may fail for the
+    // same network reason as the upload; neither outcome replaces the error
+    // that actually stopped the send.
+    await api.deleteTransfer(id).catch(() => {});
+    throw err;
+  }
 }
 
 // The default. The sealed chunks go to this device's own staging area, and the
@@ -249,6 +247,7 @@ export async function uploadThroughServer(file, opts) {
 export async function queueForDelivery(file, opts) {
   const {
     mk, mode, to, cdc, api, openStage, newPool, onProgress = () => {},
+    rememberOutboundStage: rememberStage = rememberOutboundStage,
   } = opts;
 
   const stageId = newStageId();
@@ -284,7 +283,6 @@ export async function queueForDelivery(file, opts) {
         onProgress({ ...progress });
       },
     }));
-    checkNotEmpty(cids.length);
   } catch (err) {
     // Nothing has reached the server yet, so there is no transfer to take back
     // down, but the chunks that did land have nothing that will ever read them.
@@ -297,16 +295,36 @@ export async function queueForDelivery(file, opts) {
   onProgress({ ...progress });
 
   try {
-    const { id } = await api.createTransfer(cids, to);
+    const { id } = await api.createTransfer(cids, to, false);
     progress.id = checkTransferId(id);
     await uploadRecords(api, mk, mode, id, file, hashes, stageId);
+    // This registry only helps later cleanup find the stage. At this point the
+    // transfer and all of its records are usable, so losing that bookkeeping
+    // must not roll the successful send back.
+    try {
+      await rememberStage(id, stageId);
+    } catch (err) {
+      console.warn('outbound stage registry update failed', err);
+    }
   } catch (err) {
     // From here on a transfer may exist on the queue whose records are missing,
-    // and every later drain would offer it and fail. Undone so a failure here is
-    // a transfer that simply did not send. A transfer whose id came back
-    // malformed is the one that cannot be, because deleting it would mean
-    // building a URL out of the very string that was refused.
-    if (progress.id) await api.deleteTransfer(progress.id).catch(() => {});
+    // and every later drain would offer it and fail. Remove it when possible;
+    // if removal cannot be confirmed, retain the stage that transfer names. A
+    // transfer whose id came back malformed is the one that cannot be removed,
+    // because deleting it would build a URL from the very string that was
+    // refused.
+    if (progress.id) {
+      try {
+        await withRetry(() => api.deleteTransfer(progress.id));
+      } catch {
+        // The server still has a transfer whose sealed metadata names this
+        // stage. Preserve the only direct-delivery copy so the two can be
+        // repaired or removed together later.
+        throw err;
+      }
+    }
+    // A confirmed DELETE, a refused create, or an unusable returned id leaves
+    // no server transfer that can ever lead back to this stage.
     await stage.clear().catch(() => {});
     throw err;
   }
@@ -327,17 +345,22 @@ async function uploadRecords(api, mk, mode, id, file, hashes, stage = null) {
     // server never learns it. The recipient has no use for it and ignores it.
     ...(stage ? { stage } : {}),
   })));
-  await withRetry(() => api.putRecord(id, 'meta', meta));
-
   const list = await sealRecord(mk, mode, DOMAIN.LIST, id, packHashes(hashes));
-  await withRetry(() => api.putRecord(id, 'chunklist', list));
 
   // The server can never make this: it has never seen the image. A transfer
   // that is not an image or a video simply carries no thumb record.
   const thumb = await makeThumbnail(file);
-  if (thumb) {
-    const sealed = await sealRecord(mk, mode, DOMAIN.THUMB, id, thumb);
+  const sealedThumb = thumb
+    ? await sealRecord(mk, mode, DOMAIN.THUMB, id, thumb)
+    : null;
+
+  // Meta lands last because it is the announcement trigger. At that instant
+  // the chunk list and optional thumbnail are already readable, and on the held
+  // path every content chunk is too.
+  await withRetry(() => api.putRecord(id, 'chunklist', list));
+  if (sealedThumb) {
     // A thumbnail is a nicety. Losing it must never fail the transfer.
-    await withRetry(() => api.putRecord(id, 'thumb', sealed)).catch(() => {});
+    await withRetry(() => api.putRecord(id, 'thumb', sealedThumb)).catch(() => {});
   }
+  await withRetry(() => api.putRecord(id, 'meta', meta));
 }

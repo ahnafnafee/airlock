@@ -164,6 +164,36 @@ func TestUsedSurvivesReopen(t *testing.T) {
 	}
 }
 
+func TestReopenRemovesAbandonedChunkTemporaryFiles(t *testing.T) {
+	dir := t.TempDir()
+	c, err := NewChunkStore(dir, 64, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := c.path(cid(5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tmp := p + ".abandoned.tmp"
+	if err := os.WriteFile(tmp, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := NewChunkStore(dir, 64, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.Used() != 0 {
+		t.Fatalf("Used after reopen = %d, want abandoned temp excluded", reopened.Used())
+	}
+	if _, err := os.Stat(tmp); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned temp survived reopen: %v", err)
+	}
+}
+
 func TestSweepDeletesUnreferencedOnly(t *testing.T) {
 	c := newChunks(t)
 	c.Put(cid(1), strings.NewReader("keep"))
@@ -184,6 +214,66 @@ func TestSweepDeletesUnreferencedOnly(t *testing.T) {
 	}
 	if c.Used() != 4 {
 		t.Fatalf("Used = %d, want 4 after sweeping one 4-byte chunk", c.Used())
+	}
+}
+
+func TestSweepDoesNotRemoveAChunkBeingWritten(t *testing.T) {
+	c := newChunks(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	putDone := make(chan error, 1)
+	go func() {
+		putDone <- c.Put(cid(3), &pausedReader{
+			body: []byte("still uploading"), started: started, gate: release,
+		})
+	}()
+	<-started
+
+	// A delete sweeps while unrelated uploads may still be streaming. The
+	// temporary pathname is not a chunk id and must not be collected or charged
+	// back before Put publishes it.
+	if swept, err := c.Sweep(map[string]bool{cid(3): true}); err != nil {
+		t.Fatal(err)
+	} else if swept != 0 {
+		t.Fatalf("swept %d files while a referenced chunk was still uploading", swept)
+	}
+
+	close(release)
+	if err := <-putDone; err != nil {
+		t.Fatalf("Put failed after a concurrent sweep: %v", err)
+	}
+	if !c.Has(cid(3)) {
+		t.Fatal("the uploading chunk did not survive the sweep")
+	}
+	if c.Used() != int64(len("still uploading")) {
+		t.Fatalf("Used = %d, want %d", c.Used(), len("still uploading"))
+	}
+}
+
+func TestSweepIgnoresChunkTemporaryFiles(t *testing.T) {
+	c := newChunks(t)
+	p, err := c.path(cid(4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tmp := p + ".123.tmp"
+	if err := os.WriteFile(tmp, []byte("not committed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if swept, err := c.Sweep(map[string]bool{}); err != nil {
+		t.Fatal(err)
+	} else if swept != 0 {
+		t.Fatalf("swept %d files, want no temporary writes counted as chunks", swept)
+	}
+	if _, err := os.Stat(tmp); err != nil {
+		t.Fatalf("temporary write was removed by a live sweep: %v", err)
+	}
+	if c.Used() != 0 {
+		t.Fatalf("Used = %d after seeing an uncommitted temp, want 0", c.Used())
 	}
 }
 
@@ -284,6 +374,23 @@ type blockingReader struct {
 	body []byte
 	gate chan struct{}
 	done bool
+}
+
+type pausedReader struct {
+	body    []byte
+	started chan struct{}
+	gate    chan struct{}
+	sent    bool
+}
+
+func (r *pausedReader) Read(p []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		close(r.started)
+		return copy(p, r.body), nil
+	}
+	<-r.gate
+	return 0, io.EOF
 }
 
 func (b *blockingReader) Read(p []byte) (int, error) {

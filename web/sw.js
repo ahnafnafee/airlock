@@ -5,6 +5,7 @@ import {
 import { contentDisposition } from './naming.js';
 import { markCapability } from './inbound.js';
 import { inboundTo, setBadge } from './ios.js';
+import { acceptRoute, createArrivalQueue } from './notification.js';
 
 // Registered with {type:'module'} so these imports work.
 
@@ -83,8 +84,16 @@ async function stashShare(request) {
   return Response.redirect('/?share=1', 303);
 }
 
+const announcePush = createArrivalQueue({
+  list: notificationInbox,
+  visible: () => self.registration.getNotifications(),
+  onList: (inbox) => setBadge(inbox.length),
+  notify: announce,
+  fallback: () => self.registration.showNotification('Airlock', genericOptions()),
+});
+
 self.addEventListener('push', (event) => {
-  event.waitUntil(announce());
+  event.waitUntil(announcePush());
 });
 
 self.addEventListener('notificationclick', (event) => {
@@ -103,11 +112,13 @@ self.addEventListener('notificationclick', (event) => {
       }
       return;
     }
-    // Accept downloads without opening the app first: this worker answers /dl/,
-    // so the navigation returns an attachment and the browser saves it with its
-    // own progress UI.
+    // A server-complete held transfer can download in one tap. An incomplete
+    // transfer may instead be arriving directly into this device's stage, so
+    // its Accept opens the inbox where local and server-held chunks are both
+    // considered. Sending every Accept through /dl would ask the server for
+    // chunks the direct path deliberately never uploaded there.
     if (event.action === 'accept' && id) {
-      return self.clients.openWindow(`/dl/${id}`);
+      return self.clients.openWindow(acceptRoute(event.notification.data));
     }
     for (const client of await self.clients.matchAll({ type: 'window' })) {
       if (client.url.startsWith(self.location.origin)) {
@@ -147,38 +158,44 @@ function humanSize(bytes) {
   return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)} ${units[i]}`;
 }
 
+function genericOptions(transfer, body = 'A file is waiting') {
+  const options = {
+    icon: '/icon-192.png',
+    badge: '/icon-badge.png',
+    tag: 'airlock-generic',
+    body,
+  };
+  if (!transfer) return options;
+  return {
+    ...options,
+    tag: `airlock-${transfer.id}`,
+    timestamp: new Date(transfer.createdAt).getTime(),
+    data: { id: transfer.id, complete: transfer.complete === true },
+  };
+}
+
+// Both, because /api/inbox answers with this device's own outbound transfers
+// as well as the ones addressed to it, and only the device's own name can tell
+// those apart. Announcing a file this phone sent, or badging it, would be an
+// arrival that never happened.
+async function notificationInbox() {
+  const [inboxRes, whoRes] = await Promise.all([getOk('/api/inbox'), getOk('/api/whoami')]);
+  return inboundTo(await inboxRes.json(), (await whoRes.json()).node);
+}
+
 // The push that woke us says nothing, by design. Everything below is read from
 // the inbox and decrypted on this device, which is the only place a filename
 // exists in the clear. An unsealed meta record is refused for the same reason a
 // download refuses one: its name would be whatever the writer chose, and a
 // notification is a very good place to put a name nobody can vouch for.
-async function announce() {
-  const base = {
-    icon: '/icon-192.png',
-    badge: '/icon-badge.png',
-    tag: 'airlock-generic',
-  };
-
+async function announce(newest) {
+  const base = genericOptions(newest);
   let mk = null;
-  let inbox = [];
   try {
     mk = await loadMaster();
-    // Both, because /api/inbox answers with this device's own outbound transfers
-    // as well as the ones addressed to it, and only the device's own name can
-    // tell those apart. Announcing a file this phone sent, or badging it, would
-    // be an arrival that never happened.
-    const [inboxRes, whoRes] = await Promise.all([getOk('/api/inbox'), getOk('/api/whoami')]);
-    inbox = inboundTo(await inboxRes.json(), (await whoRes.json()).node);
   } catch {
-    return self.registration.showNotification('Airlock', { ...base, body: 'A file is waiting' });
+    return self.registration.showNotification('Airlock', base);
   }
-
-  // Every path below this line has the count, so the badge is set once here
-  // rather than at each of them. It is the one rich affordance WebKit honors and
-  // it needs no key: how many transfers have arrived is not a secret the server
-  // keeps from itself.
-  await setBadge(inbox.length);
-  const [newest] = inbox;
 
   if (!mk) {
     // Reachable but locked. Say so, because "a file is waiting" would leave the
@@ -193,8 +210,8 @@ async function announce() {
   // itself, and every notification for the product's default would read as the
   // same anonymous nudge. The record is sealed and this device has the key, so
   // the filename is opened here and never learned by the server.
-  if (!newest || !newest.meta) {
-    return self.registration.showNotification('Airlock', { ...base, body: 'A file is waiting' });
+  if (!newest.meta) {
+    return self.registration.showNotification('Airlock', base);
   }
 
   let meta;
@@ -202,23 +219,21 @@ async function announce() {
     meta = JSON.parse(new TextDecoder().decode(
       await openSealed(mk, DOMAIN.META, newest.id, b64decode(newest.meta))));
   } catch {
-    return self.registration.showNotification('Airlock', { ...base, body: 'A file is waiting' });
+    return self.registration.showNotification('Airlock', base);
   }
 
   const options = {
+    ...base,
     // Where no button and no image will render, the body is the whole
     // notification, so it carries the sender too rather than leaving it to a
     // title the platform may present as the app's name.
     body: RICH
       ? `${meta.name}\n${humanSize(meta.size)}`
       : `${meta.name}\n${humanSize(meta.size)}\nfrom ${newest.sender}`,
-    icon: '/icon-192.png',
-    badge: '/icon-badge.png',
-    // One tag per transfer, so several arrivals stack. A shared tag would
-    // silently hide everything but the last file.
-    tag: `airlock-${newest.id}`,
-    timestamp: new Date(newest.createdAt).getTime(),
-    data: { id: newest.id, name: meta.name },
+    // Complete speaks specifically for the server's chunk store. That is the
+    // distinction Accept needs: false includes direct transfers whose bytes
+    // may already be staged on this device.
+    data: { ...base.data, name: meta.name },
   };
   if (RICH) {
     // Two is the practical maximum Android renders. Dismissing is already a

@@ -61,25 +61,28 @@ test('a navigator with no user agent at all is not mistaken for iOS', () => {
 
 const withQuota = (quota, usage) => ({ storage: { estimate: async () => ({ quota, usage }) } });
 
+test('direct receive reserves both its sealed stage and assembled output', () => {
+  assert.equal(PREFLIGHT_FACTOR, 2.15);
+});
+
 test('a transfer that fits under the headroom factor is short by nothing', async () => {
-  // 600 free. 520 with 15 percent asked over it is 598, which fits.
-  assert.equal(await roomShortfall(520, PREFLIGHT_FACTOR, withQuota(1000, 400)), 0);
+  // 600 free. Both copies plus headroom for 270 bytes need 580.5, which fits.
+  assert.equal(await roomShortfall(270, PREFLIGHT_FACTOR, withQuota(1000, 400)), 0);
 });
 
 test('a transfer that fits the disk but not the headroom names what it is short', async () => {
-  // 600 free and 530 wanted, so a check that forgot the factor would allow this.
-  // 530 with 15 percent over it is 609.5, which does not fit, and 9.5 rounds up
-  // to the 10 a person would have to free.
-  assert.equal(await roomShortfall(530, PREFLIGHT_FACTOR, withQuota(1000, 400)), 10);
+  // 600 free and 283 wanted, so a check that forgot the second copy would allow
+  // this. Two copies plus headroom need 608.45, rounded to 9 bytes short.
+  assert.equal(await roomShortfall(283, PREFLIGHT_FACTOR, withQuota(1000, 400)), 9);
   // And the factor is what decides it, rather than the numbers happening to sit
   // either side of some other line.
-  assert.equal(await roomShortfall(530, 1, withQuota(1000, 400)), 0);
+  assert.equal(await roomShortfall(283, 1, withQuota(1000, 400)), 0);
 });
 
 test('a transfer far larger than the quota is short by the whole difference', async () => {
   // The shortfall is what the person has to free, not what was asked for, which
   // is the number the message is built out of.
-  assert.equal(await roomShortfall(80e9, PREFLIGHT_FACTOR, withQuota(76e9, 0)), 16e9);
+  assert.equal(await roomShortfall(80e9, PREFLIGHT_FACTOR, withQuota(76e9, 0)), 96e9);
 });
 
 test('a browser with no estimate is not stopped by the preflight', async () => {

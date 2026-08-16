@@ -23,8 +23,8 @@ import (
 	"time"
 )
 
-//go:embed web/index.html web/tokens.css web/app.css web/api.js web/app.js web/crypto.js web/cdc.js web/upload.js web/strip.js web/thumb.js web/sw.js web/naming.js web/views
-//go:embed web/peer.js web/staging.js web/stage-worker.js web/session.js web/wake.js
+//go:embed web/index.html web/tokens.css web/app.css web/api.js web/app.js web/crypto.js web/cdc.js web/upload.js web/strip.js web/thumb.js web/sw.js web/naming.js web/notification.js web/views
+//go:embed web/peer.js web/staging.js web/stage-worker.js web/session.js web/wake.js web/local-transfers.js
 //go:embed web/sealpool.js web/seal-worker.js
 //go:embed web/assemble.js web/assemble-worker.js web/export.js web/inbound.js web/ios.js
 //go:embed web/manifest.webmanifest web/icon-192.png web/icon-512.png web/icon-maskable.png web/icon-badge.png
@@ -295,7 +295,7 @@ func run() error {
 		TTLHours: *ttlHours, Salt: salt, Static: static, Auth: *authMode,
 	}))
 
-	go sweepLoop(transfers, chunks)
+	go sweepLoop(transfers)
 	log.Printf("airlock up: auth=%s addr=%s", *authMode, ln.Addr())
 	srv := &http.Server{
 		Handler: root,
@@ -381,24 +381,20 @@ func loginHandler(token string) http.HandlerFunc {
 // more. The order matters: collecting references before expiring transfers
 // would spare chunks whose only referent was about to disappear, and reversing
 // it entirely would delete chunks a live transfer still needs.
-func sweepOnce(transfers *Transfers, chunks *ChunkStore) (int, int, error) {
+func sweepOnce(transfers *Transfers) (int, int, error) {
 	gone, err := transfers.Sweep(time.Now())
 	if err != nil {
 		return gone, 0, err
 	}
-	referenced, err := transfers.Referenced()
-	if err != nil {
-		return gone, 0, err
-	}
-	orphans, err := chunks.Sweep(referenced)
+	orphans, err := transfers.sweepChunks()
 	return gone, orphans, err
 }
 
-func sweepLoop(transfers *Transfers, chunks *ChunkStore) {
+func sweepLoop(transfers *Transfers) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for range t.C {
-		gone, orphans, err := sweepOnce(transfers, chunks)
+		gone, orphans, err := sweepOnce(transfers)
 		if err != nil {
 			log.Printf("sweep: %v", err)
 			continue

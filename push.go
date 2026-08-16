@@ -128,6 +128,31 @@ func (p *Pusher) Subscribe(node string, raw []byte) error {
 	return p.saveLocked()
 }
 
+// RemoveNode forgets every push endpoint owned by one device. A node can have
+// more than one endpoint after a browser rotation or across profiles, so
+// revocation removes the whole set and persists that decision before it is
+// reported as successful.
+func (p *Pusher) RemoveNode(node string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	kept := make([]subscription, 0, len(p.subs))
+	for _, s := range p.subs {
+		if s.Node != node {
+			kept = append(kept, s)
+		}
+	}
+	if len(kept) == len(p.subs) {
+		return nil
+	}
+	previous := p.subs
+	p.subs = kept
+	if err := p.saveLocked(); err != nil {
+		p.subs = previous
+		return err
+	}
+	return nil
+}
+
 // targets picks the devices to wake. The sender is never one of them, and an
 // addressed transfer wakes only its recipients.
 func (p *Pusher) targets(recipients []string, sender string) []subscription {

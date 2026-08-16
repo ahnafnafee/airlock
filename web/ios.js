@@ -32,14 +32,11 @@ export function needsInstallGate(nav = navigator, win = window) {
   return isIOS(nav) && !isStandalone(win);
 }
 
-// Headroom asked for over the transfer's own size, because a staged transfer is
-// not the only thing landing on that disk while it lands.
-//
-// It is one authored value rather than a literal at each call, because V6 in the
-// iOS verification list can move it: if a save buffers the whole file in memory
-// instead of streaming it to disk, iOS gains a size ceiling the other platforms
-// do not have and this rises to 2.15.
-export const PREFLIGHT_FACTOR = 1.15;
+// A direct receive needs the sealed stage until authentication and assembly are
+// complete, while assembly writes a second plaintext file beside it. Reserve
+// both copies plus 15 percent headroom up front, so a transfer is not accepted
+// into the only copy this device can reach and then refused at Save time.
+export const PREFLIGHT_FACTOR = 2.15;
 
 // The quota is not the constraint on iOS, free disk is. Since iOS 17 the
 // per-origin ceiling is up to 60% of total disk, so estimate() on a 128 GB phone

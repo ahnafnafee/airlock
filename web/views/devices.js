@@ -1,4 +1,4 @@
-import { registerView, state, el, onInbox } from '../app.js';
+import { registerView, state, el, onDevices, onInbox } from '../app.js';
 import { api } from '../api.js';
 
 function ago(iso) {
@@ -50,13 +50,11 @@ registerView('devices', 'Devices', (panel) => {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && !panel.hidden) refresh();
   });
-  // The one change the server announces. It says only that something arrived, so
-  // the list is re-read rather than patched from the event.
-  //
-  // ponytail: an approval or a revocation is announced by nothing, so a change
-  // made from another machine is learned on the next gesture rather than at
-  // once. Closing that gap means the server publishing a devices event.
+  // Either an arriving transfer or an explicit roster mutation can introduce a
+  // device. Both events carry no detail, so the list is re-read rather than
+  // patched from an event payload.
   onInbox(() => refresh());
+  onDevices(() => refresh());
 
   async function refresh() {
     const mine = ++generation;

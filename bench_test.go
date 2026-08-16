@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -84,6 +87,49 @@ func BenchmarkSweep(b *testing.B) {
 		// gives this benchmark the power to catch a mark that goes wrong.
 		if swept != 0 {
 			b.Fatalf("swept %d referenced chunks", swept)
+		}
+	}
+}
+
+// BenchmarkPutChunkAfterAnnouncement guards the hot upload path after the
+// transfer's one notification has gone out. Looking the transfer up again for
+// every chunk would stat every CID each time and turn an upload into quadratic
+// filesystem work.
+func BenchmarkPutChunkAfterAnnouncement(b *testing.B) {
+	dir := b.TempDir()
+	store, err := NewChunkStore(dir, 4096, 1<<40)
+	if err != nil {
+		b.Fatal(err)
+	}
+	transfers, err := NewTransfers(dir, store, time.Hour, 6000, 1<<20)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	cids := make([]string, 5000)
+	for i := range cids {
+		cids[i] = benchCid(i)
+	}
+	rec, _, err := transfers.Create("bench", nil, cids)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if !transfers.markAnnounced(rec.ID) {
+		b.Fatal("first announcement was already claimed")
+	}
+	server := &Server{cfg: ServerConfig{Chunks: store, Transfers: transfers}}
+
+	b.ResetTimer()
+	for b.Loop() {
+		req := httptest.NewRequest(
+			http.MethodPut, "/?transfer="+rec.ID, strings.NewReader("x"))
+		req.SetPathValue("cid", cids[0])
+		req = req.WithContext(context.WithValue(
+			req.Context(), identKey{}, Identity{Node: "bench"}))
+		w := httptest.NewRecorder()
+		server.putChunk(w, req)
+		if w.Code != http.StatusNoContent {
+			b.Fatalf("put chunk: status %d: %s", w.Code, w.Body.String())
 		}
 	}
 }

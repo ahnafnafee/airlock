@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -125,6 +126,20 @@ func TestWhoamiReportsPairingState(t *testing.T) {
 	}
 }
 
+func TestMarkPairedPublishesADevicesEvent(t *testing.T) {
+	s, devices := newTestServer(t, true)
+	devices.Seen("pixel", "owner@example.com", "")
+	stream, stop := s.cfg.Events.Subscribe("pixel")
+	defer stop()
+
+	if code := do(t, s, "POST", "/api/devices/me/paired", "").Code; code != http.StatusNoContent {
+		t.Fatalf("paired = %d, want 204", code)
+	}
+	if got, ok := recv(t, stream); !ok || got != "devices" {
+		t.Fatalf("stream got %q, ok=%v; want devices", got, ok)
+	}
+}
+
 func TestConfigCarriesSaltAndChunkingParameters(t *testing.T) {
 	s, _ := newTestServer(t, true)
 	var got map[string]any
@@ -204,6 +219,168 @@ func TestAllowRestoresARevokedDevice(t *testing.T) {
 	}
 	if !devices.Allowed("laptop") {
 		t.Fatal("laptop should be allowed again")
+	}
+}
+
+func TestApprovalPublishesADevicesEvent(t *testing.T) {
+	s, devices := newTestServer(t, true)
+	devices.Seen("laptop", "owner@example.com", "")
+	if err := devices.SetAllowed("laptop", false); err != nil {
+		t.Fatal(err)
+	}
+	devices.Seen("pixel", "owner@example.com", "")
+	stream, stop := s.cfg.Events.Subscribe("pixel")
+	defer stop()
+
+	if code := do(t, s, "POST", "/api/devices/laptop/allow", "").Code; code != http.StatusNoContent {
+		t.Fatalf("allow = %d, want 204", code)
+	}
+	if got, ok := recv(t, stream); !ok || got != "devices" {
+		t.Fatalf("stream got %q, ok=%v; want devices", got, ok)
+	}
+}
+
+func TestRevocationClosesTheTargetStreamAndPublishesADevicesEvent(t *testing.T) {
+	s, devices := newTestServer(t, true)
+	devices.Seen("desktop", "owner@example.com", "")
+	devices.Seen("pixel", "owner@example.com", "")
+	pixel, stopPixel := s.cfg.Events.Subscribe("pixel")
+	desktop, stopDesktop := s.cfg.Events.Subscribe("desktop")
+	defer stopPixel()
+	defer stopDesktop()
+
+	if code := do(t, s, "POST", "/api/devices/desktop/revoke", "").Code; code != http.StatusNoContent {
+		t.Fatalf("revoke = %d, want 204", code)
+	}
+	if got, ok := recv(t, pixel); !ok || got != "devices" {
+		t.Fatalf("approved stream got %q, ok=%v; want devices", got, ok)
+	}
+	if got, ok := recv(t, desktop); ok {
+		t.Fatalf("revoked stream stayed open and received %q", got)
+	}
+
+	var online []string
+	w := do(t, s, "GET", "/api/presence", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("presence = %d: %s", w.Code, w.Body)
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &online); err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range online {
+		if node == "desktop" {
+			t.Fatalf("presence still advertises revoked desktop: %v", online)
+		}
+	}
+}
+
+func TestRevocationRemovesTheTargetsPushSubscriptions(t *testing.T) {
+	s, devices := newTestServer(t, true)
+	pusher, err := NewPusher(t.TempDir(), "mailto:test@invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.cfg.Push = pusher
+	devices.Seen("desktop", "owner@example.com", "")
+	for _, endpoint := range []string{"old", "current"} {
+		raw := []byte(`{"endpoint":"https://push.example/desktop-` + endpoint + `","keys":{"p256dh":"k","auth":"a"}}`)
+		if err := pusher.Subscribe("desktop", raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := pusher.Subscribe("laptop", []byte(`{"endpoint":"https://push.example/laptop","keys":{"p256dh":"k","auth":"a"}}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	if code := do(t, s, "POST", "/api/devices/desktop/revoke", "").Code; code != http.StatusNoContent {
+		t.Fatalf("revoke = %d, want 204", code)
+	}
+	got := pusher.targets(nil, "pixel")
+	if len(got) != 1 || got[0].Node != "laptop" {
+		t.Fatalf("generic push targets after revoke = %v, want only laptop", nodesOf(got))
+	}
+}
+
+type delayedSubscriptionBody struct {
+	started chan struct{}
+	release chan struct{}
+	body    []byte
+	read    bool
+}
+
+func (b *delayedSubscriptionBody) Read(p []byte) (int, error) {
+	if b.read {
+		return 0, io.EOF
+	}
+	b.read = true
+	close(b.started)
+	<-b.release
+	return copy(p, b.body), io.EOF
+}
+
+func TestRevocationWinsAgainstAnAlreadyAuthorizedPushSubscribe(t *testing.T) {
+	s, devices := newTestServer(t, true)
+	pusher, err := NewPusher(t.TempDir(), "mailto:test@invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.cfg.Push = pusher
+	s.cfg.Ident = func(r *http.Request) (Identity, bool) {
+		return Identity{Node: r.Header.Get("X-Test-Node"), User: "owner@example.com"}, true
+	}
+	devices.Seen("pixel", "owner@example.com", "")
+	devices.Seen("desktop", "owner@example.com", "")
+
+	body := &delayedSubscriptionBody{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		body:    []byte(`{"endpoint":"https://push.example/desktop","keys":{"p256dh":"k","auth":"a"}}`),
+	}
+	subscribeRequest := httptest.NewRequest("POST", "/api/push/subscribe", body)
+	subscribeRequest.Header.Set("X-Test-Node", "desktop")
+	subscribeResult := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, subscribeRequest)
+		subscribeResult <- w
+	}()
+	select {
+	case <-body.started: // The gate admitted desktop and the handler is reading its body.
+	case <-time.After(time.Second):
+		t.Fatal("subscribe handler never started reading its body")
+	}
+
+	revokeRequest := httptest.NewRequest("POST", "/api/devices/desktop/revoke", nil)
+	revokeRequest.Header.Set("X-Test-Node", "pixel")
+	revokeResult := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, revokeRequest)
+		revokeResult <- w
+	}()
+	var revoke *httptest.ResponseRecorder
+	select {
+	case revoke = <-revokeResult:
+	case <-time.After(time.Second):
+		close(body.release)
+		t.Fatal("revoke waited for an untrusted subscription body")
+	}
+	close(body.release)
+	var subscribe *httptest.ResponseRecorder
+	select {
+	case subscribe = <-subscribeResult:
+	case <-time.After(time.Second):
+		t.Fatal("subscribe handler did not finish after its body was released")
+	}
+
+	if revoke.Code != http.StatusNoContent {
+		t.Fatalf("revoke = %d, want 204", revoke.Code)
+	}
+	if subscribe.Code != http.StatusForbidden {
+		t.Fatalf("subscription admitted after revoke = %d, want 403", subscribe.Code)
+	}
+	if got := nodesOf(pusher.targets(nil, "pixel")); len(got) != 0 {
+		t.Fatalf("generic push targets after the race = %v, want none", got)
 	}
 }
 
@@ -298,6 +475,23 @@ func TestUnapprovedDeviceGetsTheShellAndItsStatus(t *testing.T) {
 		if code := do(t, s, "GET", path, "").Code; code != http.StatusForbidden {
 			t.Fatalf("%s = %d, want 403 for an unapproved device", path, code)
 		}
+	}
+}
+
+func TestFirstSightingOfAPendingDevicePublishesADevicesEvent(t *testing.T) {
+	s, devices := newTestServer(t, true)
+	// An existing approved device is the authority that can act on the event.
+	devices.Seen("laptop", "owner@example.com", "")
+	devices.defaultAllow = false
+	stream, stop := s.cfg.Events.Subscribe("laptop")
+	defer stop()
+
+	w := do(t, s, "GET", "/api/whoami", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("whoami = %d, want 200", w.Code)
+	}
+	if got, ok := recv(t, stream); !ok || got != "devices" {
+		t.Fatalf("approved stream got %q, ok=%v; want devices", got, ok)
 	}
 }
 
@@ -426,11 +620,35 @@ func createTransfer(t *testing.T, s *Server, body string) (string, []string) {
 	return got.ID, got.Missing
 }
 
+func TestDirectTransferRequiresARecipient(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	w := do(t, s, "POST", "/api/transfer", `{"cids":["`+cid(1)+`"]}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("create without a recipient = %d, want 400: %s", w.Code, w.Body)
+	}
+}
+
+func TestDirectTransferRejectsTheSenderAsARecipient(t *testing.T) {
+	s, _ := newTestServer(t, true) // test identity is node "pixel"
+	w := do(t, s, "POST", "/api/transfer", `{"to":["pixel"],"cids":["`+cid(1)+`"]}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("create addressed to the sender = %d, want 400: %s", w.Code, w.Body)
+	}
+}
+
+func TestHeldTransferAllowsBroadcast(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	w := do(t, s, "POST", "/api/transfer", `{"held":true,"cids":["`+cid(1)+`"]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create held broadcast = %d, want 200: %s", w.Code, w.Body)
+	}
+}
+
 func TestTransferRoundTripWithDedup(t *testing.T) {
 	s, _ := newTestServer(t, true)
 	a, b := cid(1), cid(2)
 
-	id, missing := createTransfer(t, s, `{"cids":["`+a+`","`+b+`"]}`)
+	id, missing := createTransfer(t, s, `{"held":true,"cids":["`+a+`","`+b+`"]}`)
 	if len(missing) != 2 {
 		t.Fatalf("first transfer should need both chunks, got %v", missing)
 	}
@@ -452,7 +670,7 @@ func TestTransferRoundTripWithDedup(t *testing.T) {
 	}
 
 	// The whole point: a second transfer over the same content uploads nothing.
-	_, missing2 := createTransfer(t, s, `{"cids":["`+a+`","`+b+`"]}`)
+	_, missing2 := createTransfer(t, s, `{"held":true,"cids":["`+a+`","`+b+`"]}`)
 	if len(missing2) != 0 {
 		t.Fatalf("second transfer should need no chunks, got %v", missing2)
 	}
@@ -467,7 +685,7 @@ func TestTransferRoundTripWithDedup(t *testing.T) {
 
 func TestSenderAndIdAreNeverTakenFromTheClient(t *testing.T) {
 	s, _ := newTestServer(t, true)
-	id, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"],"sender":"someone-else","id":"deadbeef"}`)
+	id, _ := createTransfer(t, s, `{"held":true,"cids":["`+cid(1)+`"],"sender":"someone-else","id":"deadbeef"}`)
 	if id == "deadbeef" {
 		t.Fatal("the client set its own transfer id")
 	}
@@ -480,7 +698,11 @@ func TestSenderAndIdAreNeverTakenFromTheClient(t *testing.T) {
 
 func TestInboxIsScopedToThisDevice(t *testing.T) {
 	s, _ := newTestServer(t, true) // identity is always node "pixel"
-	mine, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"],"to":["pixel"]}`)
+	mineRec, _, err := s.cfg.Transfers.Create("laptop", []string{"pixel"}, []string{cid(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mine := mineRec.ID
 	// Sent from here to somewhere else. The sender may delete it, so it belongs
 	// in the list the delete button is attached to.
 	sent, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"],"to":["laptop"]}`)
@@ -510,7 +732,7 @@ func TestInboxIsScopedToThisDevice(t *testing.T) {
 
 func TestDeleteMovesTransferToHistory(t *testing.T) {
 	s, _ := newTestServer(t, true)
-	id, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"]}`)
+	id, _ := createTransfer(t, s, `{"held":true,"cids":["`+cid(1)+`"]}`)
 	do(t, s, "PUT", "/api/transfer/"+id+"/meta", "sealed-meta")
 
 	if code := do(t, s, "DELETE", "/api/transfer/"+id, "").Code; code != http.StatusNoContent {
@@ -529,13 +751,100 @@ func TestDeleteMovesTransferToHistory(t *testing.T) {
 	}
 }
 
+func TestDeleteNudgesTheCallerAndSender(t *testing.T) {
+	s, devices := newTestServer(t, true)
+	node := "pixel"
+	s.cfg.Ident = func(*http.Request) (Identity, bool) {
+		return Identity{Node: node, User: "owner@example.com"}, true
+	}
+	id, _ := createTransfer(t, s, `{"to":["desktop"],"cids":["`+cid(1)+`"]}`)
+	devices.Seen("desktop", "owner@example.com", "")
+	devices.Seen("laptop", "owner@example.com", "")
+	pixel, stopPixel := s.cfg.Events.Subscribe("pixel")
+	desktop, stopDesktop := s.cfg.Events.Subscribe("desktop")
+	laptop, stopLaptop := s.cfg.Events.Subscribe("laptop")
+	defer stopPixel()
+	defer stopDesktop()
+	defer stopLaptop()
+
+	node = "desktop"
+	if code := do(t, s, "DELETE", "/api/transfer/"+id, "").Code; code != http.StatusNoContent {
+		t.Fatalf("delete = %d, want 204", code)
+	}
+	for party, ch := range map[string]<-chan string{"caller": desktop, "sender": pixel} {
+		if got, ok := recv(t, ch); !ok || got != "inbox" {
+			t.Fatalf("%s stream got %q, ok=%v; want inbox", party, got, ok)
+		}
+	}
+	select {
+	case got := <-laptop:
+		t.Fatalf("unaffected laptop received %q", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestTerminalMutationStillSucceedsWhenChunkReclamationFails(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*testing.T, *Server) (string, string)
+	}{
+		{
+			name: "delete",
+			setup: func(t *testing.T, s *Server) (string, string) {
+				rec, _, err := s.cfg.Transfers.CreateHeld("pixel", nil, []string{cid(1)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return rec.ID, "DELETE /api/transfer/" + rec.ID
+			},
+		},
+		{
+			name: "final decline",
+			setup: func(t *testing.T, s *Server) (string, string) {
+				rec, _, err := s.cfg.Transfers.CreateHeld("laptop", []string{"pixel"}, []string{cid(1)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return rec.ID, "POST /api/transfer/" + rec.ID + "/decline"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _ := newTestServer(t, true)
+			id, request := tt.setup(t, s)
+			// Prime the authenticated device before subscribing, so the first
+			// event under test is the terminal mutation's lifecycle nudge rather
+			// than the registry's first-seen devices event.
+			do(t, s, "GET", "/api/whoami", "")
+			events, stop := s.cfg.Events.Subscribe("pixel")
+			defer stop()
+			if err := os.RemoveAll(s.cfg.Chunks.dir); err != nil {
+				t.Fatal(err)
+			}
+
+			method, path, _ := strings.Cut(request, " ")
+			if code := do(t, s, method, path, "").Code; code != http.StatusNoContent {
+				t.Fatalf("terminal mutation = %d, want 204 after its state committed", code)
+			}
+			if _, err := s.cfg.Transfers.Get(id); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("transfer survived its terminal mutation: %v", err)
+			}
+			if got, ok := recv(t, events); !ok || got != "inbox" {
+				t.Fatalf("lifecycle stream got %q, ok=%v; want inbox", got, ok)
+			}
+		})
+	}
+}
+
 // The test identity is fixed at node "pixel", and every transfer created over
 // HTTP therefore has "pixel" as its sender, which is already enough to see and
 // delete it. A transfer between two other devices has to be made through the
 // store, and that is what these two tests need to have any power at all.
 func TestHistoryEndpointIsScoped(t *testing.T) {
 	s, _ := newTestServer(t, true)
-	mine, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"],"to":["pixel"]}`)
+	mine, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"],"to":["desktop"]}`)
 	do(t, s, "DELETE", "/api/transfer/"+mine, "")
 
 	theirs, _, err := s.cfg.Transfers.Create("laptop", []string{"desktop"}, []string{cid(1)})
@@ -582,10 +891,10 @@ func TestMalformedIdsAreRejected(t *testing.T) {
 	if code := do(t, s, "GET", "/api/transfer/nothex", "").Code; code != http.StatusNotFound {
 		t.Fatalf("bad transfer id = %d, want 404", code)
 	}
-	if code := do(t, s, "POST", "/api/transfer", `{"cids":["../../etc/passwd"]}`).Code; code != http.StatusBadRequest {
+	if code := do(t, s, "POST", "/api/transfer", `{"held":true,"cids":["../../etc/passwd"]}`).Code; code != http.StatusBadRequest {
 		t.Fatalf("traversal-shaped cid = %d, want 400", code)
 	}
-	id, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"]}`)
+	id, _ := createTransfer(t, s, `{"held":true,"cids":["`+cid(1)+`"]}`)
 	if code := do(t, s, "PUT", "/api/transfer/"+id+"/cids.json", "x").Code; code != http.StatusBadRequest {
 		t.Fatalf("record kind naming an internal file = %d, want 400", code)
 	}
@@ -593,7 +902,7 @@ func TestMalformedIdsAreRejected(t *testing.T) {
 
 func TestOversizeChunkIsRejected(t *testing.T) {
 	s, _ := newTestServer(t, true) // maxChunkBytes is 64 in tests
-	id, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"]}`)
+	id, _ := createTransfer(t, s, `{"held":true,"cids":["`+cid(1)+`"]}`)
 	big := strings.Repeat("x", 4096)
 	if code := do(t, s, "PUT", "/api/chunk/"+cid(1)+"?transfer="+id, big).Code; code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("code = %d, want 413", code)
@@ -626,7 +935,7 @@ func TestChunkUploadMustNameItsTransfer(t *testing.T) {
 // transfer's clock never moves and the sweep expires it mid-upload.
 func TestChunkUploadKeepsItsTransferAlive(t *testing.T) {
 	s, _ := newTestServer(t, true) // ttl is one hour in tests
-	id, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"]}`)
+	id, _ := createTransfer(t, s, `{"held":true,"cids":["`+cid(1)+`"]}`)
 
 	dir := filepath.Join(s.cfg.Transfers.dir, id)
 	stale := time.Now().Add(-2 * time.Hour)
@@ -658,6 +967,49 @@ func TestChunkUploadKeepsItsTransferAlive(t *testing.T) {
 	}
 }
 
+func TestDeleteWaitsForAnInFlightChunkUpload(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	id, _ := createTransfer(t, s, `{"held":true,"cids":["`+cid(1)+`"]}`)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	uploadDone := make(chan int, 1)
+	go func() {
+		r := httptest.NewRequest("PUT", "/api/chunk/"+cid(1)+"?transfer="+id, &pausedReader{
+			body: []byte("sealed chunk"), started: started, gate: release,
+		})
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		uploadDone <- w.Code
+	}()
+	<-started
+
+	deleteStarted := make(chan struct{})
+	deleteDone := make(chan int, 1)
+	go func() {
+		close(deleteStarted)
+		deleteDone <- do(t, s, "DELETE", "/api/transfer/"+id, "").Code
+	}()
+	<-deleteStarted
+	select {
+	case code := <-deleteDone:
+		close(release)
+		<-uploadDone
+		t.Fatalf("delete finished with %d while its chunk upload was still in flight", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if code := <-uploadDone; code != http.StatusNoContent {
+		t.Fatalf("upload = %d, want 204", code)
+	}
+	if code := <-deleteDone; code != http.StatusNoContent {
+		t.Fatalf("delete = %d, want 204", code)
+	}
+	if s.cfg.Chunks.Has(cid(1)) {
+		t.Fatal("the upload committed an orphan chunk after its transfer was deleted")
+	}
+}
+
 // The record reader's cap has to come from the store's configurable maxRecord.
 // A cap written down in the handler becomes the real limit the moment the two
 // disagree, and the small default hides that: the store's own limit trips
@@ -668,7 +1020,7 @@ func TestChunkUploadKeepsItsTransferAlive(t *testing.T) {
 func TestRecordSizeFollowsTheConfiguredMaximum(t *testing.T) {
 	const maxRecord = 2 << 20
 	s, _ := newTestServerWithLimits(t, true, maxRecord, 8<<20)
-	id, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"]}`)
+	id, _ := createTransfer(t, s, `{"held":true,"cids":["`+cid(1)+`"]}`)
 
 	// Over a 1 MiB literal, under the configured maximum. A handler carrying
 	// its own number answers 413 here; one reading the store's answers 204.
@@ -689,7 +1041,7 @@ func TestTooManyChunksIsRejected(t *testing.T) {
 	for i := range ids {
 		ids[i] = cid(byte(i))
 	}
-	body, _ := json.Marshal(map[string]any{"cids": ids})
+	body, _ := json.Marshal(map[string]any{"held": true, "cids": ids})
 	if code := do(t, s, "POST", "/api/transfer", string(body)).Code; code != http.StatusInsufficientStorage {
 		t.Fatalf("code = %d, want 507", code)
 	}
@@ -704,7 +1056,7 @@ func TestSweepOnceDropsExpiredTransfersThenOrphanChunks(t *testing.T) {
 	chunks.Put(cid(1), strings.NewReader("data"))
 	time.Sleep(10 * time.Millisecond)
 
-	gone, orphans, err := sweepOnce(transfers, chunks)
+	gone, orphans, err := sweepOnce(transfers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -732,7 +1084,7 @@ func TestSweepOnceKeepsChunksAStillLiveTransferNeeds(t *testing.T) {
 	transfers.Create("pixel", nil, []string{cid(1)})
 	chunks.Put(cid(1), strings.NewReader("data"))
 
-	gone, orphans, err := sweepOnce(transfers, chunks)
+	gone, orphans, err := sweepOnce(transfers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -844,7 +1196,11 @@ func TestSaltIsGeneratedOnceAndACorruptFileIsNotReplaced(t *testing.T) {
 
 func TestDeclineEndpoint(t *testing.T) {
 	s, _ := newTestServer(t, true) // identity is node "pixel"
-	id, _ := createTransfer(t, s, `{"cids":["`+cid(1)+`"],"to":["pixel"]}`)
+	rec, _, err := s.cfg.Transfers.Create("laptop", []string{"pixel"}, []string{cid(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := rec.ID
 
 	if code := do(t, s, "POST", "/api/transfer/"+id+"/decline", "").Code; code != http.StatusNoContent {
 		t.Fatalf("decline = %d, want 204", code)
@@ -853,6 +1209,37 @@ func TestDeclineEndpoint(t *testing.T) {
 	json.Unmarshal(do(t, s, "GET", "/api/inbox", "").Body.Bytes(), &inbox)
 	if len(inbox) != 0 {
 		t.Fatalf("a declined transfer is still in the inbox: %v", inbox)
+	}
+}
+
+func TestDeclineNudgesEveryAffectedParty(t *testing.T) {
+	s, devices := newTestServer(t, true)
+	node := "pixel"
+	s.cfg.Ident = func(*http.Request) (Identity, bool) {
+		return Identity{Node: node, User: "owner@example.com"}, true
+	}
+	id, _ := createTransfer(t, s, `{"to":["desktop","laptop"],"cids":["`+cid(1)+`"]}`)
+	devices.Seen("desktop", "owner@example.com", "")
+	devices.Seen("laptop", "owner@example.com", "")
+	streams := map[string]<-chan string{}
+	stops := []func(){}
+	for _, party := range []string{"pixel", "desktop", "laptop"} {
+		stream, stop := s.cfg.Events.Subscribe(party)
+		streams[party] = stream
+		stops = append(stops, stop)
+	}
+	for _, stop := range stops {
+		defer stop()
+	}
+
+	node = "desktop"
+	if code := do(t, s, "POST", "/api/transfer/"+id+"/decline", "").Code; code != http.StatusNoContent {
+		t.Fatalf("decline = %d, want 204", code)
+	}
+	for _, party := range []string{"pixel", "desktop", "laptop"} {
+		if got, ok := recv(t, streams[party]); !ok || got != "inbox" {
+			t.Fatalf("%s stream got %q, ok=%v; want inbox", party, got, ok)
+		}
 	}
 }
 
@@ -902,9 +1289,11 @@ func TestSignalRejectsAPayloadThatWouldBreakTheStreamFraming(t *testing.T) {
 // answer with a 400 for a kind that is not a record.
 func TestProgressRoutesRoundTripAndDrainTheQueue(t *testing.T) {
 	s, _ := newTestServer(t, true)
-	// The test identity is pixel, so a transfer pixel sent to pixel is both in
-	// its queue and writable by it.
-	w := do(t, s, "POST", "/api/transfer", `{"cids":["`+cid(1)+`","`+cid(2)+`"],"to":["pixel"]}`)
+	node := "pixel"
+	s.cfg.Ident = func(*http.Request) (Identity, bool) {
+		return Identity{Node: node, User: "owner@example.com"}, true
+	}
+	w := do(t, s, "POST", "/api/transfer", `{"cids":["`+cid(1)+`","`+cid(2)+`"],"to":["desktop"]}`)
 	if w.Code != http.StatusOK {
 		t.Fatalf("create = %d: %s", w.Code, w.Body)
 	}
@@ -914,7 +1303,11 @@ func TestProgressRoutesRoundTripAndDrainTheQueue(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
+	if got := do(t, s, "PUT", "/api/transfer/"+created.ID+"/meta", "sealed-meta").Code; got != http.StatusNoContent {
+		t.Fatalf("put meta = %d, want 204", got)
+	}
 
+	node = "desktop"
 	if got := do(t, s, "PUT", "/api/transfer/"+created.ID+"/progress", "\x01").Code; got != http.StatusNoContent {
 		t.Fatalf("put progress = %d, want 204", got)
 	}
@@ -923,6 +1316,7 @@ func TestProgressRoutesRoundTripAndDrainTheQueue(t *testing.T) {
 		t.Fatalf("get progress = %d %q, want 200 and the bitmap back", w.Code, w.Body.String())
 	}
 
+	node = "pixel"
 	w = do(t, s, "GET", "/api/queue", "")
 	var queue []struct {
 		ID string `json:"id"`
@@ -934,9 +1328,11 @@ func TestProgressRoutesRoundTripAndDrainTheQueue(t *testing.T) {
 		t.Fatalf("queue = %v, want the transfer with a chunk still outstanding", queue)
 	}
 
+	node = "desktop"
 	if got := do(t, s, "PUT", "/api/transfer/"+created.ID+"/progress", "\x03").Code; got != http.StatusNoContent {
 		t.Fatalf("put full progress = %d, want 204", got)
 	}
+	node = "pixel"
 	w = do(t, s, "GET", "/api/queue", "")
 	queue = nil
 	if err := json.Unmarshal(w.Body.Bytes(), &queue); err != nil {
@@ -949,13 +1345,21 @@ func TestProgressRoutesRoundTripAndDrainTheQueue(t *testing.T) {
 
 func TestProgressRejectsAWrongSizedBitmapOverHTTP(t *testing.T) {
 	s, _ := newTestServer(t, true)
-	w := do(t, s, "POST", "/api/transfer", `{"cids":["`+cid(1)+`"],"to":["pixel"]}`)
+	node := "pixel"
+	s.cfg.Ident = func(*http.Request) (Identity, bool) {
+		return Identity{Node: node, User: "owner@example.com"}, true
+	}
+	w := do(t, s, "POST", "/api/transfer", `{"cids":["`+cid(1)+`"],"to":["desktop"]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create = %d: %s", w.Code, w.Body)
+	}
 	var created struct {
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
+	node = "desktop"
 	if got := do(t, s, "PUT", "/api/transfer/"+created.ID+"/progress", "\x00\x00").Code; got != http.StatusBadRequest {
 		t.Fatalf("put oversized bitmap = %d, want 400", got)
 	}
@@ -1043,5 +1447,62 @@ func TestDirectTransferAnnouncesWithoutTheServerHoldingChunks(t *testing.T) {
 	case got := <-events:
 		t.Fatalf("announced twice for one transfer (second event %q)", got)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestServerHeldTransferLeavesTheDirectDeliveryQueue(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	cid := strings.Repeat("a", 64)
+
+	w := do(t, s, "POST", "/api/transfer", `{"held":true,"to":["desktop"],"cids":["`+cid+`"]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create = %d: %s", w.Code, w.Body)
+	}
+	var created Transfer
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	for path, body := range map[string]string{
+		"/api/chunk/" + cid + "?transfer=" + created.ID: "sealed-chunk",
+		"/api/transfer/" + created.ID + "/meta":         "sealed-meta",
+		"/api/transfer/" + created.ID + "/chunklist":    "sealed-list",
+	} {
+		if code := do(t, s, "PUT", path, body).Code; code != http.StatusNoContent {
+			t.Fatalf("PUT %s = %d, want 204", path, code)
+		}
+	}
+
+	queue := do(t, s, "GET", "/api/queue", "")
+	if queue.Code != http.StatusOK {
+		t.Fatalf("queue = %d: %s", queue.Code, queue.Body)
+	}
+	var pending []TransferInfo
+	if err := json.Unmarshal(queue.Body.Bytes(), &pending); err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("queue contains %d transfer(s), want none after the server holds the complete transfer", len(pending))
+	}
+}
+
+func TestIncompleteServerHeldTransferNeverEntersTheDirectDeliveryQueue(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	cid := strings.Repeat("b", 64)
+
+	w := do(t, s, "POST", "/api/transfer", `{"held":true,"to":["desktop"],"cids":["`+cid+`"]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create = %d: %s", w.Code, w.Body)
+	}
+
+	queue := do(t, s, "GET", "/api/queue", "")
+	if queue.Code != http.StatusOK {
+		t.Fatalf("queue = %d: %s", queue.Code, queue.Body)
+	}
+	var pending []TransferInfo
+	if err := json.Unmarshal(queue.Body.Bytes(), &pending); err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("queue contains %d transfer(s), want no peer work for a partial server-held upload", len(pending))
 	}
 }

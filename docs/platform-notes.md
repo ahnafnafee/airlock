@@ -162,6 +162,8 @@ beside it. None of them needs the code read.
 Nothing below has been run. Do not state any of it as fact in another document.
 
 - [ ] Web Push actually waking a device whose app is closed.
+- [ ] A browser on the same machine as the server opens Airlock by its tailnet
+      name and completes a transfer to a second physical device.
 - [ ] `tailscale cert <name>` on macOS, for whichever Tailscale variant is
       installed. If it fails, host mode on macOS is not viable and the docs must
       say so.
@@ -179,7 +181,11 @@ Nothing below has been run. Do not state any of it as fact in another document.
 - [ ] Embedded mode once, on any platform, with no `TS_AUTHKEY`. If it blocks
       printing an interactive login URL, it is unusable as a service and the
       docs must not recommend it.
-- [ ] Android install, and whether the share sheet entry appears.
+- [ ] An installed Windows Chrome or Edge PWA opens from **Open with Airlock**,
+      stages the chosen file, completes a send after the owner chooses a device,
+      and starts at sign-in when that option is enabled.
+- [ ] Android Chrome installs without browser chrome, appears in the share sheet,
+      stages a shared photo, and stages a shared link as a text transfer.
 
 ## iOS, not run on any device
 
@@ -210,8 +216,10 @@ version beside each answer, and correct every document that assumed otherwise.
 - [ ] **V5. Confirm the file picker reaches Photos, Files and iCloud Drive,**
       and that a file with no extension survives it.
 - [ ] **V6. Whether the save streams to disk or buffers in memory.** If it
-      buffers, iOS gains a hard file-size cap the other platforms do not have,
-      and `PREFLIGHT_FACTOR` in `web/ios.js` must rise from 1.15 to 2.15.
+      buffers, iOS gains a hard file-size cap the other platforms do not have.
+      The storage preflight already reserves 2.15 times the plaintext size for
+      the sealed stage, assembled output and headroom; buffering would require a
+      separate size limit or export fallback rather than another disk estimate.
 
 Two more that cost nothing to check while the device is in hand:
 

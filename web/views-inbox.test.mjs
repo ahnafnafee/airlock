@@ -45,7 +45,9 @@ function stubDocument() {
 }
 
 stubDocument();
-const { readRow } = await import('./views/inbox.js');
+const {
+  cleanLocalTransfer, readRow, reconcileLocalTransfers, rowActions, terminateTransfer,
+} = await import('./views/inbox.js');
 
 const SALT = b64encode(new Uint8Array(16).fill(3));
 const mk = await deriveMaster('correct horse battery staple', SALT);
@@ -106,6 +108,12 @@ test('a partly arrived transfer says what it is waiting for and offers no Save',
   assert.equal(row.note, 'Still arriving. 1 of 3 chunks so far.');
 });
 
+test('a sparse arrival keeps the chunk positions that are actually present', async () => {
+  const row = await readRow(await direct(), mk, stages({ [ID]: [2] }));
+  assert.equal(row.reach, 1);
+  assert.deepEqual(row.heldAt, [2]);
+});
+
 test('a stage that does not exist yet reads as not yet rather than as an error', async () => {
   const row = await readRow(await direct(), mk, stages({}));
   assert.equal(row.saveable, false);
@@ -137,6 +145,87 @@ test('a transfer whose metadata record has not landed is the only nameless row',
   const row = await readRow(await direct({ meta: '' }), mk, stages({ [ID]: [0, 1, 2] }));
   assert.equal(row.name, 'Incomplete transfer');
   assert.equal(row.saveable, false);
+});
+
+test('an outbound transfer is status and delete only on its sender', async () => {
+  const row = await readRow(
+    await direct({ complete: true, missing: [] }), mk, stages({}), 'mac-mini');
+
+  assert.equal(row.outbound, true);
+  assert.equal(row.saveable, false);
+  assert.match(row.detail, /sent just now/);
+  assert.doesNotMatch(row.detail, /from mac-mini/);
+  assert.match(row.note, /available from the server/i);
+  assert.deepEqual(rowActions(row), ['delete']);
+
+  const inbound = await readRow(
+    await direct({ complete: true, missing: [] }), mk, stages({}), 'phone');
+  assert.deepEqual(rowActions(inbound), ['save', 'decline', 'delete']);
+});
+
+test('terminal cleanup uses the sender stage and removes the assembled file', async () => {
+  const stage = 'b'.repeat(32);
+  const cleared = [];
+  const removed = [];
+  const deps = {
+    openStage: async (id) => ({ clear: async () => { cleared.push(id); } }),
+    removeAssembled: async (id) => { removed.push(id); },
+  };
+
+  await cleanLocalTransfer(await direct(), { stage }, true, deps);
+  assert.deepEqual(cleared, [stage]);
+  assert.deepEqual(removed, [ID]);
+
+  cleared.length = 0;
+  removed.length = 0;
+  await cleanLocalTransfer(await direct(), {}, false, deps);
+  assert.deepEqual(cleared, [ID], 'a receiver stage is named by the transfer');
+  assert.deepEqual(removed, [ID]);
+});
+
+test('a lost terminal response is completed from the authoritative inbox', async () => {
+  const t = await direct();
+  const calls = [];
+  const outcome = await terminateTransfer(t, {}, false, async () => {
+    calls.push('mutate');
+    throw new Error('response lost');
+  }, {
+    cancelReceive: async (id) => { calls.push(`cancel:${id}`); },
+    resumeReceive: () => { calls.push('resume'); },
+    inbox: async () => [],
+    cleanLocalTransfer: async () => { calls.push('clean'); },
+  });
+
+  assert.equal(outcome.terminal, true);
+  assert.deepEqual(calls, [`cancel:${ID}`, 'mutate', 'clean']);
+});
+
+test('a refused terminal mutation resumes an arrival the server still lists', async () => {
+  const t = await direct();
+  const calls = [];
+  const outcome = await terminateTransfer(t, {}, false, async () => {
+    throw new Error('refused');
+  }, {
+    cancelReceive: async () => { calls.push('cancel'); },
+    resumeReceive: (id) => { calls.push(`resume:${id}`); },
+    inbox: async () => [t],
+    cleanLocalTransfer: async () => { calls.push('clean'); },
+  });
+
+  assert.equal(outcome.terminal, false);
+  assert.equal(outcome.uncertain, false);
+  assert.deepEqual(calls, ['cancel', `resume:${ID}`]);
+});
+
+test('a successful inbox snapshot cancels before reclaiming absent local data', async () => {
+  const order = [];
+  await reconcileLocalTransfers([{ id: ID }], {
+    reconcileReceives: async (active) => { order.push(`sessions:${[...active]}`); },
+    reconcileReceiverStages: async (active) => { order.push(`stages:${[...active]}`); },
+    reconcileAssembled: async (active) => { order.push(`outputs:${[...active]}`); },
+  });
+  assert.equal(order[0], `sessions:${ID}`);
+  assert.deepEqual(new Set(order.slice(1)), new Set([`stages:${ID}`, `outputs:${ID}`]));
 });
 
 test('a name this device cannot vouch for is never rendered as one', async () => {

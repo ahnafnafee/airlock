@@ -43,6 +43,33 @@ func TestCreateReturnsEverythingMissing(t *testing.T) {
 	}
 }
 
+func TestEmptyTransferCompletesWithItsRecords(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, missing, err := tr.Create("pixel", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("missing = %v, want none", missing)
+	}
+	if info, err := tr.Get(rec.ID); err != nil || info.Complete {
+		t.Fatalf("before records: complete = %v, err = %v", info != nil && info.Complete, err)
+	}
+	if err := tr.PutRecord(rec.ID, "meta", strings.NewReader("sealed-meta")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.PutRecord(rec.ID, "chunklist", strings.NewReader("sealed-list")); err != nil {
+		t.Fatal(err)
+	}
+	info, err := tr.Get(rec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Complete || info.ChunkCount != 0 {
+		t.Fatalf("complete = %v, chunk count = %d", info.Complete, info.ChunkCount)
+	}
+}
+
 func TestCompleteRequiresChunksMetaAndList(t *testing.T) {
 	tr, c := newTransfers(t)
 	rec, _, _ := tr.Create("pixel", nil, []string{cid(1)})
@@ -248,10 +275,9 @@ func TestSweepSparesATransferARecordWriteRefreshed(t *testing.T) {
 	}
 }
 
-// Chunks land outside the transfer directory, so the upload path refreshes the
-// clock through Touch. This is the contract the chunk upload handler relies on
+// Chunks land outside the transfer directory, so PutChunk refreshes the clock
 // to keep a transfer whose upload outlasts the TTL from being swept mid-flight.
-func TestTouchKeepsAnUploadingTransferAlive(t *testing.T) {
+func TestChunkUploadKeepsAnUploadingTransferAlive(t *testing.T) {
 	dir := t.TempDir()
 	c, _ := NewChunkStore(dir, 64, 1<<20)
 	tr, _ := NewTransfers(dir, c, 200*time.Millisecond, 100, 4096)
@@ -260,7 +286,7 @@ func TestTouchKeepsAnUploadingTransferAlive(t *testing.T) {
 	idle, _, _ := tr.Create("pixel", nil, []string{cid(2)})
 	time.Sleep(250 * time.Millisecond)
 
-	if err := tr.Touch(uploading.ID); err != nil {
+	if err := tr.PutChunk(uploading.ID, cid(1), strings.NewReader("sealed chunk")); err != nil {
 		t.Fatal(err)
 	}
 	n, err := tr.Sweep(time.Now())
@@ -276,8 +302,195 @@ func TestTouchKeepsAnUploadingTransferAlive(t *testing.T) {
 	if _, err := tr.Get(idle.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatal("the idle transfer should have expired")
 	}
-	if err := tr.Touch(strings.Repeat("f", 32)); !errors.Is(err, ErrNotFound) {
+	if err := tr.PutChunk(strings.Repeat("f", 32), cid(3), strings.NewReader("orphan")); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound for an unknown transfer", err)
+	}
+}
+
+func TestSweepRechecksExpiryAfterWaitingForATransfer(t *testing.T) {
+	dir := t.TempDir()
+	c, _ := NewChunkStore(dir, 64, 1<<20)
+	tr, _ := NewTransfers(dir, c, time.Hour, 100, 4096)
+	rec, _, _ := tr.Create("pixel", nil, []string{cid(1)})
+
+	transferDir, _ := tr.transferDir(rec.ID)
+	stale := time.Now().Add(-2 * time.Hour)
+	for _, path := range []string{
+		filepath.Join(transferDir, "cids.json"),
+		filepath.Join(transferDir, "meta.json"),
+		transferDir,
+	} {
+		if err := os.Chtimes(path, stale, stale); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Stand in for a terminal mutation already in progress. Sweep must observe
+	// the stale candidate, queue behind its transfer lock, and then decide again
+	// once it owns that lock rather than acting on the old observation.
+	release := tr.lockTransfer(rec.ID)
+	released := false
+	defer func() {
+		if !released {
+			release()
+		}
+	}()
+	type result struct {
+		n   int
+		err error
+	}
+	swept := make(chan result, 1)
+	go func() {
+		n, err := tr.Sweep(time.Now())
+		swept <- result{n: n, err: err}
+	}()
+
+	deadline := time.NewTimer(2 * time.Second)
+	tick := time.NewTicker(time.Millisecond)
+	defer deadline.Stop()
+	defer tick.Stop()
+	for {
+		tr.lockMu.Lock()
+		refs := tr.locks[rec.ID].refs
+		tr.lockMu.Unlock()
+		if refs == 2 {
+			break
+		}
+		select {
+		case got := <-swept:
+			t.Fatalf("Sweep completed before the transfer lock was released: %+v", got)
+		case <-deadline.C:
+			t.Fatal("Sweep did not wait for the transfer lock")
+		case <-tick.C:
+		}
+	}
+
+	if err := tr.touch(rec.ID); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	released = true
+	got := <-swept
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if got.n != 0 {
+		t.Fatalf("swept %d, want the refreshed transfer spared", got.n)
+	}
+	if _, err := tr.Get(rec.ID); err != nil {
+		t.Fatalf("a transfer refreshed while Sweep waited was removed: %v", err)
+	}
+}
+
+func TestSweepSerializesWithTerminalMutations(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Transfers, *Transfer) error
+	}{
+		{
+			name: "delete",
+			mutate: func(tr *Transfers, rec *Transfer) error {
+				return tr.Delete(rec.ID, "pixel")
+			},
+		},
+		{
+			name: "final decline",
+			mutate: func(tr *Transfers, rec *Transfer) error {
+				return tr.Decline(rec.ID, "desktop")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			c, _ := NewChunkStore(dir, 64, 1<<20)
+			tr, _ := NewTransfers(dir, c, time.Hour, 100, 4096)
+			rec, _, _ := tr.Create("pixel", []string{"desktop"}, nil)
+
+			transferDir, _ := tr.transferDir(rec.ID)
+			stale := time.Now().Add(-2 * time.Hour)
+			for _, path := range []string{
+				filepath.Join(transferDir, "cids.json"),
+				filepath.Join(transferDir, "meta.json"),
+				transferDir,
+			} {
+				if err := os.Chtimes(path, stale, stale); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			release := tr.lockTransfer(rec.ID)
+			released := false
+			defer func() {
+				if !released {
+					release()
+				}
+			}()
+
+			type sweepResult struct {
+				n   int
+				err error
+			}
+			swept := make(chan sweepResult, 1)
+			go func() {
+				n, err := tr.Sweep(time.Now())
+				swept <- sweepResult{n: n, err: err}
+			}()
+
+			waitForRefs := func(want int) {
+				deadline := time.NewTimer(2 * time.Second)
+				tick := time.NewTicker(time.Millisecond)
+				defer deadline.Stop()
+				defer tick.Stop()
+				for {
+					tr.lockMu.Lock()
+					refs := tr.locks[rec.ID].refs
+					tr.lockMu.Unlock()
+					if refs == want {
+						return
+					}
+					select {
+					case <-deadline.C:
+						t.Fatalf("transfer lock has %d references, want %d", refs, want)
+					case <-tick.C:
+					}
+				}
+			}
+			waitForRefs(2)
+
+			mutated := make(chan error, 1)
+			go func() { mutated <- tt.mutate(tr, rec) }()
+			waitForRefs(3)
+			release()
+			released = true
+
+			sweep := <-swept
+			mutationErr := <-mutated
+			if sweep.err != nil {
+				t.Fatal(sweep.err)
+			}
+			switch {
+			case sweep.n == 1 && errors.Is(mutationErr, ErrNotFound):
+			case sweep.n == 0 && mutationErr == nil:
+			default:
+				t.Fatalf("swept = %d, mutation err = %v; want exactly one terminal mutation", sweep.n, mutationErr)
+			}
+
+			hist, err := tr.History("pixel")
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen := 0
+			for _, tomb := range hist {
+				if tomb.ID == rec.ID {
+					seen++
+				}
+			}
+			if seen != 1 {
+				t.Fatalf("terminal history entries = %d, want one", seen)
+			}
+		})
 	}
 }
 
@@ -374,6 +587,86 @@ func TestRecordsAreMeteredAgainstTheSharedBudget(t *testing.T) {
 	}
 }
 
+func TestDeleteWaitsForAnInFlightRecordUpload(t *testing.T) {
+	tr, chunks := newTransfers(t)
+	rec, _, err := tr.Create("pixel", nil, []string{cid(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	putDone := make(chan error, 1)
+	go func() {
+		putDone <- tr.PutRecord(rec.ID, "meta", &pausedReader{
+			body: []byte("sealed metadata"), started: started, gate: release,
+		})
+	}()
+	<-started
+
+	deleteStarted := make(chan struct{})
+	deleteDone := make(chan error, 1)
+	go func() {
+		close(deleteStarted)
+		deleteDone <- tr.Delete(rec.ID, "pixel")
+	}()
+	<-deleteStarted
+	select {
+	case err := <-deleteDone:
+		close(release)
+		<-putDone
+		t.Fatalf("delete finished with %v while its record upload was still in flight", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-putDone; err != nil {
+		t.Fatalf("record upload = %v", err)
+	}
+	if err := <-deleteDone; err != nil {
+		t.Fatalf("delete = %v", err)
+	}
+	if _, err := tr.Get(rec.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("get after delete = %v, want ErrNotFound", err)
+	}
+	chunks.mu.Lock()
+	recordUsed := chunks.recordUsed
+	chunks.mu.Unlock()
+	if recordUsed != 0 {
+		t.Fatalf("record bytes after delete = %d, want 0", recordUsed)
+	}
+}
+
+// Chunk admission has to see records already occupying the same data disk.
+// Otherwise a records-first upload can spend most of the budget and a later
+// chunk still sees an empty store and takes the real total past maxTotal.
+func TestChunkAdmissionCountsExistingRecordsAgainstTheSharedBudget(t *testing.T) {
+	dir := t.TempDir()
+	c, err := NewChunkStore(dir, 512, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, err := NewTransfers(dir, c, time.Hour, 100, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec, _, err := tr.Create("pixel", nil, []string{cid(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.PutRecord(rec.ID, "meta", strings.NewReader(strings.Repeat("r", 512))); err != nil {
+		t.Fatal(err)
+	}
+
+	err = c.Put(cid(2), strings.NewReader(strings.Repeat("c", 400)))
+	if !errors.Is(err, ErrQuota) {
+		t.Fatalf("chunk after records: err = %v, want ErrQuota", err)
+	}
+	if c.Has(cid(2)) {
+		t.Fatal("a chunk rejected by the shared budget must leave nothing behind")
+	}
+}
+
 // History carries the same metadata an inbox does, so it has to be filtered the
 // same way. Each of the three transfers exercises one arm of the predicate: one
 // addressed to this node, one sent by it to somewhere else, and one that is
@@ -414,6 +707,181 @@ func TestHistoryIsScopedToTheCaller(t *testing.T) {
 	}
 }
 
+func TestHeldDeliveryPathSurvivesIntoHistory(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, err := tr.CreateHeld("pixel", nil, []string{cid(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.Delete(rec.ID, "pixel"); err != nil {
+		t.Fatal(err)
+	}
+
+	hist, err := tr.History("pixel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hist) != 1 || !hist[0].Held {
+		t.Fatalf("history = %+v, want one held tombstone", hist)
+	}
+}
+
+func TestDeletePromptlyReclaimsTheSoleTransfersChunks(t *testing.T) {
+	dir := t.TempDir()
+	chunks, err := NewChunkStore(dir, 1024, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, err := NewTransfers(dir, chunks, time.Hour, 100, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, _, err := tr.CreateHeld("pixel", nil, []string{cid(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.PutRecord(rec.ID, "meta", strings.NewReader("m")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.PutRecord(rec.ID, "chunklist", strings.NewReader("l")); err != nil {
+		t.Fatal(err)
+	}
+	fullChunk := strings.Repeat("x", 1024)
+	if err := chunks.Put(cid(1), strings.NewReader(fullChunk)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := tr.Delete(rec.ID, "pixel"); err != nil {
+		t.Fatal(err)
+	}
+	if chunks.Has(cid(1)) {
+		t.Fatal("the deleted transfer's sole chunk still occupies the quota")
+	}
+
+	next, _, err := tr.CreateHeld("pixel", nil, []string{cid(2)})
+	if err != nil {
+		t.Fatalf("create after delete = %v, want reclaimed capacity", err)
+	}
+	if err := chunks.Put(cid(2), strings.NewReader(fullChunk)); err != nil {
+		t.Fatalf("upload after delete = %v, want reclaimed capacity (next transfer %s)", err, next.ID)
+	}
+}
+
+func TestFinalDeclinePromptlyReclaimsTheSoleTransfersChunks(t *testing.T) {
+	dir := t.TempDir()
+	chunks, err := NewChunkStore(dir, 1024, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, err := NewTransfers(dir, chunks, time.Hour, 100, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, _, err := tr.CreateHeld("pixel", []string{"desktop"}, []string{cid(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fullChunk := strings.Repeat("x", 1024)
+	if err := chunks.Put(cid(1), strings.NewReader(fullChunk)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := tr.Decline(rec.ID, "desktop"); err != nil {
+		t.Fatal(err)
+	}
+	if chunks.Has(cid(1)) {
+		t.Fatal("the fully declined transfer's sole chunk still occupies the quota")
+	}
+
+	next, _, err := tr.CreateHeld("pixel", nil, []string{cid(2)})
+	if err != nil {
+		t.Fatalf("create after final decline = %v, want reclaimed capacity", err)
+	}
+	if err := chunks.Put(cid(2), strings.NewReader(fullChunk)); err != nil {
+		t.Fatalf("upload after final decline = %v, want reclaimed capacity (next transfer %s)", err, next.ID)
+	}
+}
+
+func TestFinalDeclineWaitsForInFlightWrites(t *testing.T) {
+	tests := []struct {
+		name   string
+		upload func(*Transfers, string, *pausedReader) error
+		check  func(*testing.T, *ChunkStore)
+	}{
+		{
+			name: "chunk",
+			upload: func(tr *Transfers, id string, body *pausedReader) error {
+				return tr.PutChunk(id, cid(2), body)
+			},
+			check: func(t *testing.T, chunks *ChunkStore) {
+				if chunks.Has(cid(2)) {
+					t.Fatal("the final decline left the in-flight chunk orphaned")
+				}
+			},
+		},
+		{
+			name: "record",
+			upload: func(tr *Transfers, id string, body *pausedReader) error {
+				return tr.PutRecord(id, "meta", body)
+			},
+			check: func(t *testing.T, chunks *ChunkStore) {
+				chunks.mu.Lock()
+				recordUsed := chunks.recordUsed
+				chunks.mu.Unlock()
+				if recordUsed != 0 {
+					t.Fatalf("record bytes after final decline = %d, want 0", recordUsed)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tr, chunks := newTransfers(t)
+			rec, _, err := tr.CreateHeld("pixel", []string{"desktop"}, []string{cid(2)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			started := make(chan struct{})
+			release := make(chan struct{})
+			uploadDone := make(chan error, 1)
+			go func() {
+				uploadDone <- tt.upload(tr, rec.ID, &pausedReader{
+					body: []byte("sealed body"), started: started, gate: release,
+				})
+			}()
+			<-started
+
+			declineStarted := make(chan struct{})
+			declineDone := make(chan error, 1)
+			go func() {
+				close(declineStarted)
+				declineDone <- tr.Decline(rec.ID, "desktop")
+			}()
+			<-declineStarted
+			select {
+			case err := <-declineDone:
+				close(release)
+				<-uploadDone
+				t.Fatalf("final decline finished with %v while its %s upload was in flight", err, tt.name)
+			case <-time.After(50 * time.Millisecond):
+			}
+
+			close(release)
+			if err := <-uploadDone; err != nil {
+				t.Fatalf("%s upload = %v", tt.name, err)
+			}
+			if err := <-declineDone; err != nil {
+				t.Fatalf("final decline = %v", err)
+			}
+			if _, err := tr.Get(rec.ID); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("get after final decline = %v, want ErrNotFound", err)
+			}
+			tt.check(t, chunks)
+		})
+	}
+}
+
 func TestDeleteRequiresSenderOrRecipient(t *testing.T) {
 	tr, _ := newTransfers(t)
 	rec, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1)})
@@ -440,6 +908,57 @@ func TestSenderCanDeleteTheirOwnTransfer(t *testing.T) {
 	rec, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1)})
 	if err := tr.Delete(rec.ID, "pixel"); err != nil {
 		t.Fatalf("the sender should be able to delete: %v", err)
+	}
+}
+
+func TestConcurrentDeleteAndDeclineProduceOneTerminalMutation(t *testing.T) {
+	tr, _ := newTransfers(t)
+	for attempt := 0; attempt < 32; attempt++ {
+		rec, _, err := tr.Create("pixel", []string{"desktop"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		start := make(chan struct{})
+		results := make(chan error, 2)
+		go func() {
+			<-start
+			results <- tr.Delete(rec.ID, "pixel")
+		}()
+		go func() {
+			<-start
+			results <- tr.Decline(rec.ID, "desktop")
+		}()
+		close(start)
+
+		removed, missing := 0, 0
+		for range 2 {
+			switch err := <-results; {
+			case err == nil:
+				removed++
+			case errors.Is(err, ErrNotFound):
+				missing++
+			default:
+				t.Fatalf("terminal mutation = %v", err)
+			}
+		}
+		if removed != 1 || missing != 1 {
+			t.Fatalf("successful mutations = %d, not found = %d; want one of each", removed, missing)
+		}
+
+		hist, err := tr.History("pixel")
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := 0
+		for _, tomb := range hist {
+			if tomb.ID == rec.ID {
+				seen++
+			}
+		}
+		if seen != 1 {
+			t.Fatalf("terminal history entries = %d, want one", seen)
+		}
 	}
 }
 
@@ -514,6 +1033,45 @@ func TestDeclineByEveryAddresseeDeletesTheTransfer(t *testing.T) {
 	hist, _ := tr.History("pixel")
 	if len(hist) != 1 || len(hist[0].Declined) != 2 {
 		t.Fatalf("the tombstone should record who declined: %+v", hist)
+	}
+}
+
+func TestConcurrentDeclinesPreserveEveryDecision(t *testing.T) {
+	tr, _ := newTransfers(t)
+	recipients := []string{
+		"device-a", "device-b", "device-c", "device-d",
+		"device-e", "device-f", "device-g", "device-h",
+		"device-i", "device-j", "device-k", "device-l",
+	}
+	rec, _, err := tr.Create("pixel", recipients, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, len(recipients))
+	for _, node := range recipients {
+		go func(node string) {
+			<-start
+			results <- tr.Decline(rec.ID, node)
+		}(node)
+	}
+	close(start)
+	for range recipients {
+		if err := <-results; err != nil {
+			t.Fatalf("concurrent decline = %v", err)
+		}
+	}
+
+	if _, err := tr.Get(rec.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("fully declined transfer still exists: %v", err)
+	}
+	hist, err := tr.History("pixel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hist) != 1 || len(hist[0].Declined) != len(recipients) {
+		t.Fatalf("tombstone decisions = %+v, want all %d", hist, len(recipients))
 	}
 }
 
@@ -651,10 +1209,10 @@ func TestEveryIdTakingMethodIsScoped(t *testing.T) {
 		t.Fatal("a refused call must not have modified anything")
 	}
 
-	// Get and OpenRecord are deliberately unscoped: the HTTP layer gates them,
-	// and the relay path needs them. If that changes, scope them and move them
-	// into the table above.
-	const exportedMethods = 14
+	// Get, OpenRecord, PutRecord, and PutChunk are deliberately unscoped: the
+	// HTTP layer gates them, uploads prove the transfer exists, and the relay path
+	// needs them. If that changes, scope them and move them into the table above.
+	const exportedMethods = 15
 	if got := reflect.TypeOf(tr).NumMethod(); got != exportedMethods {
 		t.Fatalf("Transfers has %d exported methods, expected %d. "+
 			"If you added one that acts on a single transfer, scope it with "+
@@ -675,6 +1233,11 @@ func TestQueueListsWhatThisNodeStillOwes(t *testing.T) {
 	tr, _ := newTransfers(t)
 	mine, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1)})
 	theirs, _, _ := tr.Create("laptop", []string{"desktop"}, []string{cid(1)})
+	for _, rec := range []*Transfer{mine, theirs} {
+		if err := tr.PutRecord(rec.ID, "meta", strings.NewReader("sealed-meta")); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	queue, err := tr.Queue("pixel")
 	if err != nil {
@@ -685,9 +1248,42 @@ func TestQueueListsWhatThisNodeStillOwes(t *testing.T) {
 	}
 }
 
+func TestUnaddressedHeldTransferNeverEntersTheDirectQueue(t *testing.T) {
+	tr, _ := newTransfers(t)
+	if _, _, err := tr.CreateHeld("pixel", nil, []string{cid(1)}); err != nil {
+		t.Fatal(err)
+	}
+
+	queue, err := tr.Queue("pixel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queue) != 0 {
+		t.Fatalf("queue = %v, want no direct work for a held broadcast", transferIDs(queue))
+	}
+}
+
+func TestDirectTransferWithoutMetadataNeverEntersTheQueue(t *testing.T) {
+	tr, _ := newTransfers(t)
+	if _, _, err := tr.Create("pixel", []string{"desktop"}, []string{cid(1)}); err != nil {
+		t.Fatal(err)
+	}
+
+	queue, err := tr.Queue("pixel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queue) != 0 {
+		t.Fatalf("queue = %v, want no peer work for a transfer whose record upload failed", transferIDs(queue))
+	}
+}
+
 func TestAFullyDeliveredTransferLeavesTheQueue(t *testing.T) {
 	tr, _ := newTransfers(t)
 	rec, _, _ := tr.Create("pixel", []string{"desktop"}, []string{cid(1), cid(2)})
+	if err := tr.PutRecord(rec.ID, "meta", strings.NewReader("sealed-meta")); err != nil {
+		t.Fatal(err)
+	}
 
 	// One of two bits set: the recipient is still missing a chunk.
 	if err := tr.SetProgress(rec.ID, "desktop", []byte{0b01}); err != nil {

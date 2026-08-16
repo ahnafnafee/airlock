@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 )
 
@@ -27,11 +28,13 @@ type ChunkStore struct {
 	maxChunkBytes int64
 	maxTotalBytes int64
 
-	// mu guards used and serializes the quota check against the write that
-	// commits to it. Without it, concurrent writers both observe the same
-	// stale total and both land.
-	mu   sync.Mutex
-	used int64
+	// mu guards both sides of the shared disk budget and serializes each quota
+	// reservation against the write that commits to it. Without one lock for
+	// chunks and records, a writer of each kind can both observe the same free
+	// bytes and take the real total past maxTotalBytes.
+	mu         sync.Mutex
+	used       int64
+	recordUsed int64
 }
 
 func NewChunkStore(dir string, maxChunkBytes, maxTotalBytes int64) (*ChunkStore, error) {
@@ -40,6 +43,13 @@ func NewChunkStore(dir string, maxChunkBytes, maxTotalBytes int64) (*ChunkStore,
 	}
 	root := filepath.Join(dir, "chunks")
 	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, err
+	}
+	// No Put can be in flight before the store is returned. A temp left here is
+	// therefore from a process that died before rename; live sweeps skip these
+	// names so they cannot race an upload, and startup is the safe reclamation
+	// point.
+	if err := removeChunkTemps(root); err != nil {
 		return nil, err
 	}
 	c := &ChunkStore{dir: root, maxChunkBytes: maxChunkBytes, maxTotalBytes: maxTotalBytes}
@@ -52,6 +62,15 @@ func NewChunkStore(dir string, maxChunkBytes, maxTotalBytes int64) (*ChunkStore,
 	// no declared size for a write to exceed.
 	c.used = total
 	return c, nil
+}
+
+func removeChunkTemps(root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".tmp") {
+			return err
+		}
+		return os.Remove(path)
+	})
 }
 
 func walkBytes(root string) (int64, error) {
@@ -102,6 +121,44 @@ func (c *ChunkStore) Missing(ids []string) []string {
 	return out
 }
 
+func (c *ChunkStore) totalUsedLocked() int64 {
+	return c.used + c.recordUsed
+}
+
+func (c *ChunkStore) canAddRecord(n int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.totalUsedLocked()+n > c.maxTotalBytes {
+		return ErrQuota
+	}
+	return nil
+}
+
+func (c *ChunkStore) reserveRecord(n int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.totalUsedLocked()+n > c.maxTotalBytes {
+		return ErrQuota
+	}
+	c.recordUsed += n
+	return nil
+}
+
+func (c *ChunkStore) adjustRecords(n int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.recordUsed += n
+	if c.recordUsed < 0 {
+		c.recordUsed = 0
+	}
+}
+
+func (c *ChunkStore) setRecordsUsed(n int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.recordUsed = n
+}
+
 // Put is first-write-wins. A chunk id is derived from its content, so a second
 // body under an existing id is either a client bug or an attempt to poison a
 // chunk that other transfers already reference. Refusing the overwrite makes
@@ -124,7 +181,7 @@ func (c *ChunkStore) Put(id string, r io.Reader) error {
 	// until the body has been read, and it is only advisory: the authoritative
 	// check is under the lock below, against the size that actually arrived.
 	c.mu.Lock()
-	over := c.used+c.maxChunkBytes > c.maxTotalBytes
+	over := c.totalUsedLocked()+c.maxChunkBytes > c.maxTotalBytes
 	c.mu.Unlock()
 	if over {
 		return ErrQuota
@@ -144,7 +201,7 @@ func (c *ChunkStore) Put(id string, r io.Reader) error {
 	defer c.mu.Unlock()
 	// Re-checked under the lock and against the size that arrived, because
 	// several writers can pass the advisory check above at the same moment.
-	if c.used+size > c.maxTotalBytes {
+	if c.totalUsedLocked()+size > c.maxTotalBytes {
 		os.Remove(tmp)
 		return ErrQuota
 	}
@@ -194,6 +251,12 @@ func (c *ChunkStore) Sweep(referenced map[string]bool) (int, error) {
 	err := filepath.WalkDir(c.dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
+		}
+		// Put streams into this uniquely named file before publishing the CID.
+		// It is not part of used yet and may still be open, so a live sweep must
+		// neither unlink it nor subtract its partial size from the committed total.
+		if strings.HasSuffix(d.Name(), ".tmp") {
+			return nil
 		}
 		if referenced[d.Name()] {
 			return nil

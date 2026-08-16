@@ -59,6 +59,39 @@ func TestSubscribeIsIdempotentPerEndpoint(t *testing.T) {
 	}
 }
 
+func TestRemoveNodeStopsGenericPushAndPersists(t *testing.T) {
+	dir := t.TempDir()
+	p, err := NewPusher(dir, "mailto:test@invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for endpoint, node := range map[string]string{
+		"pixel-one": "pixel",
+		"pixel-two": "pixel",
+		"desktop":   "desktop",
+	} {
+		raw := []byte(`{"endpoint":"https://push.example/` + endpoint + `","keys":{"p256dh":"k","auth":"a"}}`)
+		if err := p.Subscribe(node, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := p.RemoveNode("pixel"); err != nil {
+		t.Fatal(err)
+	}
+	if got := nodesOf(p.targets(nil, "sender")); len(got) != 1 || got[0] != "desktop" {
+		t.Fatalf("generic push targets after removal = %v, want [desktop]", got)
+	}
+
+	reloaded, err := NewPusher(dir, "mailto:test@invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := nodesOf(reloaded.targets(nil, "sender")); len(got) != 1 || got[0] != "desktop" {
+		t.Fatalf("generic push targets after reload = %v, want [desktop]", got)
+	}
+}
+
 func TestSubscribeRejectsMissingEndpoint(t *testing.T) {
 	p, err := NewPusher(t.TempDir(), "mailto:test@invalid")
 	if err != nil {

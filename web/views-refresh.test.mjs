@@ -125,16 +125,55 @@ globalThis.MutationObserver = class {
 
   disconnect() {}
 };
+// Reconciliation walks two OPFS directories even when both are empty. This
+// directory is enough to make an empty successful Inbox response behave like
+// one in a browser, without turning the view test into a storage test.
+function emptyDirectory() {
+  const directories = new Map();
+  const files = new Map();
+  const missing = (name) => {
+    const error = new Error(`no entry named ${name}`);
+    error.name = 'NotFoundError';
+    return error;
+  };
+  return {
+    async getDirectoryHandle(name, { create = false } = {}) {
+      if (directories.has(name)) return directories.get(name);
+      if (!create) throw missing(name);
+      const directory = emptyDirectory();
+      directories.set(name, directory);
+      return directory;
+    },
+    async getFileHandle(name, { create = false } = {}) {
+      if (files.has(name)) return files.get(name);
+      if (!create) throw missing(name);
+      const file = {};
+      files.set(name, file);
+      return file;
+    },
+    async removeEntry(name) {
+      if (!directories.delete(name) && !files.delete(name)) throw missing(name);
+    },
+    async *keys() { yield* [...directories.keys(), ...files.keys()]; },
+  };
+}
+const storageRoot = emptyDirectory();
+
 // An iPhone in a Safari tab, which is the one boot path that stops before it
 // reaches the network: the install gate returns and nothing else in boot runs.
 Object.defineProperty(globalThis, 'navigator', {
-  value: { userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_4 like Mac OS X)' },
+  value: {
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_4 like Mac OS X)',
+    storage: { getDirectory: async () => storageRoot },
+  },
   configurable: true,
   writable: true,
 });
 globalThis.window = globalThis;
 
-const { state, showView, registerView } = await import('./app.js');
+const {
+  state, showView, registerView, onInbox, notifyInbox,
+} = await import('./app.js');
 const { api } = await import('./api.js');
 const inbound = await import('./inbound.js');
 // The capability flags live in IndexedDB, which this process does not have. The
@@ -156,14 +195,19 @@ const device = (node, allowed = true) => ({
   node, allowed, paired: true, addr: '100.0.0.1', user: 'owner', lastSeen: new Date().toISOString(),
 });
 
-await import('./views/send.js');
+const sendView = await import('./views/send.js');
 await import('./views/devices.js');
+// The Inbox reads immediately when it mounts. Give it a quiet default before
+// importing the view; the out-of-order test below replaces this at its API
+// boundary with two responses it controls.
+api.inbox = async () => [];
+await import('./views/inbox.js');
 // Somewhere to switch to. Leaving a view and coming back is the whole gesture
 // under test, and it needs a second destination to be a gesture at all.
 registerView('other', 'Other', () => {});
 
 const panels = doc.getElementById('views').children;
-const [sendPanel, devicesPanel] = panels;
+const [sendPanel, devicesPanel, inboxPanel] = panels;
 
 function find(node, pred) {
   for (const c of node.children) {
@@ -183,6 +227,21 @@ function textOf(node) {
 // turn of the event loop settles all of them.
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+test('send controls are named and terminal state has a quiet live region', async () => {
+  showView('send');
+  await settle();
+  const recipient = find(sendPanel, (n) => n.getAttribute('id') === 'to');
+  const label = find(sendPanel, (n) => n.getAttribute('for') === 'to');
+  const live = find(sendPanel, (n) => n.getAttribute('role') === 'status');
+  const progress = find(sendPanel, (n) => n.getAttribute('aria-live') === 'off');
+  assert.ok(recipient);
+  assert.equal(textOf(label), 'To');
+  assert.equal(live.getAttribute('aria-live'), 'polite');
+  assert.equal(live.getAttribute('aria-atomic'), 'true');
+  assert.ok(progress, 'per-chunk copy is not a chatty live region');
+  showView('other');
+});
+
 // Leaving the view and coming back is what a person does, and it is also the
 // exact sequence that used to change nothing: registerView mounts at most once.
 async function revisit(name) {
@@ -192,8 +251,7 @@ async function revisit(name) {
 }
 
 const picker = () => find(sendPanel, (n) => n.getAttribute('id') === 'to');
-// The send view's status line is the last thing its panel holds.
-const sendStatus = () => sendPanel.children.at(-1);
+const sendStatus = () => find(sendPanel, (n) => n.getAttribute('id') === 'send-status');
 const offered = () => picker().children.map((o) => o.value);
 const deviceRows = () => find(devicesPanel, (n) => n.tagName === 'UL').children;
 // The node name each row is about, without the trailing "(this device)".
@@ -204,13 +262,52 @@ const listed = () => deviceRows().map((li) => {
   return textOf(name || li).split(' ')[0];
 });
 
-test('the send picker offers every approved device except this one', async () => {
-  roster = [device('laptop'), device('tablet'), device('desktop', false)];
+test('an older inbox response cannot reconcile after a newer refresh wins', async () => {
+  const transferId = 'a'.repeat(32);
+  const staging = await storageRoot.getDirectoryHandle('staging', { create: true });
+  const receiver = await staging.getDirectoryHandle(transferId, { create: true });
+  await receiver.getFileHandle('cids', { create: true });
+
+  let releaseOld;
+  const oldResponse = new Promise((resolve) => { releaseOld = resolve; });
+  const current = [{
+    id: transferId, sender: 'phone', createdAt: new Date().toISOString(), meta: '',
+  }];
+  const replies = [oldResponse, Promise.resolve(current)];
+  api.inbox = async () => replies.shift() ?? [];
+
+  showView('inbox');
+  notifyInbox();
+  assert.equal(replies.length, 0, 'both refreshes have reached the API boundary');
+  const list = find(inboxPanel, (n) => n.tagName === 'UL');
+  for (let i = 0; i < 10 && !/Incomplete transfer/.test(textOf(list)); i++) await settle();
+  assert.match(textOf(list), /Incomplete transfer/, 'the newer snapshot won the visible list');
+
+  releaseOld([]);
+  await settle();
+  assert.equal(await staging.getDirectoryHandle(transferId), receiver,
+    'a superseded snapshot cannot reclaim a current receiver stage');
+
+  api.inbox = async () => [];
+  showView('other');
+});
+
+test('the send picker offers only paired approved devices except this one', async () => {
+  roster = [
+    device('laptop'),
+    device('tablet'),
+    device('desktop', false),
+    { ...device('phone'), paired: false },
+  ];
   showView('send');
   await settle();
-  // The device you are sitting at is not a destination, and a blocked one
-  // cannot read what it is sent.
+  // This device is not a destination. Neither a blocked device nor one that has
+  // not acquired the master key can read what it is sent.
   assert.deepEqual(offered(), ['', 'tablet']);
+});
+
+test('the send view cannot create an unreadable plaintext transfer', () => {
+  assert.equal(find(sendPanel, (n) => n.getAttribute('id') === 'sealed'), null);
 });
 
 test('a device approved after the view mounted becomes selectable', async () => {
@@ -288,4 +385,76 @@ test('a refresh the server refuses leaves the device rows that were confirmed', 
   // Replacing a real list with an error because one background read failed
   // would lose the only interface that can undo a revocation.
   assert.deepEqual(listed(), before);
+});
+
+test('a successful send refreshes an already-mounted sender inbox locally', async () => {
+  showView('send');
+  await settle();
+  let refreshes = 0;
+  onInbox(() => { refreshes++; });
+  sendView.__setSendImpl({
+    server: async () => ({ total: 0, held: 0, sent: 0, inflight: 0 }),
+    direct: async () => { throw new Error('the held path was expected'); },
+  });
+
+  const hold = find(sendPanel, (n) => n.getAttribute('id') === 'hold');
+  const button = find(sendPanel, (n) => n.className === 'primary');
+  hold.checked = true;
+  sendView.stageFiles([new File(['sent'], 'sent.txt', { type: 'text/plain' })]);
+
+  button.fire('click');
+  await settle();
+  await settle();
+
+  assert.equal(refreshes, 1);
+});
+
+test('a failed file stays staged and the batch reports it after later files succeed', async () => {
+  showView('send');
+  await settle();
+  const attempted = [];
+  sendView.__setSendImpl({
+    server: async (file) => {
+      attempted.push(file.name);
+      if (file.name === 'again.txt') throw new Error('connection lost');
+      return { total: 0, held: 0, sent: 0, inflight: 0 };
+    },
+    direct: async () => { throw new Error('the held path was expected'); },
+  });
+
+  const hold = find(sendPanel, (n) => n.getAttribute('id') === 'hold');
+  const button = find(sendPanel, (n) => n.className === 'primary');
+  const list = find(sendPanel, (n) => n.getAttribute('aria-label') === 'Staged files');
+  hold.checked = true;
+  sendView.stageFiles([
+    new File(['first'], 'again.txt', { type: 'text/plain' }),
+    new File(['second'], 'done.txt', { type: 'text/plain' }),
+  ]);
+
+  button.fire('click');
+  await settle();
+  await settle();
+
+  assert.deepEqual(attempted, ['again.txt', 'done.txt']);
+  assert.equal(list.children.length, 1, 'only the failed file remains for retry');
+  assert.equal(find(list.children[0], (n) => n.getAttribute('aria-label')?.startsWith('Name for')).value,
+    'again.txt');
+  assert.match(sendStatus().textContent, /1 file did not send/i);
+  assert.match(sendStatus().textContent, /ready to retry/i);
+  assert.equal(sendStatus().className, 'data bad');
+});
+
+test('staging snapshots a file before its disk handle can change', () => {
+  let snapshots = 0;
+  sendView.stageFiles([{
+    name: 'mutable.bin',
+    type: 'application/octet-stream',
+    size: 3,
+    lastModified: 123,
+    slice() {
+      snapshots++;
+      return new Blob([new Uint8Array([1, 2, 3])]);
+    },
+  }]);
+  assert.equal(snapshots, 1);
 });

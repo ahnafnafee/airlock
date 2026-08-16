@@ -202,13 +202,13 @@ Also fail with an actionable message when a bind fails, naming the port and sugg
 
 - [ ] **Step 5: Make the loopback refusal legible**
 
-`WhoIs` returns "peer not found" for `127.0.0.1` and `::1`, so `identityFromWhoIs` returns false and every route including static assets answers a bare "not authorized". Unreachable while the listener is tailnet-only, but it is exactly what happens the moment anyone fronts Airlock with `tailscale serve` or binds `0.0.0.0` so a local browser can reach it. This machine already runs `tailscale serve`, so that workaround is one search away.
+`WhoIs` returns "peer not found" for `127.0.0.1` and `::1`, so `identityFromWhoIs` returns false and `/api/whoami` answers a bare "not authorized". The stateless shell and assets still load, but boot cannot identify the device and surfaces that API refusal. Unreachable while the listener is tailnet-only, but it is exactly what happens the moment anyone fronts Airlock with `tailscale serve` or binds `0.0.0.0` so a local browser can reach it. This machine already runs `tailscale serve`, so that workaround is one search away.
 
 ```go
 		if isLoopback(r.RemoteAddr) {
 			// A tailnet identity cannot be derived from a loopback connection.
-			// Logged distinctly because the symptom, 403 on everything
-			// including static assets, otherwise reads as a permissions bug.
+			// Logged distinctly because a shell that loads and then reports a
+			// 403 from whoami otherwise reads as a permissions bug.
 			log.Printf("refusing a loopback request from %s: reach Airlock by its "+
 				"tailnet name rather than through a local proxy", r.RemoteAddr)
 			return Identity{}, false
@@ -403,7 +403,7 @@ Add a short troubleshooting list for the failures actually observed:
 | --- | --- |
 | Bind fails on 443 | Something else holds it, commonly `tailscale serve`. Use `--port 4443` |
 | Bind fails with a permission error on a port that looks free | On Windows another process holds it with exclusive use, which Winsock reports as access denied. Bind-test rather than trusting `netsh` |
-| Every request returns 403, including static files | The request arrived over loopback. Reach Airlock by its tailnet name, not through a local proxy |
+| The shell loads but reports `not authorized` | The identity-bearing API request arrived over loopback. Reach Airlock by its tailnet name, not through a local proxy |
 | TLS fails on every connection | HTTPS Certificates is off in the admin console |
 | The host cannot resolve its own name | `tailscale set --accept-dns=true` |
 

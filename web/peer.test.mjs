@@ -139,6 +139,23 @@ test('a receiver holding everything accepts and receives nothing', async () => {
   assert.equal(received.received, 0);
 });
 
+test('an empty file completes without asking either side for a chunk', async () => {
+  const [send, recv] = linkPool(1, 1);
+  const manifest = { name: 'empty.txt', size: 0, mime: 'text/plain', cids: [] };
+  const receiving = receive(recv, {
+    onOffer: async () => ({ accept: true }),
+    has: async () => assert.fail('an empty file has no chunk to look up'),
+    onChunk: async () => assert.fail('an empty file has no chunk to receive'),
+  });
+  const result = await negotiate(send, manifest, () => {
+    assert.fail('an empty file has no chunk to read');
+  });
+  const received = await receiving;
+
+  assert.deepEqual(result, { accepted: true, sent: 0, held: 0 });
+  assert.deepEqual(received, { accepted: true, received: 0 });
+});
+
 test('the offer carries no key material', async () => {
   const [send, recv] = linkPool(1, 1);
   const receiving = receive(recv, {
@@ -238,6 +255,34 @@ test('chunks are spread across every link', async () => {
     const bodies = link.channels.flatMap((c) => c.sent).filter((d) => typeof d !== 'string');
     assert.ok(bodies.length > 0, `link ${i} carried nothing, so work is not spread`);
   }
+});
+
+test('exactly one chunk is read ahead while the current read is blocked', async () => {
+  // Hold the first read open. A serial sender observes only chunk 0 here; an
+  // unbounded sender observes all three. One-item read-ahead observes 0 and 1,
+  // which is enough to keep storage latency off the wire without holding the
+  // whole transfer in memory.
+  const [send] = linkPool(1, 1);
+  const control = send[0].channels[0];
+  const reads = [];
+  let releaseFirst;
+  const first = new Promise((resolve) => { releaseFirst = resolve; });
+
+  const transferring = negotiate(send, MANIFEST, (i) => {
+    reads.push(i);
+    return i === 0 ? first : bodies[i];
+  });
+  const handling = control.onmessage({
+    data: JSON.stringify({ type: WIRE.NEED, indexes: [0, 1, 2] }),
+  });
+
+  const whileFirstIsBlocked = [...reads];
+  releaseFirst(bodies[0]);
+  await handling;
+  const result = await transferring;
+
+  assert.deepEqual(whileFirstIsBlocked, [0, 1]);
+  assert.equal(result.sent, 3);
 });
 
 test('two links delivering concurrently do not cross their chunk indexes', async () => {

@@ -89,9 +89,14 @@ func do(t *testing.T, s *Server, method, path, body string) *httptest.ResponseRe
 	return w
 }
 
-func TestGateBlocksEverythingWhenIdentityFails(t *testing.T) {
+func TestGateBlocksStateWhenIdentityFails(t *testing.T) {
 	s, _ := newTestServer(t, false)
-	for _, p := range []string{"/", "/index.html", "/api/whoami", "/api/config", "/api/inbox", "/api/devices"} {
+	for _, p := range []string{"/", "/index.html"} {
+		if got := do(t, s, "GET", p, "").Code; got != http.StatusOK {
+			t.Fatalf("GET %s = %d, want 200 for a stateless asset", p, got)
+		}
+	}
+	for _, p := range []string{"/api/whoami", "/api/config", "/api/inbox", "/api/devices"} {
 		if got := do(t, s, "GET", p, "").Code; got != http.StatusForbidden {
 			t.Fatalf("GET %s = %d, want 403", p, got)
 		}
@@ -106,10 +111,16 @@ func TestRevokedDeviceIsBlockedOnItsNextRequest(t *testing.T) {
 	if err := devices.SetAllowed("pixel", false); err != nil {
 		t.Fatal(err)
 	}
-	// No restart, no cache to expire. Static assets are gated too.
-	for _, p := range []string{"/api/whoami", "/api/inbox", "/", "/index.html"} {
+	// No restart and no cache to expire. Stateful APIs are gated; the shell and
+	// pairing status remain readable so the device can explain how to recover.
+	for _, p := range []string{"/api/inbox", "/api/config", "/api/devices"} {
 		if got := do(t, s, "GET", p, "").Code; got != http.StatusForbidden {
 			t.Fatalf("after revoke, GET %s = %d, want 403", p, got)
+		}
+	}
+	for _, p := range []string{"/api/whoami", "/", "/index.html"} {
+		if got := do(t, s, "GET", p, "").Code; got != http.StatusOK {
+			t.Fatalf("after revoke, GET %s = %d, want 200", p, got)
 		}
 	}
 }

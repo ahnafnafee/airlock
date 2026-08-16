@@ -29,11 +29,19 @@ export function segmentCount(width, total) {
   return Math.max(1, Math.min(total || 1, MAX_SEGMENTS, room));
 }
 
-export function renderStrip(container, total) {
+// seam draws the same element as a divider rather than as a subject. A row's
+// rule is that transfer's own chunk composition, so reading down a list shows
+// which arrivals were mostly bytes this device already held. It is the same
+// scale, the same colors and the same meanings, at the height of a hairline.
+export function renderStrip(container, total, { seam = false, label = 'Transfer progress' } = {}) {
   const span = total || 1;
   const segments = [];
 
-  const row = el('div', { class: 'strip', role: 'img', 'aria-label': 'Transfer progress' });
+  const row = el('div', {
+    class: seam ? 'strip seam' : 'strip',
+    role: 'img',
+    'aria-label': label,
+  });
   // Appended empty and measured before it is filled, because an empty flex row
   // is exactly as wide as the room the full one will have.
   //

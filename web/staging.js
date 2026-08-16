@@ -12,6 +12,8 @@ const TRANSFER_ID = /^[0-9a-f]{32}$/;
 // spelled out rather than parsed: exactly the digits String(index) produces, no
 // sign, no leading zero, no other notation.
 const CHUNK_NAME = /^(?:0|[1-9][0-9]*)$/;
+const CHUNK_ID = /^[0-9a-f]{64}$/;
+const CID_LIST = 'cids';
 
 // A chunk file exists from the moment the write starts, so its existence says
 // only that a write began. This mark is what says one finished. It goes down
@@ -55,9 +57,9 @@ function checkedId(transferId) {
   return transferId;
 }
 
-async function stagingRoot() {
-  const root = await navigator.storage.getDirectory();
-  return root.getDirectoryHandle('staging', { create: true });
+async function stagingRoot(root = null) {
+  const base = root || await navigator.storage.getDirectory();
+  return base.getDirectoryHandle('staging', { create: true });
 }
 
 // Exported for the staging worker, which resolves the same directory from the
@@ -185,84 +187,186 @@ export function makeWriter(spawn) {
 const write = makeWriter(() => new Worker(
   new URL('./stage-worker.js', import.meta.url), { type: 'module' }));
 
-export async function openStage(transferId) {
-  const dir = await stageDir(transferId);
+async function existsIn(dir, name) {
+  try {
+    await dir.getFileHandle(name);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-  // The write itself happens in the worker, which resolves this same directory
-  // on its side. The id was checked by stageDir above and is checked again
-  // there, because a path is built from it on both sides of the message.
-  const put = (index, bytes) => write(transferId, index, bytes);
+async function committedBytes(dir, name) {
+  if (!await existsIn(dir, name) || await existsIn(dir, markOf(name))) return null;
+  const handle = await dir.getFileHandle(name);
+  return new Uint8Array(await (await handle.getFile()).arrayBuffer());
+}
 
-  const exists = async (name) => {
-    try {
-      await dir.getFileHandle(name);
-      return true;
-    } catch {
-      return false;
+function checkedCids(cids) {
+  if (!Array.isArray(cids) || !cids.every((cid) => CHUNK_ID.test(cid))) {
+    throw new Error('a staging chunk list contains a malformed id');
+  }
+  return [...cids];
+}
+
+// Builds the stage opener around its writer. Production writes through the
+// dedicated worker above; tests use the same OPFS implementation directly.
+// Keeping that adapter at this seam lets every cache and ownership rule remain
+// behind the ordinary stage interface.
+export function makeStageOpener(writeBytes) {
+  return async function open(transferId, cids = null) {
+    const id = checkedId(transferId);
+    const dir = await stageDir(id);
+    const manifest = cids === null ? null : checkedCids(cids);
+
+    // A receiver records the server-authenticated CID at each position before
+    // answering the peer. The same commit mark chunks use makes a manifest left
+    // half-written by a crash invisible to later transfers.
+    if (manifest) {
+      await writeBytes(id, CID_LIST,
+        new TextEncoder().encode(JSON.stringify(manifest)));
     }
-  };
 
-  const has = async (index) => {
-    if (!CHUNK_NAME.test(String(index))) return false;
-    if (!await exists(String(index))) return false;
-    // The file is there. Whether all of its bytes are is the question the mark
-    // answers, and until it is gone the answer is no.
-    return !await exists(markOf(index));
-  };
+    // The write itself happens in the worker, which resolves this same directory
+    // on its side. The id was checked by stageDir above and is checked again
+    // there, because a path is built from it on both sides of the message.
+    const put = (index, bytes) => writeBytes(id, index, bytes);
 
-  const get = async (index) => {
-    // A chunk whose write did not finish is not a chunk. Handing its bytes to a
-    // peer or to an assembly would fail a tag check somewhere far from here,
-    // long after the cause, so it fails at the read instead.
-    if (!await has(index)) throw new Error(`chunk ${index} is not staged`);
-    const handle = await dir.getFileHandle(String(index));
-    return new Uint8Array(await (await handle.getFile()).arrayBuffer());
-  };
+    const localHas = async (index) => {
+      if (!CHUNK_NAME.test(String(index))) return false;
+      if (!await existsIn(dir, String(index))) return false;
+      // The file is there. Whether all of its bytes are is the question the mark
+      // answers, and until it is gone the answer is no.
+      return !await existsIn(dir, markOf(index));
+    };
 
-  const held = async () => {
-    const chunks = new Set();
-    const marked = new Set();
-    for await (const name of dir.keys()) {
-      // Only a bare position counts as a chunk, so a mark, and anything else
-      // that ever lands in this directory, is never mistaken for one.
-      if (CHUNK_NAME.test(name)) chunks.add(name);
-      else if (name.endsWith(MARK)) marked.add(name.slice(0, -MARK.length));
-    }
-    const out = new Set();
-    for (const name of chunks) if (!marked.has(name)) out.add(Number(name));
-    return out;
-  };
+    let sources = null;
+    const cachedSources = async () => {
+      if (sources) return sources;
+      sources = new Map();
+      if (!manifest) return sources;
 
-  return {
-    put,
-    get,
-    has,
-    held,
-    bitmap: async (count) => bitmapOf(await held(), count),
-    // ponytail: a stage is only ever removed by the transfer that owns it, so
-    // one abandoned part way through holds its chunks until the owner clears
-    // the origin's storage. The ceiling is that nothing sweeps.
-    //
-    // Lifting it is not a matter of listing this directory and dropping every
-    // id the server does not report as an open transfer. Only a receiving
-    // stage is named by its transfer's id. A sending one is named by an id
-    // minted during preparation that lives only inside that transfer's sealed
-    // meta record, and the server never learns it, so it can never report it.
-    // The live set is the union of the transfer ids this device is receiving
-    // and, for every transfer this device sent, the stage id its sealed meta
-    // record carries, falling back to that transfer's own id when the field is
-    // absent or malformed, which is how stageOf resolves it on the send path
-    // and is where a transfer prepared before the field existed staged. So a
-    // sweep has to open those records, and honor that fallback, before it may
-    // drop anything. It must also spare a directory belonging to a
-    // preparation still in flight, whose record does not exist yet. A sweep
-    // that skipped either step would delete the sealed chunks of every queued
-    // transfer still waiting to be delivered.
-    clear: async () => {
       const staging = await stagingRoot();
-      await staging.removeEntry(checkedId(transferId), { recursive: true });
-    },
+      for await (const otherId of staging.keys()) {
+        if (otherId === id || !TRANSFER_ID.test(otherId)) continue;
+        let other;
+        try {
+          other = await staging.getDirectoryHandle(otherId);
+          const bytes = await committedBytes(other, CID_LIST);
+          if (!bytes) continue;
+          const otherCids = checkedCids(JSON.parse(new TextDecoder().decode(bytes)));
+          for (let index = 0; index < otherCids.length; index++) {
+            const entries = sources.get(otherCids[index]) || [];
+            entries.push({ dir: other, index });
+            sources.set(otherCids[index], entries);
+          }
+        } catch {
+          // A sender stage has no manifest, and a stage being cleared may vanish
+          // between listing and opening. Neither is a cached receiver chunk.
+        }
+      }
+      return sources;
+    };
+
+    const has = async (index) => {
+      if (!CHUNK_NAME.test(String(index))) return false;
+      if (await localHas(index)) return true;
+      if (!manifest || index >= manifest.length) return false;
+
+      // Materialize the shared bytes into this transfer's own position before
+      // answering held. That makes ownership explicit: either transfer may be
+      // cleared immediately afterward without invalidating the other one.
+      const candidates = (await cachedSources()).get(manifest[index]) || [];
+      for (const candidate of candidates) {
+        let bytes;
+        try {
+          bytes = await committedBytes(candidate.dir, String(candidate.index));
+        } catch {
+          // The source transfer was cleared after the cache scan. It was never
+          // claimed, so falling through makes the peer send this position.
+          continue;
+        }
+        if (!bytes) continue;
+        await put(index, bytes);
+        return localHas(index);
+      }
+      return false;
+    };
+
+    const get = async (index) => {
+      // A chunk whose write did not finish is not a chunk. Handing its bytes to a
+      // peer or to an assembly would fail a tag check somewhere far from here,
+      // long after the cause, so it fails at the read instead.
+      if (!await has(index)) throw new Error(`chunk ${index} is not staged`);
+      const handle = await dir.getFileHandle(String(index));
+      return new Uint8Array(await (await handle.getFile()).arrayBuffer());
+    };
+
+    const held = async () => {
+      const chunks = new Set();
+      const marked = new Set();
+      for await (const name of dir.keys()) {
+        // Only a bare position counts as a chunk, so a mark, and anything else
+        // that ever lands in this directory, is never mistaken for one.
+        if (CHUNK_NAME.test(name)) chunks.add(name);
+        else if (name.endsWith(MARK)) marked.add(name.slice(0, -MARK.length));
+      }
+      const out = new Set();
+      for (const name of chunks) if (!marked.has(name)) out.add(Number(name));
+      return out;
+    };
+
+    return {
+      put,
+      get,
+      has,
+      held,
+      bitmap: async (count) => bitmapOf(await held(), count),
+      // Receiver stages are reconciled from their CID manifest and registered
+      // sender stages from the outbound ownership index. The remaining
+      // ponytail is narrower: a sender preparation killed before the server
+      // creates a transfer has neither marker, so its random stage cannot yet be
+      // distinguished from one still being prepared. A durable preparation
+      // marker, written before the first chunk and retired after registration,
+      // is the missing fact an age-based sweep would need.
+      clear: async () => {
+        const staging = await stagingRoot();
+        await staging.removeEntry(id, { recursive: true });
+      },
+    };
   };
+}
+
+const open = makeStageOpener(write);
+export const openStage = (transferId, cids = null) => open(transferId, cids);
+
+// Receiver stages identify themselves with a CID manifest; sender stages do
+// not, because their random id lives in sealed metadata instead. That makes it
+// safe to reclaim only receiver-owned directories against a successful Inbox
+// snapshot without risking a queued outbound file whose stage id the server can
+// never see. A partial manifest still proves receiver ownership.
+export async function reconcileReceiverStages(activeTransferIds, { root = null } = {}) {
+  const active = new Set([...activeTransferIds].filter((id) => TRANSFER_ID.test(id)));
+  const staging = await stagingRoot(root);
+  const removed = [];
+  for await (const id of staging.keys()) {
+    if (!TRANSFER_ID.test(id) || active.has(id)) continue;
+    let dir;
+    try {
+      dir = await staging.getDirectoryHandle(id);
+    } catch {
+      continue;
+    }
+    if (!await existsIn(dir, CID_LIST) && !await existsIn(dir, markOf(CID_LIST))) continue;
+    try {
+      await staging.removeEntry(id, { recursive: true });
+      removed.push(id);
+    } catch (err) {
+      // Another tab may have completed the same idempotent reconciliation.
+      if (err?.name !== 'NotFoundError') throw err;
+    }
+  }
+  return removed;
 }
 
 // Ask the browser to keep this data rather than evicting it under pressure. A

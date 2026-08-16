@@ -45,6 +45,7 @@ type Transfer struct {
 	Sender     string    `json:"sender"`
 	To         []string  `json:"to"`
 	Declined   []string  `json:"declined"`
+	Held       bool      `json:"held,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
 	ChunkCount int       `json:"chunkCount"`
 }
@@ -68,10 +69,16 @@ type Tombstone struct {
 	Sender     string    `json:"sender"`
 	To         []string  `json:"to"`
 	Declined   []string  `json:"declined"`
+	Held       bool      `json:"held,omitempty"`
 	Meta       string    `json:"meta"`
 	ChunkCount int       `json:"chunkCount"`
 	CreatedAt  time.Time `json:"createdAt"`
 	EndedAt    time.Time `json:"endedAt"`
+}
+
+type transferLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 type Transfers struct {
@@ -81,6 +88,10 @@ type Transfers struct {
 	maxChunks int
 	maxRecord int
 
+	// treeMu serializes publishing a transfer with the reference snapshot and
+	// chunk sweep. Without it, a sweep could snapshot first, then delete a chunk
+	// just after a newly published transfer reported that chunk as deduplicated.
+	treeMu sync.Mutex
 	histMu sync.Mutex
 
 	// announced remembers which transfers have already told their addressees
@@ -93,10 +104,16 @@ type Transfers struct {
 	annMu     sync.Mutex
 	announced map[string]bool
 
-	// recMu guards recUsed and serializes each record write against the quota
-	// check that admits it, the same way ChunkStore guards its own total.
-	recMu   sync.Mutex
-	recUsed int64
+	// lockMu guards a short-lived mutex per transfer. Delete and Decline hold only
+	// their transfer's mutex across visibility read, rewrite and possible removal,
+	// so terminal mutations cannot overlap while unrelated transfers proceed.
+	lockMu sync.Mutex
+	locks  map[string]*transferLock
+
+	// recMu serializes record publication. The byte count itself lives beside
+	// the chunk count under ChunkStore's mutex, because both kinds of file spend
+	// the same disk budget and their admissions must be one atomic decision.
+	recMu sync.Mutex
 }
 
 func NewTransfers(dir string, chunks *ChunkStore, ttl time.Duration, maxChunksPerTransfer, maxRecordBytes int) (*Transfers, error) {
@@ -110,34 +127,43 @@ func NewTransfers(dir string, chunks *ChunkStore, ttl time.Duration, maxChunksPe
 	if err != nil {
 		return nil, err
 	}
-	return &Transfers{
+	t := &Transfers{
 		dir: root, chunks: chunks, ttl: ttl,
 		maxChunks: maxChunksPerTransfer, maxRecord: maxRecordBytes,
-		recUsed:   used,
 		announced: map[string]bool{},
-	}, nil
+		locks:     map[string]*transferLock{},
+	}
+	chunks.setRecordsUsed(used)
+	return t, nil
 }
 
-// admitLocked reports whether n more bytes of records fit in the data
-// directory's budget. Records and chunks share one disk, so they are counted
-// against one total rather than each pretending the other's bytes are free.
-// Callers hold recMu across the write that follows, so two writers cannot both
-// pass on the same stale total.
-func (t *Transfers) admitLocked(n int64) error {
-	if t.chunks.Used()+t.recUsed+n > t.chunks.maxTotalBytes {
-		return ErrQuota
+func (t *Transfers) lockTransfer(id string) func() {
+	t.lockMu.Lock()
+	lock := t.locks[id]
+	if lock == nil {
+		lock = &transferLock{}
+		t.locks[id] = lock
 	}
-	return nil
+	lock.refs++
+	t.lockMu.Unlock()
+
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		t.lockMu.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(t.locks, id)
+		}
+		t.lockMu.Unlock()
+	}
 }
 
 // releaseRecordBytes returns a removed directory's bytes to the shared budget.
 func (t *Transfers) releaseRecordBytes(n int64) {
 	t.recMu.Lock()
 	defer t.recMu.Unlock()
-	t.recUsed -= n
-	if t.recUsed < 0 {
-		t.recUsed = 0
-	}
+	t.chunks.adjustRecords(-n)
 }
 
 // removeTree deletes a directory under the transfers root and gives its bytes
@@ -174,7 +200,15 @@ func (t *Transfers) transferDir(id string) (string, error) {
 }
 
 func (t *Transfers) Create(sender string, to, cids []string) (*Transfer, []string, error) {
-	if len(cids) < 1 || len(cids) > t.maxChunks {
+	return t.create(sender, to, cids, false)
+}
+
+func (t *Transfers) CreateHeld(sender string, to, cids []string) (*Transfer, []string, error) {
+	return t.create(sender, to, cids, true)
+}
+
+func (t *Transfers) create(sender string, to, cids []string, held bool) (*Transfer, []string, error) {
+	if len(cids) > t.maxChunks {
 		return nil, nil, ErrQuota
 	}
 	for _, id := range cids {
@@ -196,6 +230,7 @@ func (t *Transfers) Create(sender string, to, cids []string) (*Transfer, []strin
 		ID:         hex.EncodeToString(raw[:]),
 		Sender:     sender,
 		To:         append([]string{}, to...),
+		Held:       held,
 		CreatedAt:  time.Now().UTC(),
 		ChunkCount: len(cids),
 	}
@@ -215,20 +250,21 @@ func (t *Transfers) Create(sender string, to, cids []string) (*Transfer, []strin
 	t.recMu.Lock()
 	defer t.recMu.Unlock()
 	n := int64(len(cidsJSON) + len(metaJSON))
-	if err := t.admitLocked(n); err != nil {
+	if err := t.chunks.reserveRecord(n); err != nil {
 		return nil, nil, err
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			t.chunks.adjustRecords(-n)
+		}
+	}()
 
 	// A transfer directory is built under a name that fails tidRe and published
-	// by a single rename, so the invariant holds without a window: a directory
-	// named by a valid transfer id already contains its id list. Referenced()
-	// can therefore never see a live transfer as unreferenced and hand the
-	// chunk sweep a set missing chunks this transfer needs.
-	//
-	// ponytail: a sweep that snapshotted its reference set before the rename
-	// can still delete a deduplicated chunk just after Missing() observed it.
-	// The window is microseconds against an hourly sweep. Close it with a lock
-	// the create path and the sweep both take if it ever bites.
+	// by a single rename, so a directory named by a valid transfer id already
+	// contains its id list. The publication lock also spans every reference
+	// snapshot plus chunk sweep, closing the otherwise-small window in which a
+	// newly published transfer could lose a deduplicated chunk.
 	tmp := filepath.Join(t.dir, tmpPrefix+rec.ID)
 	if err := os.Mkdir(tmp, 0o700); err != nil {
 		return nil, nil, err
@@ -241,11 +277,14 @@ func (t *Transfers) Create(sender string, to, cids []string) (*Transfer, []strin
 		os.RemoveAll(tmp)
 		return nil, nil, err
 	}
-	if err := os.Rename(tmp, dir); err != nil {
+	t.treeMu.Lock()
+	err = os.Rename(tmp, dir)
+	t.treeMu.Unlock()
+	if err != nil {
 		os.RemoveAll(tmp)
 		return nil, nil, err
 	}
-	t.recUsed += n
+	committed = true
 	return rec, t.chunks.Missing(cids), nil
 }
 
@@ -257,6 +296,11 @@ func (t *Transfers) PutRecord(id, kind string, r io.Reader) error {
 	if err != nil {
 		return err
 	}
+	// The body may stream for a while, but only this transfer is held. A
+	// terminal mutation must wait through publication so removeTree measures
+	// and releases exactly the bytes that actually committed.
+	unlock := t.lockTransfer(id)
+	defer unlock()
 	if _, err := os.Stat(filepath.Join(dir, "meta.json")); err != nil {
 		return ErrNotFound
 	}
@@ -265,16 +309,14 @@ func (t *Transfers) PutRecord(id, kind string, r io.Reader) error {
 	// The record's length is not declared, so the cap is what has to be
 	// reserved up front. This check is advisory and the one below the write is
 	// authoritative, exactly as the chunk store does it.
-	t.recMu.Lock()
-	admitErr := t.admitLocked(int64(t.maxRecord))
-	t.recMu.Unlock()
+	admitErr := t.chunks.canAddRecord(int64(t.maxRecord))
 	if admitErr != nil {
 		return admitErr
 	}
 
-	// Written with no lock held. recMu serializes every record write in the
-	// process, so holding it across the body read would let one stalled upload
-	// block the records of every other transfer.
+	// Written with no process-wide lock held. The per-transfer lock above makes
+	// terminal mutation wait without letting one stalled body block record
+	// uploads for every other transfer.
 	tmp, size, err := writeTemp(p, r, int64(t.maxRecord))
 	if err != nil {
 		return err
@@ -282,24 +324,37 @@ func (t *Transfers) PutRecord(id, kind string, r io.Reader) error {
 
 	t.recMu.Lock()
 	defer t.recMu.Unlock()
-	if err := t.admitLocked(size); err != nil {
+	if err := t.chunks.reserveRecord(size); err != nil {
 		os.Remove(tmp)
 		return err
 	}
 	before := fileSize(p)
 	if err := os.Rename(tmp, p); err != nil {
+		t.chunks.adjustRecords(-size)
 		os.Remove(tmp)
 		return err
 	}
-	t.recUsed += size - before
+	t.chunks.adjustRecords(-before)
 	return nil
 }
 
-// Touch refreshes a transfer's inactivity clock. Chunks are stored outside the
-// transfer directory, so an upload leaves that directory's mtime untouched; the
-// chunk upload path calls this so a transfer still receiving data is not swept
-// mid-flight. See the note on Sweep.
-func (t *Transfers) Touch(id string) error {
+// PutChunk keeps a chunk upload inside the same per-transfer transaction as a
+// terminal mutation. Delete, final Decline, and expiry therefore either wait
+// for this publication and reclaim it, or win first and prevent it from
+// landing against a transfer that no longer exists.
+func (t *Transfers) PutChunk(id, cid string, r io.Reader) error {
+	unlock := t.lockTransfer(id)
+	defer unlock()
+
+	if err := t.touch(id); err != nil {
+		return err
+	}
+	return t.chunks.Put(cid, r)
+}
+
+// touch refreshes a transfer's inactivity clock. It stays behind PutChunk so a
+// caller cannot split liveness from the upload transaction again.
+func (t *Transfers) touch(id string) error {
 	dir, err := t.transferDir(id)
 	if err != nil {
 		return err
@@ -492,7 +547,7 @@ func (t *Transfers) SetProgress(id, node string, bitmap []byte) error {
 	if err := atomicWrite(p, bitmap); err != nil {
 		return err
 	}
-	t.recUsed += fileSize(p) - before
+	t.chunks.adjustRecords(fileSize(p) - before)
 	return nil
 }
 
@@ -535,9 +590,11 @@ func (t *Transfers) progressOf(id, node string) ([]byte, error) {
 	return b, err
 }
 
-// Queue is what this node still owes: transfers it sent where some recipient is
-// missing at least one chunk. Opening the app and draining this is how a
-// transfer completes without the sender having to sit and wait.
+// Queue is what this node still owes directly. A transfer the server already
+// holds in full needs no peer session. A direct transfer becomes actionable
+// only after its metadata lands, then remains here until every fixed recipient
+// records all of its chunks. This keeps a failed create/upload rollback from
+// poisoning every later queue drain with a transfer no recipient can describe.
 func (t *Transfers) Queue(sender string) ([]*TransferInfo, error) {
 	all, err := t.list()
 	if err != nil {
@@ -546,6 +603,12 @@ func (t *Transfers) Queue(sender string) ([]*TransferInfo, error) {
 	out := []*TransferInfo{}
 	for _, info := range all {
 		if info.Sender != sender {
+			continue
+		}
+		if info.Held {
+			continue
+		}
+		if info.Meta == "" {
 			continue
 		}
 		if t.fullyDelivered(info) {
@@ -557,6 +620,12 @@ func (t *Transfers) Queue(sender string) ([]*TransferInfo, error) {
 }
 
 func (t *Transfers) fullyDelivered(info *TransferInfo) bool {
+	// The held path is already deliverable without the sender. Keeping it in the
+	// direct queue would make the sender look for a local stage that this path
+	// deliberately never created.
+	if info.Complete {
+		return true
+	}
 	// An unaddressed transfer has no fixed recipient set, so there is no point
 	// at which it is provably delivered to everyone. It leaves the queue on its
 	// TTL like anything else.
@@ -585,6 +654,9 @@ func (t *Transfers) fullyDelivered(info *TransferInfo) bool {
 // transfer gets ErrNotFound rather than a distinct error, so the endpoint never
 // confirms the existence of a transfer the caller has no business knowing about.
 func (t *Transfers) Delete(id, node string) error {
+	unlock := t.lockTransfer(id)
+	defer unlock()
+
 	info, err := t.Get(id)
 	if err != nil {
 		return err
@@ -592,7 +664,11 @@ func (t *Transfers) Delete(id, node string) error {
 	if !visibleTo(info.Sender, info.To, node) {
 		return ErrNotFound
 	}
-	return t.remove(info)
+	if err := t.remove(info); err != nil {
+		return err
+	}
+	t.reclaimChunksAfterTerminal()
+	return nil
 }
 
 // Decline records that a device does not want this transfer.
@@ -602,14 +678,10 @@ func (t *Transfers) Delete(id, node string) error {
 // left who could collect it. An unaddressed transfer is not deleted by a single
 // refusal, since every device was equally its destination; it stops appearing
 // for the decliner and expires on the usual clock.
-//
-// ponytail: the read and the rewrite are not one atomic step, so two devices
-// declining at the same instant can lose one of the two entries, and a transfer
-// every addressee refused then waits out its TTL instead of going immediately.
-// Two people refusing the same transfer within one filesystem write of each
-// other is not a case a personal node meets. Take a per-transfer lock across
-// the read and the write if it ever does.
 func (t *Transfers) Decline(id, node string) error {
+	unlock := t.lockTransfer(id)
+	defer unlock()
+
 	info, err := t.Get(id)
 	if err != nil {
 		return err
@@ -634,9 +706,21 @@ func (t *Transfers) Decline(id, node string) error {
 
 	if len(rec.To) > 0 && allDeclined(rec.To, rec.Declined) {
 		info.Transfer = rec
-		return t.remove(info)
+		if err := t.remove(info); err != nil {
+			return err
+		}
+		t.reclaimChunksAfterTerminal()
+		return nil
 	}
 	return nil
+}
+
+// reclaimChunksAfterTerminal is prompt but best-effort. remove has already
+// committed the tombstone and removed the transfer, so a reclamation failure
+// must not make a caller retry that terminal mutation or suppress its lifecycle
+// nudge. The periodic mark-and-sweep retries any orphan left behind.
+func (t *Transfers) reclaimChunksAfterTerminal() {
+	_, _ = t.sweepChunks()
 }
 
 func allDeclined(to, declined []string) bool {
@@ -667,7 +751,7 @@ func (t *Transfers) writeMetaJSON(dir string, rec *Transfer) error {
 	if err := atomicWrite(p, b); err != nil {
 		return err
 	}
-	t.recUsed += fileSize(p) - before
+	t.chunks.adjustRecords(fileSize(p) - before)
 	return nil
 }
 
@@ -702,6 +786,7 @@ func (t *Transfers) appendTombstone(info *TransferInfo) error {
 	}
 	hist = append(hist, Tombstone{
 		ID: info.ID, Sender: info.Sender, To: info.To, Declined: info.Declined,
+		Held:       info.Held,
 		Meta:       info.Meta,
 		ChunkCount: info.ChunkCount, CreatedAt: info.CreatedAt, EndedAt: time.Now().UTC(),
 	})
@@ -763,6 +848,12 @@ func (t *Transfers) historyLocked() ([]Tombstone, error) {
 // lists, which is the reason those lists are not sealed: the server has to know
 // what it may delete.
 func (t *Transfers) Referenced() (map[string]bool, error) {
+	t.treeMu.Lock()
+	defer t.treeMu.Unlock()
+	return t.referenced()
+}
+
+func (t *Transfers) referenced() (map[string]bool, error) {
 	ents, err := os.ReadDir(t.dir)
 	if err != nil {
 		return nil, err
@@ -790,11 +881,24 @@ func (t *Transfers) Referenced() (map[string]bool, error) {
 	return ref, nil
 }
 
+// sweepChunks keeps the reference snapshot and deletion in one publication
+// critical section. A Create either publishes before the snapshot and is
+// included, or publishes after the sweep and cannot upload a chunk too early.
+func (t *Transfers) sweepChunks() (int, error) {
+	t.treeMu.Lock()
+	defer t.treeMu.Unlock()
+	referenced, err := t.referenced()
+	if err != nil {
+		return 0, err
+	}
+	return t.chunks.Sweep(referenced)
+}
+
 // Sweep expires a transfer once nothing has written to its directory for the
 // TTL. Writing a sealed record refreshes that clock by itself. A chunk upload
-// does not, because chunks live in the shared store outside this tree, so the
-// upload path has to call Touch; without that call a transfer's clock never
-// moves and it expires one TTL after it was created, mid-upload or not.
+// does not, because chunks live in the shared store outside this tree, so
+// PutChunk refreshes it inside the upload transaction. Without that refresh a
+// transfer expires one TTL after creation, mid-upload or not.
 func (t *Transfers) Sweep(now time.Time) (int, error) {
 	ents, err := os.ReadDir(t.dir)
 	if err != nil {
@@ -822,13 +926,25 @@ func (t *Transfers) Sweep(now time.Time) (int, error) {
 		if err != nil || now.Sub(last) <= t.ttl {
 			continue
 		}
-		info, err := t.Get(e.Name())
-		if err != nil {
-			continue
-		}
-		if t.remove(info) == nil {
-			swept++
-		}
+
+		// Delete and Decline use this same per-transfer lock from their visibility
+		// read through removal. Expiry joins them, then checks the clock again:
+		// the candidate may have been refreshed or removed while Sweep waited.
+		func() {
+			unlock := t.lockTransfer(e.Name())
+			defer unlock()
+			last, err := newestMTime(dir)
+			if err != nil || now.Sub(last) <= t.ttl {
+				return
+			}
+			info, err := t.Get(e.Name())
+			if err != nil {
+				return
+			}
+			if t.remove(info) == nil {
+				swept++
+			}
+		}()
 	}
 	return swept, nil
 }
@@ -856,9 +972,9 @@ func newestMTime(dir string) (time.Time, error) {
 }
 
 // markAnnounced claims the right to announce a transfer, returning true to
-// exactly one caller. Every write path asks, because the records and chunks of
-// one transfer arrive in any order and any of them may be the write that makes
-// the transfer describable.
+// exactly one caller. Every record write asks because metadata and the sealed
+// chunk list can arrive in either order, and metadata is the write that first
+// makes the transfer describable.
 func (t *Transfers) markAnnounced(id string) bool {
 	t.annMu.Lock()
 	defer t.annMu.Unlock()

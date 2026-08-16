@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -61,8 +62,9 @@ type ServerConfig struct {
 }
 
 type Server struct {
-	cfg ServerConfig
-	mux *http.ServeMux
+	cfg    ServerConfig
+	mux    *http.ServeMux
+	pushMu sync.Mutex
 }
 
 func NewServer(cfg ServerConfig) *Server {
@@ -178,7 +180,10 @@ func (s *Server) identified(h http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "not authorized", http.StatusForbidden)
 			return
 		}
-		s.cfg.Devices.Seen(id.Node, id.User, id.Addr)
+		_, registered := s.cfg.Devices.seen(id.Node, id.User, id.Addr)
+		if registered {
+			s.cfg.Events.PublishDevices()
+		}
 		h(w, r.WithContext(context.WithValue(r.Context(), identKey{}, id)))
 	})
 }
@@ -316,6 +321,7 @@ func (s *Server) markPaired(w http.ResponseWriter, r *http.Request) {
 	if fail(w, s.cfg.Devices.SetPaired(who(r).Node)) {
 		return
 	}
+	s.cfg.Events.PublishDevices()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -326,9 +332,26 @@ func (s *Server) setAllowed(allowed bool) http.HandlerFunc {
 			http.Error(w, "bad node", http.StatusBadRequest)
 			return
 		}
+		// A subscribe request can pass the gate and then spend time reading its
+		// body. Serialize its final admission with this state change so it cannot
+		// recreate an endpoint after revocation has removed it.
+		s.pushMu.Lock()
+		defer s.pushMu.Unlock()
+		if !allowed {
+			// Persist push removal first. If it cannot be saved, leaving the node
+			// allowed and returning an error is safer than recording a revocation
+			// while a generic push path can still reach that device after restart.
+			if fail(w, s.cfg.Push.RemoveNode(node)) {
+				return
+			}
+		}
 		if fail(w, s.cfg.Devices.SetAllowed(node, allowed)) {
 			return
 		}
+		if !allowed {
+			s.cfg.Events.Disconnect(node)
+		}
+		s.cfg.Events.PublishDevices()
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -337,17 +360,38 @@ func (s *Server) setAllowed(allowed bool) http.HandlerFunc {
 // sends every chunk id it computed; the server answers with the subset it does
 // not already hold, and the client uploads only those.
 func (s *Server) createTransfer(w http.ResponseWriter, r *http.Request) {
-	// Only cids and to are read. The sender and the transfer id come from the
+	// Only cids, to and the delivery path are read. The sender and transfer id come from the
 	// server, so a client can forge neither.
 	var req struct {
 		Cids []string `json:"cids"`
 		To   []string `json:"to"`
+		Held bool     `json:"held"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&req); err != nil {
 		http.Error(w, "bad json", http.StatusBadRequest)
 		return
 	}
-	rec, missing, err := s.cfg.Transfers.Create(who(r).Node, req.To, req.Cids)
+	sender := who(r).Node
+	if !req.Held {
+		if len(req.To) == 0 {
+			http.Error(w, "direct transfer requires a recipient", http.StatusBadRequest)
+			return
+		}
+		for _, recipient := range req.To {
+			if recipient == sender {
+				http.Error(w, "direct transfer cannot target its sender", http.StatusBadRequest)
+				return
+			}
+		}
+	}
+	var rec *Transfer
+	var missing []string
+	var err error
+	if req.Held {
+		rec, missing, err = s.cfg.Transfers.CreateHeld(sender, req.To, req.Cids)
+	} else {
+		rec, missing, err = s.cfg.Transfers.Create(sender, req.To, req.Cids)
+	}
 	if fail(w, err) {
 		return
 	}
@@ -363,19 +407,40 @@ func (s *Server) getTransfer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteTransfer(w http.ResponseWriter, r *http.Request) {
+	info, err := s.cfg.Transfers.Get(r.PathValue("id"))
+	if fail(w, err) {
+		return
+	}
 	if fail(w, s.cfg.Transfers.Delete(r.PathValue("id"), who(r).Node)) {
 		return
 	}
+	s.cfg.Events.Nudge(transferParties(info))
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// transferParties names every fixed device whose view changes with a transfer.
+// A nil result preserves broadcast semantics for an unaddressed held transfer.
+func transferParties(info *TransferInfo) []string {
+	if len(info.To) == 0 {
+		return nil
+	}
+	parties := make([]string, 0, len(info.To)+1)
+	parties = append(parties, info.Sender)
+	return append(parties, info.To...)
 }
 
 // declineTransfer refuses a transfer on behalf of the calling device. A refusal
 // has to be recorded on the server: a button that only closed a notification
 // would leave the transfer occupying the quota and waiting in the next inbox.
 func (s *Server) declineTransfer(w http.ResponseWriter, r *http.Request) {
+	info, err := s.cfg.Transfers.Get(r.PathValue("id"))
+	if fail(w, err) {
+		return
+	}
 	if fail(w, s.cfg.Transfers.Decline(r.PathValue("id"), who(r).Node)) {
 		return
 	}
+	s.cfg.Events.Nudge(transferParties(info))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -447,41 +512,23 @@ func (s *Server) queue(w http.ResponseWriter, r *http.Request) {
 // id is a required query parameter rather than a second path segment because a
 // chunk is content addressed and shared: the same bytes can belong to any
 // number of transfers, so the id names the upload this request is part of, not
-// an owner of the data. Without it the server could do neither of the two
-// things that have to happen here. It could not refresh the transfer's
-// inactivity clock, because chunks live in the shared store outside the
-// transfer directory and an upload leaves that directory's mtime untouched, so
-// a long upload would be swept out from under itself. And it could not tell
-// when the last piece of a transfer landed, which is the normal way a transfer
-// completes: the client seals both records first, so the chunk loop is what
-// finishes the job for every transfer that is not fully deduplicated.
+// an owner of the data. The transfer id refreshes the inactivity clock because
+// chunks live in the shared store outside the transfer directory and an upload
+// leaves that directory's mtime untouched. Without it, a long upload could be
+// swept out from under itself.
 func (s *Server) putChunk(w http.ResponseWriter, r *http.Request) {
 	tid := r.URL.Query().Get("transfer")
 	if !tidRe.MatchString(tid) {
 		http.Error(w, "malformed transfer id", http.StatusBadRequest)
 		return
 	}
-	// Touch doubles as the existence check, so it runs before the write: a
-	// chunk is never stored against a transfer that has already expired or
-	// been deleted, and the caller learns its transfer is gone instead of
-	// uploading into a directory nothing references.
-	if fail(w, s.cfg.Transfers.Touch(tid)) {
-		return
-	}
 	// The store's own limit is authoritative for a chunk that lands. This reader
 	// bounds the body itself, which is what matters on the dedup path where the
 	// store discards an already-held chunk's bytes rather than measuring them.
 	body := http.MaxBytesReader(w, r.Body, s.cfg.Chunks.maxChunkBytes+1024)
-	if fail(w, s.cfg.Chunks.Put(r.PathValue("cid"), body)) {
+	if fail(w, s.cfg.Transfers.PutChunk(tid, r.PathValue("cid"), body)) {
 		return
 	}
-	// ponytail: this asks whether the transfer is complete after every single
-	// chunk, and the answer costs one stat per chunk in the transfer, so a
-	// whole upload is quadratic in the chunk count. Invisible for a personal
-	// node's transfers and real at the maxChunks ceiling. Keep a per-transfer
-	// count of still-missing chunks in memory, decrement it on each successful
-	// write, and run the full check only when it reaches zero.
-	s.announce(tid, who(r).Node)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -545,6 +592,20 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+
+	// Subscribe before making the response visible. Anything published while
+	// headers or the first event are being flushed is then queued behind the
+	// catch-up instead of falling into a gap between setup and subscription.
+	// The initial inbox event also closes the earlier gap between the page's
+	// first state reads and its first stream connection.
+	//
+	// ponytail: nothing caps how many streams one device may hold open, so an
+	// approved device with a thousand tabs costs a thousand idle goroutines. A
+	// personal tailnet holds a handful of devices, so the ceiling is remote.
+	// Lift it by counting subscriptions per node and refusing past a small limit.
+	ch, stop := s.cfg.Events.Subscribe(who(r).Node)
+	defer stop()
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -552,14 +613,8 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	// connection closed, which is exactly never.
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, "event: inbox\ndata: 1\n\n")
 	flusher.Flush()
-
-	// ponytail: nothing caps how many streams one device may hold open, so an
-	// approved device with a thousand tabs costs a thousand idle goroutines. A
-	// personal tailnet holds a handful of devices, so the ceiling is remote.
-	// Lift it by counting subscriptions per node and refusing past a small limit.
-	ch, stop := s.cfg.Events.Subscribe(who(r).Node)
-	defer stop()
 
 	// A periodic comment keeps intermediaries from reaping an idle stream and
 	// tells the client the connection is still alive.
@@ -579,6 +634,8 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 				// field ends at the first one, so signalling payloads travel
 				// base64 encoded and the client decodes them.
 				fmt.Fprintf(w, "event: signal\ndata: %s\n\n", payload)
+			} else if msg == "devices" {
+				fmt.Fprint(w, "event: devices\ndata: 1\n\n")
 			} else {
 				fmt.Fprint(w, "event: inbox\ndata: 1\n\n")
 			}
@@ -655,7 +712,17 @@ func (s *Server) subscribe(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad body", http.StatusBadRequest)
 		return
 	}
-	if err := s.cfg.Push.Subscribe(who(r).Node, raw); err != nil {
+	node := who(r).Node
+	// The gate checked this request before its body was read. Revocation may
+	// have landed in between, so admission and persistence are serialized with
+	// setAllowed and eligibility is checked once more at the mutation boundary.
+	s.pushMu.Lock()
+	defer s.pushMu.Unlock()
+	if !s.cfg.Devices.Allowed(node) {
+		http.Error(w, "not authorized", http.StatusForbidden)
+		return
+	}
+	if err := s.cfg.Push.Subscribe(node, raw); err != nil {
 		http.Error(w, "bad subscription", http.StatusBadRequest)
 		return
 	}

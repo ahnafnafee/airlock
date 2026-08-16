@@ -1,6 +1,7 @@
 import { registerView, state, el, onInbox } from '../app.js';
 import { api } from '../api.js';
 import { openStage } from '../staging.js';
+import { renderStrip } from '../strip.js';
 import { RUNG, exportFile } from '../export.js';
 import { DOMAIN, MODE_SEALED, openRecord, modeOf, b64decode } from '../crypto.js';
 import { isStandalone } from '../ios.js';
@@ -114,19 +115,46 @@ async function heldHere(transferId, open) {
 // reachable when either one holds it. The server's completeness flag speaks for
 // the server alone, and on the direct path the server is handed no chunk at all:
 // a row that asked only that would refuse to open a file already on this disk.
-export async function readRow(t, mk, open = openStage) {
-  const from = `from ${t.sender} · ${ago(t.createdAt)}`;
+export async function readRow(t, mk, open = openStage, viewer = null) {
+  const outbound = Boolean(viewer && t.sender === viewer);
+  const when = ago(t.createdAt);
+  const from = outbound ? `sent ${when}` : `from ${t.sender} · ${when}`;
   // The metadata record lands before the chunks do, so a transfer without one is
   // at its first instant rather than in trouble. It is the only nameless row.
-  if (!t.meta) return { name: 'Incomplete transfer', detail: from, saveable: false };
+  if (!t.meta) {
+    return { name: 'Incomplete transfer', detail: from, saveable: false, outbound };
+  }
 
   const { meta, detail: refusal } = await openMeta(mk, t);
-  if (!meta) return { name: 'Cannot open', detail: refusal, saveable: false };
+  if (!meta) return { name: 'Cannot open', detail: refusal, saveable: false, outbound };
 
   const detail = `${humanSize(meta.size)} · ${from}`;
+  if (outbound) {
+    return {
+      name: meta.name,
+      detail,
+      meta,
+      outbound: true,
+      saveable: false,
+      note: t.complete
+        ? 'Sent. Available from the server.'
+        : (t.held ? 'The server upload has not completed.' : 'Waiting for a recipient.'),
+    };
+  }
   // Asked first because a transfer the server holds needs nothing from this
   // disk, and asking would open a staging directory for one that never had one.
-  if (t.complete) return { name: meta.name, detail, meta, saveable: true };
+  const total = Array.isArray(t.cids) ? t.cids.length : 0;
+  if (t.complete) {
+    return {
+      name: meta.name,
+      detail,
+      meta,
+      saveable: true,
+      reach: total,
+      total,
+      heldAt: Array.from({ length: total }, (_, i) => i),
+    };
+  }
 
   const cids = Array.isArray(t.cids) ? t.cids : [];
   const here = await heldHere(t.id, open);
@@ -135,9 +163,14 @@ export async function readRow(t, mk, open = openStage) {
   // missing list, which reads the same only while that list carries one entry
   // per position. A file can hold the same chunk many times, and a set of ids
   // cannot say how many positions have landed.
-  const reach = cids.filter((cid, i) => here.has(i) || !missing.has(cid)).length;
+  const heldAt = cids
+    .map((cid, i) => (here.has(i) || !missing.has(cid) ? i : -1))
+    .filter((i) => i >= 0);
+  const reach = heldAt.length;
   if (cids.length > 0 && reach === cids.length) {
-    return { name: meta.name, detail, meta, saveable: true };
+    return {
+      name: meta.name, detail, meta, saveable: true, reach, total: cids.length, heldAt,
+    };
   }
   return {
     name: meta.name,
@@ -148,7 +181,99 @@ export async function readRow(t, mk, open = openStage) {
     // count is the honest part: it is positions this device could assemble from
     // right now, whichever side holds them.
     note: `Still arriving. ${reach} of ${cids.length} chunks so far.`,
+    reach,
+    total: cids.length,
+    heldAt,
   };
+}
+
+// The server returns outbound transfers in the Inbox so their sender has a
+// place to delete them. They are status rows, not received files: saving would
+// look in the receiver's stage, and declining your own send would hide the only
+// lifecycle control it has.
+export function rowActions({ outbound = false, saveable = false }) {
+  const actions = [];
+  if (!outbound && saveable) actions.push('save');
+  if (!outbound) actions.push('decline');
+  actions.push('delete');
+  return actions;
+}
+
+// Local bytes outlive a successful export so a second Save is immediate. Once
+// the server confirms Delete or Decline, no row can reach them again, so both
+// the assembled plaintext and this device's stage become terminal garbage.
+export async function cleanLocalTransfer(t, meta, outbound, deps = {}) {
+  const open = deps.openStage || openStage;
+  const remove = deps.removeAssembled || (async (id) => {
+    const { removeAssembled } = await import('../assemble.js');
+    return removeAssembled(id);
+  });
+  const senderStage = /^[0-9a-f]{32}$/.test(meta?.stage || '') ? meta.stage : t.id;
+  const stageId = outbound ? senderStage : t.id;
+  const results = await Promise.allSettled([
+    open(stageId).then((stage) => stage.clear()),
+    remove(t.id),
+  ]);
+  for (const result of results) {
+    if (result.status === 'rejected') console.warn('local transfer cleanup failed', result.reason);
+  }
+}
+
+// Reconcile local ownership only after a successful Inbox read. The server is
+// authoritative about which transfer ids remain reachable to this device; the
+// staging layer independently distinguishes receiver stages from opaque sender
+// stages, so this cannot reclaim a queued outbound file by accident.
+export async function reconcileLocalTransfers(transfers, deps = {}) {
+  const active = new Set(transfers.map((t) => t.id));
+  const reconcileReceives = deps.reconcileReceives || (await import('../session.js')).reconcileReceives;
+  await reconcileReceives(active);
+
+  const reconcileStages = deps.reconcileReceiverStages
+    || (await import('../staging.js')).reconcileReceiverStages;
+  const reconcileOutputs = deps.reconcileAssembled
+    || (await import('../assemble.js')).reconcileAssembled;
+  const results = await Promise.allSettled([
+    reconcileStages(active),
+    reconcileOutputs(active),
+  ]);
+  for (const result of results) {
+    if (result.status === 'rejected') console.warn('terminal local data was not reconciled', result.reason);
+  }
+}
+
+// A terminal click is a small two-phase operation. First stop and join any live
+// receiver, then ask the server. If the response is lost, a fresh Inbox read
+// tells whether the mutation committed. When even that read is unavailable the
+// receiver is allowed to resume; the next successful Inbox reconciliation will
+// stop it and reclaim its bytes if the transfer did in fact end.
+export async function terminateTransfer(t, meta, outbound, mutate, deps = {}) {
+  const session = deps.cancelReceive && deps.resumeReceive ? deps : await import('../session.js');
+  const cancel = deps.cancelReceive || session.cancelReceive;
+  const resume = deps.resumeReceive || session.resumeReceive;
+  const readInbox = deps.inbox || api.inbox;
+  const clean = deps.cleanLocalTransfer || cleanLocalTransfer;
+
+  await cancel(t.id);
+  let mutationError = null;
+  try {
+    await mutate();
+  } catch (err) {
+    mutationError = err;
+    let active;
+    try {
+      active = (await readInbox()).some((row) => row.id === t.id);
+    } catch {
+      resume(t.id);
+      return { terminal: false, uncertain: true, error: err };
+    }
+    if (active) {
+      resume(t.id);
+      return { terminal: false, uncertain: false, error: err };
+    }
+  }
+
+  await clean(t, meta, outbound);
+  return { terminal: true, error: mutationError };
 }
 
 registerView('inbox', 'Inbox', (panel) => {
@@ -174,7 +299,7 @@ registerView('inbox', 'Inbox', (panel) => {
   // module reaches for session.js that way: the direct-transfer path stays out
   // of the boot path.
   import('../session.js')
-    .then(({ onStorageNote }) => onStorageNote(() => refresh()))
+    .then(({ onTransferChange }) => onTransferChange(() => refresh()))
     // A list that repaints on the inbox nudge alone is still a list. Worth a
     // line, because the note it can no longer retire is one a person acts on.
     .catch((err) => console.warn('the storage note will not repaint', err));
@@ -189,6 +314,15 @@ registerView('inbox', 'Inbox', (panel) => {
       // An empty list would read as an empty inbox, which is a different fact.
       list.replaceChildren(el('li', { class: 'bad' }, `The inbox did not load. ${err.message}`));
       return;
+    }
+
+    if (mine !== generation) return;
+    try {
+      await reconcileLocalTransfers(transfers);
+    } catch (err) {
+      // Rendering the authoritative list still matters when local reclamation
+      // is temporarily unavailable. A later successful refresh retries it.
+      console.warn('local transfers were not reconciled', err);
     }
 
     if (transfers.length === 0) {
@@ -218,7 +352,9 @@ registerView('inbox', 'Inbox', (panel) => {
   }
 
   async function row(t, shortfallFor = () => 0) {
-    const { name, detail, meta, saveable, note } = await readRow(t, state.mk);
+    const presentation = await readRow(t, state.mk, openStage, state.me?.node);
+    const { name, detail, meta, saveable, note, reach, total, heldAt } = presentation;
+    const allowedActions = new Set(rowActions(presentation));
 
     // Carried by the same record as the name, so it appears with the name rather
     // than waiting on the bytes.
@@ -259,7 +395,25 @@ registerView('inbox', 'Inbox', (panel) => {
       : null;
 
     const actions = el('div', { class: 'actions' });
-    if (saveable) {
+    const terminalAction = async (verb, mutate) => {
+      let outcome;
+      try {
+        outcome = await terminateTransfer(t, meta, presentation.outbound, mutate);
+      } catch (err) {
+        detailNode.textContent = `Could not ${verb}. ${err.message}`;
+        detailNode.className = 'data bad';
+        return;
+      }
+      if (!outcome.terminal) {
+        detailNode.textContent = outcome.uncertain
+          ? `Could not confirm ${verb}. Local cleanup will reconcile when the inbox reconnects.`
+          : `Could not ${verb}. ${outcome.error.message}`;
+        detailNode.className = 'data bad';
+        return;
+      }
+      await refresh();
+    };
+    if (allowedActions.has('save')) {
       // Save assembles on this device and runs the export cascade, rather than
       // navigating to the service worker's download route. That route is a fine
       // rung where it works and a dead end where it does not, and which of those
@@ -298,36 +452,25 @@ registerView('inbox', 'Inbox', (panel) => {
     // the server deletes it once every addressee has refused. Both are offered,
     // because a refusal available only from a notification would be missing
     // wherever the notification was dismissed.
+    if (allowedActions.has('decline')) {
+      actions.append(el('button', {
+        class: 'ghost', type: 'button',
+        onclick: () => terminalAction('decline', () => api.decline(t.id)),
+      }, 'Decline'));
+    }
     actions.append(el('button', {
       class: 'ghost', type: 'button',
-      onclick: async () => {
-        try {
-          await api.decline(t.id);
-        } catch (err) {
-          detailNode.textContent = `Could not decline. ${err.message}`;
-          detailNode.className = 'data bad';
-          return;
-        }
-        await refresh();
-      },
-    }, 'Decline'));
-    actions.append(el('button', {
-      class: 'ghost', type: 'button',
-      onclick: async () => {
-        try {
-          await api.deleteTransfer(t.id);
-        } catch (err) {
-          // A row that stays put after a click reads as a dead button, and the
-          // reason it stayed is the one thing worth saying.
-          detailNode.textContent = `Could not delete. ${err.message}`;
-          detailNode.className = 'data bad';
-          return;
-        }
-        await refresh();
-      },
+      onclick: () => terminalAction('delete', () => api.deleteTransfer(t.id)),
     }, 'Delete'));
 
-    return el('li', {},
+    // The row's divider is the transfer's own composition. Green is what this
+    // device can already assemble from, whichever side it came from, and the
+    // rest is a hairline. Reading down the list therefore shows which arrivals
+    // are whole and which are still filling, without a number per row.
+    //
+    // Drawn only where it says something. A transfer with no chunk list yet has
+    // nothing to report, and a rule that is always full would be decoration.
+    const li = el('li', {},
       // Flattened away when there is none, so a row without a thumbnail keeps
       // exactly the shape it had.
       thumbEl || [],
@@ -336,5 +479,13 @@ registerView('inbox', 'Inbox', (panel) => {
       el('div', { class: 'rowtext' },
         el('div', { class: 'name' }, name), detailNode, noteNode || []),
       actions);
+    if (total > 0) {
+      const strip = renderStrip(li, total, {
+        seam: true, label: `${reach} of ${total} chunks here`,
+      });
+      strip.setAll('pending');
+      for (const i of heldAt || []) strip.set(i, 'held');
+    }
+    return li;
   }
 });

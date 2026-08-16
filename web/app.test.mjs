@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  listen, onInbox, retryDelay, __setStreamImpl,
+  ensurePaired, listen, onDevices, onInbox, retryDelay, __setStreamImpl,
   RETRY_BASE_MS, RETRY_CAP_MS,
 } from './app.js';
 
@@ -11,6 +11,24 @@ import {
 const CONNECTING = 0;
 const OPEN = 1;
 const CLOSED = 2;
+
+test('an unlocked device retries a failed paired marker on the next boot', async () => {
+  const me = { node: 'phone', paired: false };
+  let attempts = 0;
+  const mark = async () => {
+    attempts++;
+    if (attempts === 1) throw new Error('network down');
+  };
+
+  assert.equal(await ensurePaired(me, mark), false);
+  assert.equal(me.paired, false);
+  assert.equal(await ensurePaired(me, mark), true);
+  assert.equal(me.paired, true);
+  assert.equal(attempts, 2);
+
+  assert.equal(await ensurePaired(me, mark), true);
+  assert.equal(attempts, 2, 'a confirmed device does not write the marker again');
+});
 
 // A stream the test drives by hand. The two states that matter are the two the
 // browser distinguishes: an error while CONNECTING is one EventSource is already
@@ -239,4 +257,17 @@ test('a stream that heals itself still catches up on what it missed', () => {
 
   source.connect();
   assert.equal(caughtUp, 1, 'the gap was never closed, so nothing re-read the inbox');
+});
+
+test('a device roster event has its own live subscribers', () => {
+  const s = fakeStream();
+  let changed = 0;
+  onDevices(() => { changed++; });
+  listen();
+  s.last().connect();
+
+  s.last().emit('devices', {});
+  assert.equal(changed, 1);
+  s.last().emit('inbox', {});
+  assert.equal(changed, 1, 'an inbox nudge is not a roster mutation');
 });

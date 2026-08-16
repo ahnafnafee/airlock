@@ -67,6 +67,20 @@ func (e *Events) Count() int {
 	return len(e.subs)
 }
 
+// Disconnect closes every stream for one node. Revocation uses it so presence
+// stops advertising a device that the very next request will reject.
+func (e *Events) Disconnect(node string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for id, s := range e.subs {
+		if s.node != node {
+			continue
+		}
+		delete(e.subs, id)
+		close(s.ch)
+	}
+}
+
 // Publish nudges every device that should care, never the sender. It drops
 // rather than blocks when a subscriber is not reading, because a device that
 // has stopped reading must not be able to wedge somebody else's upload.
@@ -75,20 +89,37 @@ func (e *Events) Count() int {
 // keeps a subscription that ends mid-publish from being sent to after its
 // channel is closed.
 func (e *Events) Publish(recipients []string, sender string) {
+	e.publish(recipients, sender, "inbox")
+}
+
+// Nudge tells every affected party to re-read transfer state. Unlike Publish,
+// it deliberately includes the actor: another tab on that same device may be
+// showing the inbox or queue that just changed.
+func (e *Events) Nudge(recipients []string) {
+	e.publish(recipients, "", "inbox")
+}
+
+func (e *Events) publish(recipients []string, excluded, message string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, s := range e.subs {
-		if s.node == sender {
+		if excluded != "" && s.node == excluded {
 			continue
 		}
 		if len(recipients) > 0 && !addressedTo(recipients, s.node) {
 			continue
 		}
 		select {
-		case s.ch <- "inbox":
+		case s.ch <- message:
 		default:
 		}
 	}
+}
+
+// PublishDevices tells every open approved client that device eligibility
+// changed. The event carries no detail; clients re-read the device registry.
+func (e *Events) PublishDevices() {
+	e.publish(nil, "", "devices")
 }
 
 // Online reports which nodes hold at least one open stream. A device with

@@ -42,7 +42,8 @@ export const api = {
 
   // Returns {id, missing}. This one call is the dedup, delta-sync and resume
   // mechanism: send every id, get back only what the server lacks.
-  createTransfer: (cids, to) => sendJSON('/api/transfer', { cids, to }),
+  createTransfer: (cids, to, held = false) =>
+    sendJSON('/api/transfer', { cids, to, held }),
   transfer: (id) => json(`/api/transfer/${id}`),
   putRecord: (id, kind, bytes) => sendBytes(`/api/transfer/${id}/${kind}`, bytes),
   getRecord: async (id, kind) =>

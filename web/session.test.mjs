@@ -2,9 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { liveTransport, makeSessions, mayConsumeStage } from './session.js';
 import { api } from './api.js';
-import { LINK_COUNT } from './peer.js';
+import { LINK_COUNT, WIRE, receive as receivePeer } from './peer.js';
 import { bitmapOf } from './staging.js';
 import { DOMAIN, MODE_SEALED, b64encode, sealRecord } from './crypto.js';
+import {
+  rememberOutboundStage, reconcileOutboundStages, snapshotOutboundStages,
+} from './local-transfers.js';
 
 // These test the five ways this module can go wrong, against fakes for
 // everything it reaches outside itself. There is no RTCPeerConnection in Node
@@ -60,11 +63,12 @@ function fakeStage(held = []) {
 
 function fakeChannel() {
   return {
+    sent: [],
     readyState: 'open',
     bufferedAmount: 0,
     addEventListener() {},
     removeEventListener() {},
-    send() {},
+    send(value) { this.sent.push(value); },
   };
 }
 
@@ -77,7 +81,8 @@ const fakeLinks = (channel) => [{ pc: null, channels: [channel] }];
 // and everything a test wants to assert on is recorded on `log`.
 function harness(overrides = {}) {
   const log = {
-    opens: [], accepts: [], answers: [], progress: [], aborted: 0,
+    opens: [], accepts: [], answers: [], progress: [], snapshots: [],
+    reconciled: [], forgotten: [], aborted: 0,
   };
   const info = {
     id: ID,
@@ -97,13 +102,13 @@ function harness(overrides = {}) {
   const api = {
     // A fresh copy per call, and a null list stays null: that is what the wire
     // carries for a slice the server never allocated.
-    transfer: async () => ({
+    transfer: overrides.transfer || (async () => ({
       ...info,
       to: Array.isArray(info.to) ? [...info.to] : info.to,
       declined: Array.isArray(info.declined) ? [...info.declined] : info.declined,
-    }),
+    })),
     presence: async () => overrides.online || [PEER],
-    queue: async () => overrides.queue || [],
+    queue: overrides.queueFn || (async () => overrides.queue || []),
     getProgress: async (id, node) => progressOf(node),
     putProgress: async (id, bitmap) => { log.progress.push({ id, bitmap }); },
     signal: async () => {},
@@ -130,12 +135,27 @@ function harness(overrides = {}) {
   const sessions = makeSessions({
     api,
     transport,
-    openStage: async (key) => { log.stages.push(key); return stage; },
+    openStage: async (key, cids) => {
+      log.stages.push(key);
+      return overrides.openStage ? overrides.openStage(key, cids) : stage;
+    },
     negotiate: overrides.negotiate
       || (async () => ({ accepted: true, sent: CIDS.length, held: 0 })),
     receive: overrides.receive || (async () => ({ accepted: true, received: 0 })),
     loadMaster: async () => (overrides.locked ? null : key),
     identity: async () => ME,
+    snapshotOutboundStages: overrides.snapshotOutboundStages
+      || (async () => {
+        const snapshot = {};
+        log.snapshots.push(snapshot);
+        return snapshot;
+      }),
+    reconcileOutboundStages: overrides.reconcileOutboundStages
+      || (async (snapshot, active) => {
+        log.reconciled.push({ snapshot, active: [...active] });
+      }),
+    forgetOutboundStage: overrides.forgetOutboundStage
+      || (async (transfer) => { log.forgotten.push(transfer); }),
     shortfall: overrides.shortfall,
     handshakeMs: overrides.handshakeMs ?? 200,
     flushMs: 50,
@@ -200,12 +220,111 @@ test('a receiver writes its progress after a session that failed', async () => {
   assert.deepEqual([...h.log.progress[0].bitmap], [0b011]);
 });
 
+test('terminal receive cancellation joins a chunk write before cleanup', async () => {
+  let releaseWrite;
+  let writeStarted;
+  const started = new Promise((resolve) => { writeStarted = resolve; });
+  const stage = fakeStage();
+  stage.put = async (i, bytes) => {
+    writeStarted();
+    await new Promise((resolve) => { releaseWrite = resolve; });
+    stage.store.set(i, bytes);
+  };
+  const h = harness({
+    stage,
+    receive: async (_links, handlers) => {
+      assert.deepEqual(await handlers.onOffer({ cids: CIDS, size: 9 }), { accept: true });
+      await handlers.onChunk(0, new Uint8Array([7]));
+      return { accepted: true, received: 1 };
+    },
+  });
+
+  const session = h.sessions.handleSignal(offerFrom());
+  await started;
+  let cancelled = false;
+  const cancel = h.sessions.cancelReceive(ID).then(() => { cancelled = true; });
+  await sleep(0);
+  assert.equal(cancelled, false, 'cleanup must not overtake the worker write');
+
+  releaseWrite();
+  await cancel;
+  await stage.clear();
+  await session;
+  assert.deepEqual([...stage.store.keys()], [], 'a late chunk cannot resurrect the cleared stage');
+  assert.equal(h.log.progress.length, 0, 'a terminal receive does not publish stale progress');
+
+  const accepted = h.log.accepts.length;
+  await h.sessions.handleSignal(offerFrom());
+  assert.equal(h.log.accepts.length, accepted, 'later offers stay refused after the terminal action');
+});
+
+test('terminal cancellation catches a receive still reading server metadata', async () => {
+  let releaseInfo;
+  let lookupStarted;
+  const started = new Promise((resolve) => { lookupStarted = resolve; });
+  const h = harness({
+    transfer: async () => {
+      lookupStarted();
+      await new Promise((resolve) => { releaseInfo = resolve; });
+      return { id: ID, sender: PEER, to: [ME], declined: [], cids: CIDS, meta: META };
+    },
+  });
+
+  const session = h.sessions.handleSignal(offerFrom());
+  await started;
+  await h.sessions.cancelReceive(ID);
+  releaseInfo();
+  await session;
+
+  assert.deepEqual(h.log.stages, [], 'a canceled lookup never opens or recreates its stage');
+  assert.deepEqual(h.log.accepts, [], 'a canceled lookup never accepts a data channel');
+});
+
 test('a receiver writes its progress after a session that succeeded', async () => {
   const stage = fakeStage([0, 1, 2]);
   const h = harness({ stage });
   await h.sessions.handleSignal(offerFrom());
   assert.equal(h.log.progress.length, 1);
   assert.deepEqual([...h.log.progress[0].bitmap], [0b111]);
+});
+
+test('a completed receive announces the local transfer state change', async () => {
+  const h = harness({ stage: fakeStage([0, 1, 2]) });
+  let changes = 0;
+  h.sessions.onTransferChange(() => { changes++; });
+
+  await h.sessions.handleSignal(offerFrom());
+
+  assert.equal(changes, 1);
+});
+
+test('a receiver asks only for positions missing from its cross-transfer cache', async () => {
+  const h = harness({
+    receive: receivePeer,
+    openStage: async (key, cids) => ({
+      ...fakeStage(),
+      has: async (index) => cids?.[index] === CIDS[1],
+    }),
+  });
+
+  const handling = h.sessions.handleSignal(offerFrom());
+  await settle();
+  await h.channel.onmessage({
+    data: JSON.stringify({
+      type: WIRE.OFFER,
+      name: 'second.bin',
+      size: 9,
+      mime: 'application/octet-stream',
+      cids: CIDS,
+    }),
+  });
+
+  const need = h.channel.sent.map((frame) => JSON.parse(frame))
+    .find((frame) => frame.type === WIRE.NEED);
+  assert.deepEqual(need.indexes, [0, 2]);
+
+  await h.channel.onmessage({ data: JSON.stringify({ type: WIRE.DONE, count: 0 }) });
+  await handling;
 });
 
 test('staged chunks survive a session the recipient has not confirmed', async () => {
@@ -223,6 +342,16 @@ test('staged chunks survive a session the recipient has not confirmed', async ()
   assert.equal(stage.store.size, 3);
 });
 
+test('an accepted transfer stays owed until the recipient confirms every chunk', async () => {
+  const h = harness({
+    info: SENDING,
+    stage: fakeStage([0, 1, 2]),
+    progressOf: () => new Uint8Array([0b011]),
+  });
+
+  assert.equal(await h.sessions.startSend(ID), true);
+});
+
 test('staged chunks are dropped once the recipient confirms every one', async () => {
   const stage = fakeStage([0, 1, 2]);
   const h = harness({
@@ -231,8 +360,10 @@ test('staged chunks are dropped once the recipient confirms every one', async ()
     progressOf: () => new Uint8Array([0b111]),
   });
 
-  await h.sessions.startSend(ID);
+  const owed = await h.sessions.startSend(ID);
+  assert.equal(owed, false);
   assert.equal(stage.cleared, 1);
+  assert.deepEqual(h.log.forgotten, [ID]);
 });
 
 // A save reads the stage on its way through and may delete what it read. These
@@ -643,6 +774,27 @@ test('a staged write refused for quota drops the partial stage and records nothi
   assert.deepEqual([...h.log.progress[0].bitmap], [0]);
 });
 
+test('a cached-chunk copy refused for quota drops the partial stage', async () => {
+  const stage = fakeStage();
+  const quota = new Error('the quota has been exceeded');
+  quota.name = 'QuotaExceededError';
+  stage.has = async () => { throw quota; };
+
+  const h = harness({
+    stage,
+    receive: async (channel, handlers) => {
+      const decision = await handlers.onOffer({ cids: CIDS, size: 9 });
+      assert.equal(decision.accept, true);
+      await handlers.has(0);
+    },
+  });
+
+  await h.sessions.handleSignal(offerFrom());
+
+  assert.equal(stage.cleared, 1);
+  assert.deepEqual([...h.log.progress[0].bitmap], [0]);
+});
+
 test('a staged write that failed for any other reason keeps the stage to resume from', async () => {
   const stage = fakeStage();
   stage.put = async () => { throw new Error('the staging worker stopped'); };
@@ -746,6 +898,64 @@ test('a drain offers every queued transfer and survives one that fails', async (
 
   await h.sessions.drainQueue();
   assert.equal(h.log.opens.length, 2);
+});
+
+test('a successful empty queue reconciles terminal outbound stages', async () => {
+  const h = harness();
+
+  await h.sessions.drainQueue();
+
+  assert.equal(h.log.snapshots.length, 1);
+  assert.deepEqual(h.log.reconciled, [{ snapshot: h.log.snapshots[0], active: [] }]);
+});
+
+test('a queue read cannot reclaim a stage registered while that read is pending', async () => {
+  const oldTransfer = 'b'.repeat(32);
+  const newTransfer = 'c'.repeat(32);
+  const oldStage = '1'.repeat(32);
+  const newStage = '2'.repeat(32);
+  const stored = new Map();
+  const store = {
+    set: async (transfer, stage) => { stored.set(transfer, stage); },
+    remove: async (transfer) => { stored.delete(transfer); },
+    all: async () => Object.fromEntries(stored),
+    removeIf: async (transfer, stage) => {
+      if (stored.get(transfer) !== stage) return false;
+      stored.delete(transfer);
+      return true;
+    },
+  };
+  await rememberOutboundStage(oldTransfer, oldStage, store);
+
+  let queueStarted;
+  const started = new Promise((resolve) => { queueStarted = resolve; });
+  let releaseQueue;
+  const pendingQueue = new Promise((resolve) => { releaseQueue = resolve; });
+  const cleared = [];
+  const h = harness({
+    queueFn: async () => {
+      queueStarted();
+      return pendingQueue;
+    },
+    snapshotOutboundStages: () => snapshotOutboundStages(store),
+    reconcileOutboundStages: (candidates, active) => reconcileOutboundStages(
+      candidates,
+      active,
+      {
+        store,
+        openStage: async (id) => ({ clear: async () => { cleared.push(id); } }),
+      },
+    ),
+  });
+
+  const draining = h.sessions.drainQueue();
+  await started;
+  await rememberOutboundStage(newTransfer, newStage, store);
+  releaseQueue([]);
+  await draining;
+
+  assert.deepEqual(cleared, [oldStage]);
+  assert.deepEqual(Object.fromEntries(stored), { [newTransfer]: newStage });
 });
 
 test('a list the server never allocated arrives as null and is still a list', async () => {

@@ -275,7 +275,7 @@ The caller to design against is an authenticated, allowlisted device running
 | Integer overflow in quota math | Counts bounded by division before any multiplication |
 | Path traversal | Ids validated against `^[0-9a-f]{64}$` (chunks) or `^[0-9a-f]{32}$` (transfers) before any path is built |
 | Chunk-id squatting | A `cid` is content-derived; a client uploading wrong bytes under a real id corrupts only its own transfers, and every download verifies the GCM tag |
-| Unauthorized read, delete, or relay | Every route gated, static assets included, and inbox, history and delete scoped to transfers the caller sent or received |
+| Unauthorized read, delete, or relay | Every API that carries state is identity-gated, device approval is checked on each stateful request, and inbox, history and delete are scoped to transfers the caller sent or received; the public shell and embedded assets contain no state |
 | Storage growth | TTL sweep on last write, plus mark-and-sweep of unreferenced chunks |
 
 Fail closed: if tsnet cannot come up, or token mode has no token, the process
@@ -681,5 +681,6 @@ cut.
 
 The three checks whose failure looks like success, and which therefore matter
 most: tampered chunk lists must fail to decrypt; a chunk file on the server must
-be unreadable; and a non-allowlisted node must get 403 on every route including
-static assets.
+be unreadable; and a non-allowlisted node must get 403 from every stateful API.
+The shell, service worker and embedded assets stay readable because they contain
+no state and are required to render the pairing screen.

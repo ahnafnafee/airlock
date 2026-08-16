@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  bitmapOf, indexesFrom, makeWriter, openStage, stageDir, writeStaged,
+  bitmapOf, indexesFrom, makeStageOpener, makeWriter, openStage,
+  reconcileReceiverStages, stageDir, writeStaged,
 } from './staging.js';
 
 // A stand-in for the dedicated worker. Nothing here writes to disk: what these
@@ -215,6 +216,50 @@ function onDisk() {
 }
 
 const STAGE = '0'.repeat(32);
+const OTHER_STAGE = '1'.repeat(32);
+const ACTIVE_STAGE = '2'.repeat(32);
+const CID_A = 'a'.repeat(64);
+const CID_B = 'b'.repeat(64);
+const CID_C = 'c'.repeat(64);
+
+test('a later transfer can own and read a chunk cached by CID in an earlier transfer', async () => {
+  onDisk();
+  const open = makeStageOpener(writeStaged);
+  const earlier = await open(STAGE, [CID_A, CID_B]);
+  await earlier.put(1, new Uint8Array([4, 5, 6]));
+
+  // A new opener stands in for a page reload: the lookup comes from the
+  // persisted manifest and not an in-memory map left by the first transfer.
+  const afterReload = makeStageOpener(writeStaged);
+  const later = await afterReload(OTHER_STAGE, [CID_B, CID_C]);
+  assert.equal(await later.has(0), true);
+  assert.deepEqual([...await later.get(0)], [4, 5, 6]);
+  assert.equal(await later.has(1), false, 'a different CID must still be requested');
+
+  // Reuse gives the later transfer its own position. Clearing the earlier
+  // owner must not make a transfer that already answered "held" unassemblable.
+  await earlier.clear();
+  assert.deepEqual([...await later.get(0)], [4, 5, 6]);
+});
+
+test('inbox reconciliation removes only terminal receiver stages', async () => {
+  const disk = onDisk();
+  const open = makeStageOpener(writeStaged);
+  const staleReceiver = await open(STAGE, [CID_A]);
+  const activeReceiver = await open(ACTIVE_STAGE, [CID_B]);
+  const outbound = await open(OTHER_STAGE);
+  await staleReceiver.put(0, new Uint8Array([1]));
+  await activeReceiver.put(0, new Uint8Array([2]));
+  await outbound.put(0, new Uint8Array([3]));
+
+  assert.deepEqual(await reconcileReceiverStages(new Set([ACTIVE_STAGE])), [STAGE]);
+  const staging = await disk.root.getDirectoryHandle('staging');
+  const names = [];
+  for await (const name of staging.keys()) names.push(name);
+  assert.deepEqual(names.sort(), [ACTIVE_STAGE, OTHER_STAGE].sort());
+  assert.deepEqual([...await activeReceiver.get(0)], [2]);
+  assert.deepEqual([...await outbound.get(0)], [3]);
+});
 
 test('an interrupted write leaves nothing that reports as staged', async () => {
   // The whole point. A chunk file exists from the moment a write starts, so if

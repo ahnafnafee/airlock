@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { RUNG, exportFile, exportRungs } from './export.js';
-import { assemble, assembledFile, chunkSource } from './assemble.js';
+import {
+  assemble, assembledFile, chunkSource, reconcileAssembled, removeAssembled,
+} from './assemble.js';
 import { MODE_SEALED, chunkIdentity, sealChunk } from './crypto.js';
 
 // A stand-in for the origin private file system. Only the four calls assembly
@@ -50,6 +52,7 @@ function fakeStorage() {
         async removeEntry(entry) {
           if (!files.delete(entry)) throw new Error(`no entry named ${entry}`);
         },
+        async *keys() { yield* [...files.keys()]; },
       });
     }
     return dirs.get(name);
@@ -94,6 +97,7 @@ const PLAINS = [
 ];
 const TOTAL = PLAINS.reduce((n, p) => n + p.length, 0);
 const ID = 'a'.repeat(32);
+const OTHER_ID = 'b'.repeat(32);
 const META = { name: 'holiday.mp4', size: TOTAL, mime: 'video/mp4' };
 
 const bytesOf = async (file) => new Uint8Array(await file.arrayBuffer());
@@ -121,6 +125,33 @@ test('assembling a three-chunk transfer produces the concatenation in order', as
 
   // Consumed as it went, which is what keeps peak disk near the file size.
   assert.deepEqual(stage.removed, [0, 1, 2]);
+});
+
+test('assembly reads the next chunk while the current one is opening', async () => {
+  const mk = await masterKey();
+  const { hashes, cids, sealed } = await sealedChunks(mk, PLAINS);
+  const requested = [];
+  let releaseFirst;
+  const first = new Promise((resolve) => { releaseFirst = resolve; });
+  const stage = {
+    get: async (i) => {
+      requested.push(i);
+      if (i === 0) await first;
+      return sealed[i];
+    },
+    remove: async () => {},
+  };
+
+  const assembling = assemble(ID, META, {
+    mk, mode: MODE_SEALED, hashes, cids, stage, root: fakeStorage(),
+  });
+  while (requested.length === 0) await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  const readAhead = requested.includes(1);
+  releaseFirst();
+  await assembling;
+
+  assert.equal(readAhead, true, 'chunk 1 should start loading before chunk 0 arrives');
 });
 
 test('a chunk that fails its tag aborts assembly rather than writing a short file', async () => {
@@ -179,6 +210,30 @@ test('a second save reuses the assembled file rather than decrypting again', asy
   assert.equal(again.size, TOTAL);
 });
 
+test('terminal transfer cleanup removes the assembled plaintext', async () => {
+  const mk = await masterKey();
+  const { hashes, cids, sealed } = await sealedChunks(mk, PLAINS);
+  const root = fakeStorage();
+
+  await assemble(ID, META, {
+    mk, mode: MODE_SEALED, hashes, cids, stage: fakeStage(sealed), root,
+  });
+  assert.notEqual(await assembledFile(ID, META, { root }), null);
+
+  await removeAssembled(ID, { root });
+  assert.equal(await assembledFile(ID, META, { root }), null);
+});
+
+test('inbox reconciliation removes assembled plaintext for terminal transfers', async () => {
+  const root = fakeStorage();
+  const out = await root.getDirectoryHandle('assembled');
+  await out.getFileHandle(ID, { create: true });
+  await out.getFileHandle(OTHER_ID, { create: true });
+
+  assert.deepEqual(await reconcileAssembled(new Set([ID]), { root }), [OTHER_ID]);
+  assert.deepEqual([...out.files.keys()], [ID]);
+});
+
 test('a chunk missing from the stage comes from the server, and only staged ones are pruned', async () => {
   const root = fakeStorage();
   const dir = await root.getDirectoryHandle('staging-a');
@@ -204,6 +259,27 @@ test('a chunk missing from the stage comes from the server, and only staged ones
   await source.remove(0);
   await source.remove(1);
   assert.equal(dir.files.has('1'), false);
+});
+
+test('an unfinished staged chunk comes from the server', async () => {
+  const root = fakeStorage();
+  const dir = await root.getDirectoryHandle('staging-partial');
+  const handle = await dir.getFileHandle('0', { create: true });
+  const access = await handle.createSyncAccessHandle();
+  access.write(new Uint8Array([9]), { at: 0 });
+  access.close();
+  await dir.getFileHandle('0.part', { create: true });
+
+  const asked = [];
+  const source = chunkSource(dir, ['cid-zero'], {
+    fetchChunk: async (cid) => {
+      asked.push(cid);
+      return new Uint8Array([1, 2, 3]);
+    },
+  });
+
+  assert.deepEqual(await source.get(0), new Uint8Array([1, 2, 3]));
+  assert.deepEqual(asked, ['cid-zero']);
 });
 
 test('a stage this device does not own is read but never pruned', async () => {

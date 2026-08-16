@@ -15,6 +15,7 @@
 import { openChunk } from './crypto.js';
 
 const ASSEMBLED = 'assembled';
+const TRANSFER_ID = /^[0-9a-f]{32}$/;
 
 async function assembledDir(root) {
   const base = root || await navigator.storage.getDirectory();
@@ -87,6 +88,17 @@ export function chunkSource(dir, cids, { fetchChunk, consume = false, replaceabl
 
   return {
     get: async (i) => {
+      // A numeric file exists from the instant its write starts. The companion
+      // marker is the commit record: while it remains, those bytes are a crashed
+      // or still-running write and the server copy is the only complete source.
+      let unfinished = false;
+      try {
+        await dir.getFileHandle(`${i}.part`);
+        unfinished = true;
+      } catch {
+        // No marker means the staged write committed.
+      }
+      if (unfinished) return fetchChunk(cids[i]);
       try {
         const handle = await dir.getFileHandle(String(i));
         const bytes = new Uint8Array(await (await handle.getFile()).arrayBuffer());
@@ -131,6 +143,44 @@ export async function assembledFile(transferId, meta, { root = null } = {}) {
   }
 }
 
+// A completed assembly is intentionally kept for a second Save gesture, but a
+// transfer that has been deleted or declined has reached its terminal state.
+// Remove its plaintext copy then so browser storage cannot fill with files the
+// Inbox no longer has any way to reach.
+export async function removeAssembled(transferId, { root = null } = {}) {
+  if (!TRANSFER_ID.test(transferId || '')) {
+    throw new Error('a malformed transfer id has no assembled file');
+  }
+  try {
+    const out = await assembledDir(root);
+    await out.removeEntry(transferId);
+  } catch (err) {
+    // Idempotent cleanup. A transfer can be declined after a partial assembly,
+    // or deleted on another device before this one has ever saved it.
+    if (err?.name !== 'NotFoundError') throw err;
+  }
+}
+
+// A transfer removed by another device or by the service worker has no page
+// click on this device to clean up after it. A successful Inbox snapshot is the
+// authority for which assembled plaintexts are still reachable, so reclaim
+// every well-formed output id it no longer names.
+export async function reconcileAssembled(activeTransferIds, { root = null } = {}) {
+  const active = new Set([...activeTransferIds].filter((id) => TRANSFER_ID.test(id)));
+  const out = await assembledDir(root);
+  const removed = [];
+  for await (const id of out.keys()) {
+    if (!TRANSFER_ID.test(id) || active.has(id)) continue;
+    try {
+      await out.removeEntry(id);
+      removed.push(id);
+    } catch (err) {
+      if (err?.name !== 'NotFoundError') throw err;
+    }
+  }
+  return removed;
+}
+
 // Decrypt the staged chunks into a single output file. The result is a
 // disk-backed File, which is what lets every export rung stay memory-flat:
 // createObjectURL and navigator.share both take a reference to disk rather than
@@ -146,8 +196,21 @@ export async function assemble(transferId, meta, { mk, mode, hashes, cids, stage
   try {
     access.truncate(0);
     let at = 0;
+    // A server-held chunk may be one tailnet round trip away. Start the next
+    // read before opening and writing the current chunk so network latency is
+    // no longer strictly serialized with that work. One read ahead keeps memory
+    // bounded to the current and next maximum-sized chunks.
+    const read = (i) => {
+      if (i >= hashes.length) return null;
+      const pending = Promise.resolve().then(() => stage.get(i));
+      pending.catch(() => {});
+      return pending;
+    };
+    let ahead = read(0);
     for (let i = 0; i < hashes.length; i++) {
-      const sealed = await stage.get(i);
+      const pending = ahead;
+      ahead = read(i + 1);
+      const sealed = await pending;
       // Throws if the chunk was substituted or corrupted, so a damaged transfer
       // fails here rather than producing a plausible wrong file.
       const plain = await openChunk(mk, mode, hashes[i], cids[i], sealed);

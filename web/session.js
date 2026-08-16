@@ -14,6 +14,11 @@ import {
   CHANNELS_PER_LINK, LINK_COUNT, linkCountFor, negotiate, newConnection, openChannels, receive,
 } from './peer.js';
 import { openStage, indexesFrom } from './staging.js';
+import {
+  forgetOutboundStage as forgetRecordedOutboundStage,
+  reconcileOutboundStages as reconcileRecordedOutboundStages,
+  snapshotOutboundStages as snapshotRecordedOutboundStages,
+} from './local-transfers.js';
 import { transfersActive } from './wake.js';
 import { roomShortfall } from './ios.js';
 import {
@@ -426,6 +431,9 @@ export async function assembleTransfer(transferId, { spawn = spawnAssembler } = 
 export function makeSessions(deps) {
   const {
     api, openStage, transport, negotiate, receive, loadMaster, identity,
+    snapshotOutboundStages = async () => ({}),
+    reconcileOutboundStages = async () => {},
+    forgetOutboundStage = async () => {},
     shortfall = roomShortfall,
     handshakeMs = HANDSHAKE_MS,
     flushMs = FLUSH_MS,
@@ -440,6 +448,12 @@ export function makeSessions(deps) {
   const sessions = new Map();
   const cooling = new Map();
   const refused = new Set();
+  // A terminal Inbox action must stop the receiver before it removes that
+  // transfer's stage. Writes run in a worker and resolve after the frame that
+  // started them, so closing a data channel alone is not a join: the action has
+  // to wait for every write already handed off as well.
+  const receiving = new Map();
+  const cancelledReceives = new Set();
 
   // What a row has to say about a transfer this device could not take. Running
   // out of disk is the one failure nobody but the person holding this device can
@@ -458,10 +472,16 @@ export function makeSessions(deps) {
   // on the clear as well as on the set, since a row that keeps asking for space
   // while the chunks are landing is the same lie in the other direction.
   const noteListeners = new Set();
+  const transferListeners = new Set();
 
   function onStorageNote(fn) {
     noteListeners.add(fn);
     return () => noteListeners.delete(fn);
+  }
+
+  function onTransferChange(fn) {
+    transferListeners.add(fn);
+    return () => transferListeners.delete(fn);
   }
 
   // Fired only when the map actually moved, so an ordinary accepted offer, which
@@ -479,15 +499,29 @@ export function makeSessions(deps) {
     }
   }
 
+  function announceTransferChange() {
+    for (const fn of transferListeners) {
+      try {
+        fn();
+      } catch (err) {
+        // Repainting is best effort. A view failure must not turn a completed
+        // peer receive into a failed transfer.
+        console.warn('a transfer listener failed', err);
+      }
+    }
+  }
+
   function setShortfall(transferId, bytes) {
     if (shortfalls.get(transferId) === bytes) return;
     shortfalls.set(transferId, bytes);
     announceNote();
+    announceTransferChange();
   }
 
   function clearShortfall(transferId) {
     if (!shortfalls.delete(transferId)) return;
     announceNote();
+    announceTransferChange();
   }
 
   // The one place a peer slot is taken. Two channels to the same device would
@@ -582,6 +616,11 @@ export function makeSessions(deps) {
       // recipient's own bitmap, read back from the server, says a chunk landed.
       if (await deliveredToEveryone(api, info)) {
         await stage.clear();
+        await forgetOutboundStage(info.id).catch((err) => {
+          // The server queue is still authoritative. Leaving the mapping behind
+          // lets the next successful reconciliation retry this local-only step.
+          console.warn('the cleared outbound stage was not forgotten', err);
+        });
         return true;
       }
     }
@@ -632,8 +671,8 @@ export function makeSessions(deps) {
       await withTimeout(
         Promise.all(channels.map(flushed)), flushMs, 'the send buffer never drained')
         .catch(() => {});
-      await confirmAndClear(info, stage);
-      return result;
+      const confirmed = await confirmAndClear(info, stage);
+      return { ...result, confirmed };
     } finally {
       close();
     }
@@ -644,12 +683,12 @@ export function makeSessions(deps) {
   // so one unreachable device does not stop the rest of the queue.
   //
   // It answers whether it left anyone owed, which is the only place that can be
-  // known: four of the five ways a recipient is skipped are still reachable
-  // later, and the caller has to come back for them. Away, cooling off after a
-  // failure, holding this device's one session slot, and failing outright all
-  // say "later"; a decline says never. Reporting only the absent ones would
-  // leave a transfer that failed against a peer who stayed online with nothing
-  // scheduled to try it again.
+  // known: every non-final path is still reachable later, and the caller has to
+  // come back for it. Away, cooling off after a failure, holding this device's
+  // one session slot, failing outright, and an accepted send whose progress has
+  // not been confirmed all say "later"; a decline says never. Reporting only
+  // the absent ones would leave a transfer that failed against a peer who stayed
+  // online with nothing scheduled to try it again.
   async function startSend(transferId, online = null) {
     if (!TRANSFER_ID.test(transferId || '')) {
       throw new Error('a malformed transfer id has nothing to send');
@@ -687,6 +726,7 @@ export function makeSessions(deps) {
           cooling.set(node, now() + cooldownMs);
           owed = true;
         }
+        if (result?.accepted === true && result.confirmed === false) owed = true;
       } catch (err) {
         cooling.set(node, now() + cooldownMs);
         owed = true;
@@ -707,22 +747,58 @@ export function makeSessions(deps) {
     }
   }
 
+  async function cancelReceive(transferId) {
+    if (!TRANSFER_ID.test(transferId || '')) {
+      throw new Error('a malformed transfer id has no receive session');
+    }
+    cancelledReceives.add(transferId);
+    const active = [...(receiving.get(transferId) || [])];
+    for (const entry of active) entry.cancel();
+    // A session still resolving identity or server metadata has not touched
+    // storage and checks the cancellation before it can do so. Once stage
+    // opening starts, join it and every worker write before cleanup proceeds.
+    await Promise.all(active.filter((entry) => entry.join).map((entry) => entry.done));
+  }
+
+  function resumeReceive(transferId) {
+    if (!TRANSFER_ID.test(transferId || '')) {
+      throw new Error('a malformed transfer id has no receive session');
+    }
+    cancelledReceives.delete(transferId);
+  }
+
+  // A successful Inbox snapshot is also the terminal-state authority for live
+  // receives. Service-worker declines and deletes from another device do not
+  // run this page's click handler, so they arrive here as an absent id.
+  async function reconcileReceives(activeTransferIds) {
+    const active = new Set(activeTransferIds);
+    await Promise.all([...receiving.keys()]
+      .filter((id) => !active.has(id))
+      .map((id) => cancelReceive(id)));
+  }
+
   async function acceptFrom(msg) {
-    const me = await identity();
-    const info = normalize(await api.transfer(msg.transfer));
-    // Two claims the relay cannot vouch for, checked against the server's own
-    // record: the offering peer has to be this transfer's sender, and this
-    // device has to be one of its recipients.
-    if (info.sender !== msg.from || info.sender === me) return;
-    if (info.to.length > 0 && !info.to.includes(me)) return;
+    if (cancelledReceives.has(msg.transfer)) return;
+    const transferId = msg.transfer;
+    let finish;
+    const entry = {
+      cancel: () => {},
+      join: false,
+      writes: new Set(),
+      done: new Promise((resolve) => { finish = resolve; }),
+    };
+    const entries = receiving.get(transferId) || new Set();
+    entries.add(entry);
+    receiving.set(transferId, entries);
 
     // No master key is needed to receive. Chunks arrive sealed and go to staging
     // as opaque bytes, so a locked device still takes delivery.
-    const stage = await openStage(info.id);
-    const controller = new AbortController();
-    const { links, close } = await withTimeout(
-      transport.accept(msg, controller.signal),
-      handshakeMs, 'the peer never opened a channel', () => controller.abort());
+    let info = null;
+    let me = null;
+    let stage = null;
+    let close = null;
+    let end = () => {};
+    let controller = null;
 
     // Set by a write the disk had no room for, and read once the session has
     // ended. A partial stage that can never be completed holds exactly the disk
@@ -731,8 +807,54 @@ export function makeSessions(deps) {
     let outOfRoom = false;
 
     try {
-      await untilClosed(channelsOf(links), receive(links, {
+      me = await identity();
+      info = normalize(await api.transfer(transferId));
+      // Two claims the relay cannot vouch for, checked against the server's own
+      // record: the offering peer has to be this transfer's sender, and this
+      // device has to be one of its recipients.
+      if (info.sender !== msg.from || info.sender === me) return;
+      if (info.to.length > 0 && !info.to.includes(me)) return;
+      if (cancelledReceives.has(transferId)) return;
+
+      entry.join = true;
+      stage = await openStage(info.id, info.cids);
+      if (cancelledReceives.has(info.id)) return;
+      controller = new AbortController();
+      entry.cancel = () => controller.abort();
+      const accepted = await withTimeout(
+        transport.accept(msg, controller.signal),
+        handshakeMs, 'the peer never opened a channel', () => controller.abort());
+      close = accepted.close;
+      let closed = false;
+      end = () => {
+        if (closed) return;
+        closed = true;
+        close();
+      };
+      entry.cancel = () => {
+        controller.abort();
+        end();
+      };
+      if (cancelledReceives.has(info.id)) {
+        entry.cancel();
+        return;
+      }
+
+      const track = async (promise) => {
+        const pending = Promise.resolve(promise);
+        entry.writes.add(pending);
+        try {
+          return await pending;
+        } finally {
+          entry.writes.delete(pending);
+        }
+      };
+
+      await untilClosed(channelsOf(accepted.links), receive(accepted.links, {
         onOffer: async (frame) => {
+          if (cancelledReceives.has(info.id)) {
+            return { accept: false, reason: 'transfer ended' };
+          }
           if (info.declined.includes(me)) return { accept: false, reason: 'declined' };
           // The offered chunk list has to be the one the server recorded for
           // this transfer. A peer offering a different one would have this
@@ -763,17 +885,30 @@ export function makeSessions(deps) {
           clearShortfall(info.id);
           return { accept: true };
         },
-        has: (i) => stage.has(i),
+        has: async (i) => {
+          if (cancelledReceives.has(info.id)) return false;
+          try {
+            const held = await track(stage.has(i));
+            return !cancelledReceives.has(info.id) && held;
+          } catch (err) {
+            // Cross-transfer reuse may have to copy a cached chunk into this
+            // transfer's own stage before it can safely answer held. A full disk
+            // during that copy leaves the same partial state as a received write.
+            if (err?.name === 'QuotaExceededError') outOfRoom = true;
+            throw err;
+          }
+        },
         onChunk: async (i, bytes) => {
           // An index outside the chunk list names no position in the bitmap, so
           // storing it would leave a file in the stage that nothing ever reads.
           if (!Number.isInteger(i) || i < 0 || i >= info.cids.length) return;
+          if (cancelledReceives.has(info.id)) return;
           // This is the one call in the module that writes to the origin private
           // file system. The stage answers it from a dedicated worker, since
           // createSyncAccessHandle is not callable from the page, so the bytes
           // are handed over here and the write is done by the time it resolves.
           try {
-            await stage.put(i, bytes);
+            await track(stage.put(i, bytes));
           } catch (err) {
             // A full disk is not a retryable write, and it is the one failure
             // the browser reports with no prompt and no way for the owner to
@@ -785,15 +920,29 @@ export function makeSessions(deps) {
         },
       }), 'the connection dropped mid-transfer');
     } finally {
-      close();
-      // Emptied before the bitmap is written, so what is recorded is what this
-      // device actually still holds. The other order would tell the sender that
-      // positions are landed and then delete them.
-      if (outOfRoom) {
-        await stage.clear().catch(
-          (err) => console.warn('the partial stage was not cleared', err));
+      end();
+      // A close can win untilClosed while a worker write that began from the
+      // last frame is still running. Joining those writes is the guarantee the
+      // terminal action needs before it recursively removes the directory.
+      await Promise.allSettled([...entry.writes]);
+      const current = receiving.get(transferId);
+      current?.delete(entry);
+      if (current?.size === 0) receiving.delete(transferId);
+      finish();
+      if (info && !cancelledReceives.has(transferId) && stage) {
+        // Emptied before the bitmap is written, so what is recorded is what this
+        // device actually still holds. The other order would tell the sender that
+        // positions are landed and then delete them.
+        if (outOfRoom) {
+          await stage.clear().catch(
+            (err) => console.warn('the partial stage was not cleared', err));
+        }
+        await writeProgress(info, stage);
+        // The server announced this transfer before peer delivery began. Tell
+        // the mounted Inbox when local reachability changes so Save appears as
+        // soon as the last staged chunk lands, including after a partial session.
+        announceTransferChange();
       }
-      await writeProgress(info, stage);
     }
   }
 
@@ -860,8 +1009,33 @@ export function makeSessions(deps) {
   async function drainOnce() {
     let queued;
     let here;
+    let cleanupCandidates;
+    let hasCleanupSnapshot = false;
+    // Take this serialized local snapshot before starting the server read. A
+    // transfer registered while that GET is in flight belongs to the next
+    // generation and must not be reclaimed by this response.
+    try {
+      cleanupCandidates = await snapshotOutboundStages();
+      hasCleanupSnapshot = true;
+    } catch (err) {
+      // Sending can continue without local reclamation. A later drain will take
+      // another snapshot and retry after IndexedDB becomes available.
+      console.warn('outbound stages could not be snapshotted', err);
+    }
     try {
       queued = await api.queue();
+      if (hasCleanupSnapshot) {
+        try {
+          await reconcileOutboundStages(
+            cleanupCandidates,
+            new Set(queued.map((info) => info.id)),
+          );
+        } catch (err) {
+          // The queue remains usable when IndexedDB cleanup is unavailable. A
+          // remembered terminal stage stays registered, so a later drain retries.
+          console.warn('terminal outbound stages were not reconciled', err);
+        }
+      }
       if (queued.length === 0) {
         schedulePoll(false);
         return;
@@ -927,7 +1101,10 @@ export function makeSessions(deps) {
     return shortfalls.get(transferId) || 0;
   }
 
-  return { startSend, handleSignal, drainQueue, shortfallFor, onStorageNote };
+  return {
+    startSend, handleSignal, drainQueue, shortfallFor, onStorageNote, onTransferChange,
+    cancelReceive, resumeReceive, reconcileReceives,
+  };
 }
 
 // The app's own instance. Its identity is read once and cached: it names this
@@ -952,8 +1129,16 @@ const live = makeSessions({
   receive,
   loadMaster,
   identity,
+  snapshotOutboundStages: snapshotRecordedOutboundStages,
+  reconcileOutboundStages: (candidates, active) => reconcileRecordedOutboundStages(
+    candidates,
+    active,
+    { openStage },
+  ),
+  forgetOutboundStage: forgetRecordedOutboundStage,
 });
 
 export const {
-  startSend, handleSignal, drainQueue, shortfallFor, onStorageNote,
+  startSend, handleSignal, drainQueue, shortfallFor, onStorageNote, onTransferChange,
+  cancelReceive, resumeReceive, reconcileReceives,
 } = live;

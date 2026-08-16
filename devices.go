@@ -67,6 +67,14 @@ func NewDevices(dir string, defaultAllow bool) (*Devices, error) {
 // device is recorded whether or not it is allowed, so the pairing screen can
 // offer it for approval.
 func (d *Devices) Seen(node, user, addr string) Device {
+	dev, _ := d.seen(node, user, addr)
+	return dev
+}
+
+// seen also reports whether this call registered the node. The HTTP identity
+// boundary uses that edge to wake an already-open approval roster; the public
+// Seen method keeps its original caller-facing shape.
+func (d *Devices) seen(node, user, addr string) (Device, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -92,7 +100,7 @@ func (d *Devices) Seen(node, user, addr string) Device {
 	if err := d.saveLocked(); err != nil {
 		log.Printf("devices: persisting %s failed: %v", node, err)
 	}
-	return dev
+	return dev, !ok
 }
 
 // SaveErr reports the most recent persistence failure, or nil if the last write

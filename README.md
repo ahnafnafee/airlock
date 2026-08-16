@@ -21,7 +21,7 @@ One Go binary and an installable web app. No accounts, no cloud, no public port.
 
 > \[!IMPORTANT]
 >
-> Airlock is under active construction, and this file distinguishes what runs from what is designed. Sending and receiving work end to end today, through the server. The direct device-to-device channel that the design now centers on sends but does not yet finish receiving: a transfer delivered that way reaches the recipient's device and cannot be saved there yet. [Status](#-status) says which task is where.
+> Airlock is under active construction, and this file distinguishes what runs from what is designed. Sending, receiving, assembling and saving work end to end through both the direct device-to-device path and the optional server-held path. Platform checks that require macOS, Linux, iOS, Android or two physical tailnet devices remain explicitly unverified. [Status](#-status) says which work is software-complete and which still needs hardware.
 
 <details>
 <summary><kbd>Table of contents</kbd></summary>
@@ -73,7 +73,7 @@ Leave it alone, which is the default, and the sealed chunks are written to this 
 
 A direct transfer has to name a device. It is offered to the devices in **To** and to nobody else, so **All my devices** is a choice only the held path can honor: there the transfer sits in the queue and every device sees it in its own inbox. Ask for both at once and the Send view refuses before anything is sealed, and says which of the two controls to change.
 
-> **Where the code actually is.** The sending half of the direct channel is built: presence, the opaque signalling relay, the per-recipient progress bitmaps, local staging, the data channel, the session orchestration, and the checkbox that routes between the two. The receiving half stops one step short. A directly delivered transfer lands in the recipient's staging area, and assembling it back into a file the browser can save is task 43, so until that lands, receiving still means holding the transfer on the server.
+> **Where the code actually is.** Both halves of the direct channel are built: presence, opaque signalling, per-recipient progress bitmaps, local staging, the data channel, session orchestration, authenticated assembly into a disk-backed file, and the browser export cascade. **Hold on the server if I go offline** is now a delivery choice, not a requirement for receiving.
 
 <div align="right">
 
@@ -108,9 +108,9 @@ Airlock is a tailnet node in its own right rather than something hiding behind a
 
 - A `*.ts.net` TLS certificate every device already trusts, with no warnings and no CA to install
 - A hostname that resolves only on your tailnet, through MagicDNS
-- `WhoIs()` on every single request, returning the WireGuard-verified node and user behind the connection
+- `WhoIs()` on every API request that carries identity or state, returning the WireGuard-verified node and user behind the connection
 
-That last one is the actual authorization primitive, and nothing outside your tailnet can forge it. Every route is gated, static assets included. There is deliberately no unauthenticated path. Above the tailnet allowlist sits a device registry, consulted on every request, so revoking a device takes effect on its next call with no restart and no cached decision to expire.
+That last one is the actual authorization primitive, and nothing outside your tailnet can forge it. The app shell and its embedded static assets are intentionally available to any caller that can reach the listener: an unapproved device needs them to render its pairing screen, and a module service worker fetches its script without the session cookie. Those files are identical for every caller and contain no device or transfer state. Every API that does carry state is identity-gated, and every API beyond the pairing status is also checked against the device registry on each request, so revoking a device takes effect on its next call with no restart and no cached decision to expire.
 
 Two modes reach the tailnet. `host` serves through the machine's own running tailscaled, which owns the kernel TUN path. `embedded` joins as its own `tsnet` node and needs nothing installed. Host is the default, for reasons that are argued rather than measured; see [Measured](#-measured).
 
@@ -131,13 +131,12 @@ Files are split by content, not by offset. Each chunk is stored under an id deri
 | **Dedup** | Identical chunks produce identical ids, so one copy is stored and one copy is sent |
 | **Delta sync** | An edited file shares most ids with its old version, so only the changed parts move |
 | **Resume after a drop** | Ask which ids are present, send the rest |
-| **Resume after a reload** | The same question. Re-chunking is deterministic, so no client state has to survive |
 
-That last row is why the design is worth its complexity. Nothing is persisted in the browser to make resume work: close the tab mid-upload, reopen, pick the same file, and it continues.
+Resume here means a network drop while the transfer remains queued. Full-page-reload resume during file preparation is deliberately deferred: once a direct transfer is queued its stage survives a reload, but an interrupted preparation starts again when the file is picked again.
 
 Boundaries come from a rolling hash rather than fixed offsets, because fixed offsets defeat delta sync entirely: inserting one byte at the front shifts every later boundary and invalidates every chunk.
 
-Downloads are handled by the service worker, which fetches, decrypts, and hands the browser a streaming response with a real `Content-Disposition`. The browser saves it natively, with its own progress bar, streaming to disk. A 20 GB file never sits in memory, on either end.
+Received chunks are authenticated and decrypted into one disk-backed file in the origin private file system. Export then uses the browser's save picker, a native download, the share sheet, or keeps the file ready for another tap. Assembly stays memory-flat with file size: only a bounded number of chunks are in memory, so a 20 GB file is not buffered as one object.
 
 The honest cost is stated in full under [what this does not protect against](#what-this-does-not-protect-against): equality between chunks is visible to whoever holds them.
 
@@ -350,7 +349,7 @@ The failures that have actually been hit, and what each one means.
 | --- | --- |
 | Bind fails on 443 | Something else holds it, commonly `tailscale serve`. Use `--port 4443` |
 | Bind fails with a permission error on a port that looks free | On Windows another process holds it with exclusive use, which Winsock reports as access denied. Bind-test rather than trusting `netsh` |
-| Every request returns 403, including static files | The request arrived over loopback. Reach Airlock by its tailnet name, not through a local proxy |
+| The shell loads but reports `not authorized` | The identity-bearing API request arrived over loopback. Reach Airlock by its tailnet name, not through a local proxy |
 | TLS fails on every connection | HTTPS Certificates is off in the admin console |
 | The host cannot resolve its own name | `tailscale set --accept-dns=true` |
 
@@ -370,7 +369,7 @@ cd airlock
 
 go vet ./...
 go test ./...
-go test -bench=. -run='^$' ./...
+go test -bench='.' -run='^$' ./...
 node --test "web/**/*.test.mjs"
 ```
 
@@ -386,7 +385,7 @@ The three checks that matter most, because these are the ones whose failure look
 
 1. `node --test web/crypto.test.mjs` must refuse a chunk opened under the wrong id, a corrupted chunk, a truncated hash list, and a record spliced in from another transfer or another domain. If any of those open, a transfer can be tampered with undetectably.
 2. A chunk file under `data/chunks/` must be unreadable. If `cat` shows your file, encryption is not actually in the path.
-3. A non-allowlisted tailnet node must get 403 on every route, static assets included.
+3. An unauthenticated caller may load only the stateless shell and assets. It must get 403 from `/api/whoami` and every stateful API; an identified but unapproved device may additionally read only its own pairing status until another device approves it.
 
 <div align="right">
 
@@ -403,7 +402,7 @@ The three checks that matter most, because these are the ones whose failure look
       |         https://<node>.<tailnet>.ts.net          |
       +---------------- WireGuard / TLS -----------------+
       |                                                  |
-      +-- direct tailnet channel, sends, not yet saved --+
+      +---- direct tailnet channel, staged and saved ----+
 
         data/chunks/<ab>/<cid>       sealed, content addressed
         data/transfers/<id>/         records and the sealed list
@@ -425,14 +424,14 @@ The server may run anywhere on the tailnet, including a machine that is also a c
 | `events.go` | The server-sent nudge stream |
 | `web/cdc.js` | Content-defined chunk boundaries |
 | `web/crypto.js` | Key hierarchy, convergent sealing, record domains |
-| `web/upload.js` | Two-pass send, to local staging by default or to the server on request |
+| `web/upload.js` | Direct one-pass staging and held two-pass upload |
 | `web/staging.js` | Sealed chunks on the device's own disk, between sessions |
 | `web/peer.js`, `web/session.js` | The direct channel, and the queue that drives it |
 | `web/thumb.js` | Sealed thumbnails from a canvas |
 | `web/api.js`, `web/app.js`, `web/strip.js` | Typed API wrapper, shell and routing, the status strip |
 | `web/ios.js` | The install gate, the storage preflight, and the Home Screen badge |
 | `web/views/*.js` | One module per view: send, inbox, history, devices |
-| `web/sw.js` | Decrypt-on-download, push, share target |
+| `web/sw.js` | Push, share target, and the legacy download fallback |
 
 Exactly two Go dependencies, `tailscale.com` and `webpush-go`. Everything else is the standard library. The frontend has zero dependencies and no build step.
 
@@ -450,11 +449,13 @@ Full method, machine and caveats in [docs/benchmarks.md](./docs/benchmarks.md). 
 
 **Does `host` beat `embedded`? Not measured.** The comparison needs a real tailnet and two devices, and it has not been run. The default rests on an argument: the daemon owns the kernel TUN path and the TSO, GRO, GSO and `mmsg()` work that got Tailscale's userspace WireGuard past 10 Gb/s, none of which the in-process netstack has, and [an open upstream issue](https://github.com/tailscale/tailscale/issues/9707) reports `tsnet` running roughly 8 to 9 times slower. That argument is why `host` is the default; it is not evidence, and the default should not be defended as though it were. The benchmark file carries the exact commands, the traps that would turn the run into a measurement of nothing, and the empty table waiting for it.
 
-**Is the plaintext toggle worth anything? Measured, and no.** On a desktop i9-14900K, sealing costs 0.572 ms per MiB more than plaintext. Almost all of that is already hidden: the uploader runs four chunks in flight, so the AES-GCM overlaps the network and would only surface on a link past about 12 gigabits. What does not overlap is the first pass, which hashes the whole file before the transfer can be created, and hashing happens in both modes. Turning sealing off removes 0.106 ms per MiB from the critical path, about a tenth of a second per gigabyte, which is well under one percent of a transfer on any tailnet link.
+**Is disabling sealing worth anything? Measured, and no.** On a desktop i9-14900K, sealing costs 0.572 ms per MiB more than the internal plaintext benchmark control. Almost all of that is already hidden: the uploader runs four chunks in flight, so the AES-GCM overlaps the network and would only surface on a link past about 12 gigabits. What does not overlap is the first pass, which hashes the whole file before the transfer can be created, and hashing happens in both modes. Turning sealing off in the benchmark removes 0.106 ms per MiB from the critical path, about a tenth of a second per gigabyte, which is well under one percent of a transfer on any tailnet link.
 
-So the toggle is not a performance setting, and the interface never presents it as one. Turning it off buys a rounding error and gives up the entire threat model, so the control is labeled by what it does to secrecy and its off state states the consequence plainly.
+The product therefore has no sealing toggle. Every transfer created by the Send view is sealed. Plaintext mode remains only as an internal benchmark and protocol-refusal fixture, where it measures the cost of the security boundary without offering a path around it.
 
 Both crypto figures are floors rather than browser costs: they were taken under Node against the app's own unmodified `web/crypto.js`, so they include the real cipher work but not the page's overhead. Every one of them came off a desktop CPU, and a phone is both the thinnest case and the common sending device, which is the open question that file leaves behind.
+
+The direct path now measures about 19 MB/s on this machine against a raw browser data-channel ceiling of about 20 MB/s. The local chunker delivers about 1.09 GB/s after removing its repeated 8 MiB window rebuild, and the server stores a target-sized 1 MiB chunk at roughly 550 MB/s. On the tested machine, neither chunking, sealing nor server storage limits the direct transfer; the browser's WebRTC transport does. Two-machine, mobile and non-Chromium results still require the hardware named in [the benchmark notes](./docs/benchmarks.md).
 
 <div align="right">
 
@@ -484,7 +485,7 @@ Stated because a security section that only lists wins is not a threat model.
 - **A device that holds the passphrase.** There is one key for everything and no per-device key. Any device that has been unlocked can read every transfer, past and future, and can compute chunk ids from plaintext. Revoking a device in the registry stops it reaching the server; it does not unlearn the key already in its IndexedDB, and it does not make a copy of the ciphertext it already took unreadable. Rotating means choosing a new passphrase on every device, and anything still sealed under the old one becomes unopenable.
 - **Traffic analysis.** Chunk ids, ciphertext sizes, chunk counts, sender, recipients and timestamps are plaintext by necessity, because the server routes and quotas on them. Sizes are not padded and timing is not smoothed.
 - **A hostile server denying service.** Integrity is authenticated; availability is not. A compromised host can delete transfers, withhold chunks, or refuse to serve, and a client will notice but cannot prevent it. A corrupted chunk fails its GCM tag rather than producing a damaged file, which is the failure mode worth having.
-- **Plaintext mode.** With the seal checkbox off, whatever holds your bytes holds them as they are. Direct delivery refuses an unsealed transfer, because the receiving device checks the seal before it takes an offer, so this is reachable only by also holding the transfer on the server. The interface says so in `--breach`, and nothing here softens it.
+- **The internal plaintext fixture.** `MODE_PLAIN` remains in the crypto module for benchmarks and refusal tests, but the product UI never selects it. A forged unsealed transfer is labeled unsafe and cannot be saved by the Inbox.
 - **A tailnet member you allowlisted.** The gate is the tailnet plus the registry. Anyone you admit is inside the model, not outside it.
 - **A compromised browser or device.** Plaintext and the master key exist in the client by construction. An extension in the app's origin, or malware on the machine, reads both.
 
@@ -507,13 +508,13 @@ Built task by task from [the implementation plans](./docs/superpowers/plans/), a
 | 13 | Scope inbox, history and deletion to the caller | ✅ Done |
 | 14 | Web Push | ✅ Done |
 | 15 | Thumbnails | ✅ Done |
-| 16 | Devices view and pairing | ✅ Done |
+| 16 | Devices view and allowlist approval | ✅ Done |
 | 17 | History view | ✅ Done |
 | 18 | PWA install, share target and file handlers | ✅ Done |
 | 19 | Server-sent events and a live inbox | ✅ Done |
 | 20 | Relays | ❌ Cancelled |
 | 21 | Android shell | ❌ Cancelled |
-| 22 | Throughput benchmark and the plaintext toggle | ✅ Done |
+| 22 | Throughput benchmark and the sealing decision | ✅ Done |
 | 23 | Deployment and hardening | ✅ Done |
 | 24 | Declining a transfer | ✅ Done |
 | 25 | Rich notifications with accept and decline | ✅ Done |
@@ -524,6 +525,18 @@ Built task by task from [the implementation plans](./docs/superpowers/plans/), a
 | 30 | The direct channel | ✅ Done |
 | 31 | Session orchestration | ✅ Done |
 | 32 | Hold-for-me, the one server-storage path | ✅ Done |
+| 33 | Keep the device awake during a transfer | ✅ Done |
+| 34 | Parallel links, unordered channels and fragmentation | ✅ Done |
+| 35 | Parallel sealing in one pass over the file | ✅ Done |
+| 36 | Measure the transfer pipeline | ✅ Done |
+| 37 | Run with platform defaults and no required flags | ✅ Done |
+| 38 | Windows file sharing | ✅ Done |
+| 39 | Install on Windows, Linux and macOS | ✅ Built, hardware checks remain |
+| 40 | Verify platform-specific behavior | ⚠ Hardware checks remain |
+| 41 | Accept files and folders | ✅ Superseded and completed by task 44 |
+| 42 | iOS behavior and safeguards | ✅ Built, hardware checks remain |
+| 43 | Assemble and export a directly received file | ✅ Done |
+| 44 | Browser-specific inbound file handling | ✅ Done |
 
 Two tasks were cancelled outright rather than deferred.
 
@@ -531,11 +544,11 @@ Two tasks were cancelled outright rather than deferred.
 
 **The Android shell** existed for one capability a web app cannot provide: writing a received file to disk with the app closed. Its price was a second implementation of the crypto, and drift between two implementations does not fail loudly, it produces files that download successfully and will not open. Notification then tap costs a second and buys exactly one place where encryption happens.
 
-**Designed, not yet built,** tasks 33 to 43: the screen wake lock, parallel connections with fragmentation, parallel sealing in a single pass over the file, the throughput measurement, running with no flags anywhere, Windows file sharing, installing it anywhere, verifying what is still unverified, accepting dropped folders, and assembling a directly delivered transfer back into a file the browser saves.
-
-That last one is the gap worth naming twice. A transfer that crosses directly lands in the recipient's staging area and stops there, so until task 43 lands, **Hold on the server if I go offline** is what actually gets a file onto the other machine.
+Tasks 33 through 44 are implemented, including direct receive and save, folder drops, zero-byte files, worker-based sealing and the measured transfer pipeline. Task 40 is a hardware checklist rather than missing application code.
 
 **iOS is built and unverified.** The install gate, the storage preflight, the announcement-only notification and the Home Screen badge are all written, and not one line of it has been run on an iPhone. [docs/platform-notes.md](./docs/platform-notes.md) holds the six questions a real device has to answer before any of this is stated as fact.
+
+**Key handoff between devices is still a product decision.** Device allowlisting and approval work, but a newly approved device still types the existing master passphrase. The documented replacement is ECDH with a six-digit comparison; implementation waits on the recovery choice for the case where every paired device is lost. See [the pairing requirement](./docs/superpowers/specs/2026-08-16-pairing-key-agreement-requirement.md).
 
 **Deliberately not built:** accounts, sharing outside your own tailnet, public links, and any server-side view of plaintext.
 

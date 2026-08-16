@@ -1,5 +1,5 @@
 import {
-  MODE_SEALED, deriveMaster, makeCheck, verifyCheck,
+  deriveMaster, makeCheck, verifyCheck,
   saveMaster, loadMaster, b64decode, kvGet, kvPut,
 } from './crypto.js';
 import { api, ApiError } from './api.js';
@@ -7,7 +7,7 @@ import { requestPersistence } from './staging.js';
 import { observeCapabilities } from './inbound.js';
 import { inboundTo, needsInstallGate, setBadge } from './ios.js';
 
-export const state = { mk: null, mode: MODE_SEALED, config: null, me: null };
+export const state = { mk: null, config: null, me: null };
 
 const views = new Map();
 const $ = (id) => document.getElementById(id);
@@ -31,7 +31,7 @@ export function el(tag, attrs = {}, ...children) {
 // A view registers a mount function and gets its own container. Views never
 // know about each other.
 export function registerView(name, title, mount) {
-  const panel = el('div', { hidden: true });
+  const panel = el('div', { hidden: true, 'data-view': name });
   $('views').append(panel);
   views.set(name, { title, mount, panel, mounted: false });
 
@@ -61,6 +61,23 @@ export function showView(name) {
   if (location.hash.slice(1) !== name) location.hash = name;
 }
 
+// Pairing is the server-side statement that this approved device has acquired
+// the master key. The key is saved before this request, so a temporary outage
+// must not turn one failed marker into a permanent state: the next boot sees
+// paired=false and calls this again. A successful write updates the in-memory
+// identity as well, so recipient pickers in this session can trust it.
+export async function ensurePaired(me = state.me, mark = () => api.markPaired()) {
+  if (!me || me.paired) return true;
+  try {
+    await mark();
+    me.paired = true;
+    return true;
+  } catch (err) {
+    console.warn('this device could not be marked paired', err);
+    return false;
+  }
+}
+
 async function unlock(passphrase) {
   const candidate = await deriveMaster(passphrase, state.config.salt);
 
@@ -84,8 +101,42 @@ async function unlock(passphrase) {
 
   state.mk = candidate;
   await saveMaster(candidate);
-  await api.markPaired().catch(() => {});
+  await ensurePaired();
   return true;
+}
+
+// The chamber equalizing: the one moment of motion in this product that is not
+// reporting a transfer. It runs once, between the passphrase being accepted and
+// the app appearing, and it is where the strip's vocabulary is taught. A person
+// sees a row of segments fill with the color that means "sealed" before they
+// have sent anything, so the first real strip is already legible.
+//
+// It never blocks entry. Anything that goes wrong here resolves and the app
+// opens, because an animation is not worth a locked-out device.
+async function equalize() {
+  const stage = $('equalize');
+  if (!stage) return;
+  const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  try {
+    const { renderStrip } = await import('./strip.js');
+    stage.hidden = false;
+    // Built at the width it will animate at, so the count is the count the
+    // strip would really have.
+    renderStrip(stage, 64, { seam: true, label: 'Sealing' });
+    const segs = [...stage.querySelectorAll('.seg')];
+    // Left to right, the direction a chunk list is read in.
+    segs.forEach((seg, i) => { seg.style.animationDelay = `${i * 6}ms`; });
+    stage.classList.add('running');
+    if (!still) await new Promise((r) => setTimeout(r, segs.length * 6 + 320));
+    stage.classList.add('done');
+    if (!still) await new Promise((r) => setTimeout(r, 180));
+  } catch (err) {
+    console.warn('the equalize animation did not run', err);
+  } finally {
+    stage.hidden = true;
+    stage.className = '';
+    stage.replaceChildren();
+  }
 }
 
 function enterApp() {
@@ -180,10 +231,23 @@ async function startSessions() {
 
 const listeners = new Set();
 const signalListeners = new Set();
+const deviceListeners = new Set();
 
 // A view calls this to be told when something arrives. The event carries no
 // detail, so the handler re-reads whatever it needs.
 export function onInbox(fn) { listeners.add(fn); }
+
+// Repaint state changed by this page itself. Server upload announcements still
+// exclude their sender, so this stays in-process and cannot produce a push or a
+// duplicate arrival notification on the device that sent the file.
+export function notifyInbox() {
+  for (const fn of listeners) fn();
+}
+
+// Approval, revocation and pairing completion change which devices can receive
+// a transfer. They have their own event so an idle Send view can repaint the
+// recipient picker without waiting for an unrelated file to arrive.
+export function onDevices(fn) { deviceListeners.add(fn); }
 
 // A signal is the opposite: it carries the whole payload, because a session
 // description has nowhere else to be read from.
@@ -251,10 +315,15 @@ export function listen() {
       // listeners re-read whatever they need, so running them with no event in
       // hand is a catch-up rather than a lie about something having arrived.
       for (const fn of listeners) fn();
+      for (const fn of deviceListeners) fn();
     });
 
     source.addEventListener('inbox', () => {
       for (const fn of listeners) fn();
+    });
+
+    source.addEventListener('devices', () => {
+      for (const fn of deviceListeners) fn();
     });
 
     // The payload is base64 because an SSE data field ends at the first newline
@@ -434,6 +503,7 @@ async function boot() {
   if (stale) state.mk = null;
 
   if (state.mk && state.config.check !== null) {
+    await ensurePaired();
     enterApp();
     return;
   }
@@ -449,7 +519,10 @@ async function boot() {
     e.preventDefault();
     $('unlock-error').textContent = '';
     try {
-      if (await unlock($('passphrase').value)) enterApp();
+      if (await unlock($('passphrase').value)) {
+        await equalize();
+        enterApp();
+      }
       else $('unlock-error').textContent =
         'That passphrase does not match the one this server was set up with.';
     } catch (err) {

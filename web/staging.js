@@ -190,9 +190,12 @@ export async function openStage(transferId) {
     // minted during preparation that lives only inside that transfer's sealed
     // meta record, and the server never learns it, so it can never report it.
     // The live set is the union of the transfer ids this device is receiving
-    // and the stage field read out of the sealed meta record of every transfer
-    // this device sent, which means a sweep has to open those records before it
-    // may drop anything. It must also spare a directory belonging to a
+    // and, for every transfer this device sent, the stage id its sealed meta
+    // record carries, falling back to that transfer's own id when the field is
+    // absent or malformed, which is how stageOf resolves it on the send path
+    // and is where a transfer prepared before the field existed staged. So a
+    // sweep has to open those records, and honor that fallback, before it may
+    // drop anything. It must also spare a directory belonging to a
     // preparation still in flight, whose record does not exist yet. A sweep
     // that skipped either step would delete the sealed chunks of every queued
     // transfer still waiting to be delivered.

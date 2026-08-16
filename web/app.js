@@ -269,12 +269,20 @@ export function listen() {
     });
 
     source.addEventListener('error', () => {
+      if (retired) return;
+      // Every failure means a gap, whoever closes it. EventSource repairs a
+      // transient drop by itself and says nothing about it, so a catch-up armed
+      // only on the failures this code handles would skip exactly the common
+      // case: a server restart, after which the stream comes back on its own
+      // and every nudge sent during the gap is simply gone. A queued transfer
+      // would then sit undelivered with both devices online, because the drain
+      // that failed while the server was down is never retried.
+      missed = true;
       // CONNECTING means EventSource is already handling it and a second stream
       // would only duplicate the first. CLOSED is the state it will not leave
-      // on its own, and the only one worth reopening from.
-      if (retired || source.readyState !== STREAM_CLOSED) return;
+      // on its own, and the only one worth reopening from here.
+      if (source.readyState !== STREAM_CLOSED) return;
       retired = true;
-      missed = true;
       stream.wait(open, retryDelay(attempt++));
     });
   };

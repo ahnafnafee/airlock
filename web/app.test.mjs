@@ -215,3 +215,28 @@ test('the delay doubles to a ceiling and stays there', () => {
   // setTimeout can honor.
   assert.ok(Number.isFinite(high(2000)));
 });
+
+// EventSource repairs a transient drop by itself and reports nothing about it,
+// which is what a server restart looks like from the page. A catch-up armed
+// only on the failures this code reopens from would skip that case entirely,
+// and every nudge sent during the gap is gone: a queued transfer then sits
+// undelivered with both devices online, because the drain that failed while the
+// server was unreachable is never retried.
+test('a stream that heals itself still catches up on what it missed', () => {
+  const s = fakeStream();
+  let caughtUp = 0;
+  onInbox(() => { caughtUp++; });
+  listen();
+
+  const source = s.last();
+  source.connect();
+  caughtUp = 0;
+
+  // The browser reports the failure and then repairs it on its own, so the
+  // stream never reaches the state this code reopens from.
+  source.blip();
+  assert.equal(s.waits.length, 0, 'a self-healing stream needs no reopen scheduled');
+
+  source.connect();
+  assert.equal(caughtUp, 1, 'the gap was never closed, so nothing re-read the inbox');
+});

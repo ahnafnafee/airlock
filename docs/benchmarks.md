@@ -73,11 +73,21 @@ referenced by one live transfer.
 | Sweep, 5,000 chunks | 63,319,344 | 4.00 MB | 28,441 |
 
 63 ms for 5,000 chunks is about 12.7 us per chunk, and it is linear in the store
-size by construction. Against the hourly sweep interval this has four orders of
-magnitude of headroom: the sweep would need roughly 280 million chunks before it
-outlasted its own interval. The `ponytail:` note on `ChunkStore.Sweep` proposes
-moving to per-chunk refcounts if the sweep ever outlasts its interval. It will
-not, at any store size a personal node reaches, so that note can stay parked.
+size by construction. Against the hourly sweep interval that is four orders of
+magnitude of headroom: on time alone the sweep would need roughly 280 million
+chunks before it outlasted its own interval.
+
+Time is not the binding constraint, though, and the same benchmark says so. At
+4.00 MB per sweep over 5,000 chunks, the reference set costs about 800 bytes per
+chunk, because `Referenced()` materializes every id as a string in a map before
+`Sweep` walks anything. A store large enough to make the sweep slow would need
+hundreds of gigabytes to mark. Memory runs out first, by a wide margin.
+
+The `ponytail:` note on `ChunkStore.Sweep` proposes moving to per-chunk
+refcounts if the sweep ever outlasts its interval. On the trigger it names it
+can stay parked, since no personal node reaches a store where 63 ms per 5,000
+chunks becomes an hour. The trigger worth watching instead is the mark set's
+footprint, which is the number that grows first.
 
 ## 2. Browser sealing pipeline, measured on Node
 

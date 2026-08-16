@@ -10,9 +10,17 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 )
+
+// A push service that accepts the connection and then never answers would
+// otherwise hold the request open forever: the default transport bounds the dial
+// and the TLS handshake but never the response, and webpush-go supplies a client
+// with no timeout of its own. One unanswered endpoint must cost a bounded wait,
+// not a permanently stuck send.
+const pushTimeout = 10 * time.Second
 
 type subscription struct {
 	Node string               `json:"node"`
@@ -31,13 +39,14 @@ type Pusher struct {
 	dir     string
 	subject string
 	keys    vapidKeys
+	client  *http.Client
 
 	mu   sync.Mutex
 	subs []subscription
 }
 
 func NewPusher(dir, subject string) (*Pusher, error) {
-	p := &Pusher{dir: dir, subject: subject}
+	p := &Pusher{dir: dir, subject: subject, client: &http.Client{Timeout: pushTimeout}}
 
 	// Only a genuinely absent file may be replaced. Any other read failure is
 	// reported rather than treated as "no keys yet", because generating a fresh
@@ -141,28 +150,50 @@ func (p *Pusher) targets(recipients []string, sender string) []subscription {
 // payload: the filename lives behind the encryption boundary and this message
 // travels through a third-party push service, so the worker fetches and
 // decrypts the name locally instead.
+//
+// The sends run concurrently because they are independent, and because a device
+// must not have its wake-up delayed by whatever another device's push service is
+// doing. Each one carries its own deadline, so a silent endpoint costs one
+// bounded wait on its own goroutine rather than everybody else's notification.
 func (p *Pusher) Notify(recipients []string, sender string) {
-	var dead []string
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		dead []string
+	)
+	// ponytail: one goroutine per subscribed device, unbounded. A tailnet holds a
+	// handful of personal devices, so the fan-out is a handful of stalled requests
+	// at worst. If the device list ever grows past that, feed the sends through a
+	// worker pool instead of spawning per target.
 	for _, s := range p.targets(recipients, sender) {
-		sub := s.Sub
-		res, err := webpush.SendNotification([]byte("{}"), &sub, &webpush.Options{
-			Subscriber:      p.subject,
-			VAPIDPublicKey:  p.keys.Public,
-			VAPIDPrivateKey: p.keys.Private,
-			TTL:             3600,
-		})
-		if err != nil {
-			log.Printf("push to %s: %v", s.Node, err)
-			continue
-		}
-		res.Body.Close()
-		// The push service is the authority on whether an endpoint still exists.
-		// These two codes mean it is gone for good, as opposed to a transient
-		// failure, so the entry is dropped rather than retried forever.
-		if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusGone {
-			dead = append(dead, sub.Endpoint)
-		}
+		wg.Add(1)
+		go func(s subscription) {
+			defer wg.Done()
+			sub := s.Sub
+			res, err := webpush.SendNotification([]byte("{}"), &sub, &webpush.Options{
+				HTTPClient:      p.client,
+				Subscriber:      p.subject,
+				VAPIDPublicKey:  p.keys.Public,
+				VAPIDPrivateKey: p.keys.Private,
+				TTL:             3600,
+			})
+			if err != nil {
+				log.Printf("push to %s: %v", s.Node, err)
+				return
+			}
+			res.Body.Close()
+			// The push service is the authority on whether an endpoint still
+			// exists. These two codes mean it is gone for good, as opposed to a
+			// transient failure, so the entry is dropped rather than retried
+			// forever.
+			if res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusGone {
+				mu.Lock()
+				dead = append(dead, sub.Endpoint)
+				mu.Unlock()
+			}
+		}(s)
 	}
+	wg.Wait()
 	if len(dead) > 0 {
 		p.prune(dead)
 	}

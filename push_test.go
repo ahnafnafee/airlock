@@ -1,6 +1,16 @@
 package main
 
-import "testing"
+import (
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	webpush "github.com/SherClockHolmes/webpush-go"
+)
 
 func TestVapidKeysPersistAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
@@ -123,6 +133,81 @@ func TestTargetsExcludeTheSenderAndRespectAddressing(t *testing.T) {
 			t.Fatal("the sender must never be notified of its own upload")
 		}
 	}
+}
+
+// A push service that accepts the connection and never answers must cost one
+// device its notification, not the whole tailnet its notifications. Without a
+// deadline on the request the send never returns, and without concurrent sends
+// every device behind the silent one in the list waits on it forever. Neither
+// failure logs anything, and neither can be pruned, because nothing ever errors.
+func TestNotifySurvivesAnEndpointThatNeverAnswers(t *testing.T) {
+	p, err := NewPusher(t.TempDir(), "mailto:test@invalid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.client.Timeout <= 0 {
+		t.Fatal("the push client must carry a deadline; webpush-go's default client has none")
+	}
+	p.client = &http.Client{Timeout: 250 * time.Millisecond}
+
+	block := make(chan struct{})
+	stalled := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-block
+	}))
+	t.Cleanup(func() { close(block); stalled.Close() })
+
+	reached := make(chan struct{}, 1)
+	live := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reached <- struct{}{}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(live.Close)
+
+	// Built directly rather than through Subscribe, which requires https of a
+	// caller-supplied endpoint. What is under test is the send, and the stalled
+	// device deliberately sits ahead of the live one.
+	p.subs = []subscription{
+		testSubscription(t, "stalled", stalled.URL),
+		testSubscription(t, "live", live.URL),
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		p.Notify(nil, "sender")
+		close(returned)
+	}()
+
+	select {
+	case <-reached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the live device was never woken: a silent endpoint must not hold up the rest")
+	}
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Notify never returned: the send has no deadline")
+	}
+}
+
+// A subscription webpush-go will actually encrypt for: p256dh has to be a real
+// point on P-256 or the send fails before any request is made.
+func testSubscription(t *testing.T, node, endpoint string) subscription {
+	t.Helper()
+	key, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth := make([]byte, 16)
+	if _, err := rand.Read(auth); err != nil {
+		t.Fatal(err)
+	}
+	return subscription{Node: node, Sub: webpush.Subscription{
+		Endpoint: endpoint,
+		Keys: webpush.Keys{
+			P256dh: base64.RawURLEncoding.EncodeToString(key.PublicKey().Bytes()),
+			Auth:   base64.RawURLEncoding.EncodeToString(auth),
+		},
+	}}
 }
 
 func nodesOf(subs []subscription) []string {

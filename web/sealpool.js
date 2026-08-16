@@ -57,8 +57,7 @@ export function sealPool(size, spawn) {
     else free.push(worker);
   }
 
-  for (let i = 0; i < size; i++) {
-    const worker = spawn();
+  function build(worker) {
     worker.onmessage = (event) => {
       const msg = event.data || {};
       if (msg.type === 'ready') {
@@ -78,8 +77,19 @@ export function sealPool(size, spawn) {
     };
     worker.onerror = () => fail('a seal worker stopped');
     worker.onmessageerror = () => fail('a seal worker stopped');
-    workers.push(worker);
     free.push(worker);
+    return worker;
+  }
+
+  // Spawned up front rather than on demand, so a pool of four is four workers
+  // whether the file has four chunks or four thousand, and close has one list to
+  // terminate. A spawn that throws part way takes the ones already made with it,
+  // because nothing else holds them.
+  try {
+    for (let i = 0; i < size; i++) workers.push(build(spawn()));
+  } catch (err) {
+    for (const worker of workers) worker.terminate();
+    throw err;
   }
 
   // One round trip per worker, carrying everything that is the same for every
@@ -89,7 +99,15 @@ export function sealPool(size, spawn) {
     if (broken) return Promise.reject(broken);
     return Promise.all(workers.map((worker) => new Promise((resolve, reject) => {
       starting.set(worker, { resolve, reject });
-      worker.postMessage({ type: 'init', mk, mode, transferId });
+      // A post that throws would otherwise leave this waiting on a reply that
+      // was never asked for, and a caller that never settles is a preparation
+      // that neither finishes nor fails.
+      try {
+        worker.postMessage({ type: 'init', mk, mode, transferId });
+      } catch (err) {
+        starting.delete(worker);
+        reject(err);
+      }
     })));
   }
 

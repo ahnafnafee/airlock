@@ -120,6 +120,21 @@ test('closing settles a chunk that is still waiting for a worker', async () => {
   await assert.rejects(queued, /closed/);
 });
 
+test('a spawn that fails part way terminates the workers it did make', () => {
+  // Nothing else holds them, so they would run for the life of the page.
+  const record = fresh();
+  const make = manualWorkerFactory(record);
+  let made = 0;
+  assert.throws(
+    () => sealPool(4, () => {
+      if (made++ === 2) throw new Error('the worker did not load');
+      return make();
+    }),
+    /did not load/,
+  );
+  assert.equal(record.terminated, 2, 'the two that were made must not be left running');
+});
+
 test('a worker that dies fails the chunk it was holding', async () => {
   // Nothing is retried: every chunk of this transfer is sealed by this pool, so
   // one that has lost a worker cannot finish the job it was made for, and

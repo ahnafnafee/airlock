@@ -24,12 +24,19 @@ html, body {
    can read what is on the server. Never used for anything in transit. */
 .sealed { color: var(--seal); }
 
+/* The viewport is covered, so every element that reaches an edge of the screen
+   pays for its own inset. Here that is the sides, which is what a notch eats in
+   landscape. */
 header {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: var(--gap);
-  padding: var(--gap);
+  padding:
+    var(--gap)
+    calc(var(--gap) + env(safe-area-inset-right, 0px))
+    var(--gap)
+    calc(var(--gap) + env(safe-area-inset-left, 0px));
   border-bottom: 1px solid var(--seam);
 }
 
@@ -40,7 +47,18 @@ header {
   margin: 0;
 }
 
-main { max-width: 760px; margin: 0 auto; padding: var(--gap) var(--gap) 96px; }
+/* The bottom padding clears the fixed nav bar, so it has to grow by whatever
+   the bar grew by: the bar carries the home indicator's inset and would
+   otherwise rise into the last line of content. */
+main {
+  max-width: 760px;
+  margin: 0 auto;
+  padding:
+    var(--gap)
+    calc(var(--gap) + env(safe-area-inset-right, 0px))
+    calc(96px + env(safe-area-inset-bottom, 0px))
+    calc(var(--gap) + env(safe-area-inset-left, 0px));
+}
 h2 { font: var(--title)/1.3 var(--sans); margin: 0 0 var(--gap); }
 
 /* The hatch. A bounded chamber you put something into. */
@@ -117,6 +135,14 @@ nav {
   display: flex;
   background: var(--hull-raised);
   border-top: 1px solid var(--seam);
+  /* The bar owns the bottom edge of a covered viewport, so it holds its buttons
+     above the home indicator instead of behind it, and holds them clear of a
+     notch when the phone is on its side. Longhands, because the rail below
+     replaces the shorthand and must not inherit a bottom inset it does not
+     touch. */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
 }
 nav button {
   flex: 1;
@@ -137,7 +163,14 @@ nav button[aria-current="page"] { color: var(--bone); border-top-color: var(--so
      a window only a little wider than the column cannot leave the nav sitting
      on top of the content. It sticks so it stays reachable down a long view. */
   #app { display: flex; align-items: flex-start; }
-  main { flex: 1; min-width: 0; padding-bottom: var(--gap); }
+  main {
+    flex: 1;
+    min-width: 0;
+    padding-bottom: calc(var(--gap) + env(safe-area-inset-bottom, 0px));
+    /* The rail is against the left edge here, not the column, so the column
+       stops paying for that side. */
+    padding-left: var(--gap);
+  }
   nav {
     position: sticky;
     inset: 0 auto auto auto;
@@ -151,7 +184,11 @@ nav button[aria-current="page"] { color: var(--bone); border-top-color: var(--so
     justify-content: flex-start;
     border-top: 0;
     border-right: 1px solid var(--seam);
+    /* The shorthand drops the bar's bottom inset, which is right: a rail does
+       not sit on the bottom edge and a gap there would be stray. It does sit on
+       the left one, which a notch eats in landscape. */
     padding: var(--gap) 4px 0;
+    padding-left: calc(4px + env(safe-area-inset-left, 0px));
   }
   nav button {
     flex: 0;
@@ -186,11 +223,15 @@ nav button[aria-current="page"] { color: var(--bone); border-top-color: var(--so
 }
 
 .rows { list-style: none; padding: 0; margin: 0; }
+/* A row that cannot fit its text beside its buttons breaks rather than squeezing
+   one of them. Row gap is tighter than column gap so a broken row still reads as
+   one row and not as two. */
 .rows li {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: var(--gap);
+  gap: 10px var(--gap);
   padding: 14px 0;
   border-bottom: 1px solid var(--seam);
 }
@@ -198,9 +239,13 @@ nav button[aria-current="page"] { color: var(--bone); border-top-color: var(--so
    items. With a thumbnail present that is three items and two gaps, so the text
    would detach from the picture it describes and sit in the middle of the row.
    Letting the text take all the slack leaves exactly one gap, before the
-   actions. min-width: 0 is what allows the name to ellipsize instead of forcing
-   the row wider than its column. */
-.rowtext { flex: 1; min-width: 0; }
+   actions.
+   The basis is the width a name is worth reading at, and it is what decides
+   where the row breaks: a line that cannot hold both puts the buttons below
+   rather than driving the name toward zero. It is not a floor. Once they are
+   below, min-width: 0 lets the name take whatever the line has and ellipsize
+   instead of forcing the row wider than its column. */
+.rowtext { flex: 1 1 10rem; min-width: 0; }
 .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The thumbnail is made on the sending device and arrives sealed, so this is
    the only place it is ever a picture. It sits square and cropped so a row of
@@ -213,7 +258,11 @@ nav button[aria-current="page"] { color: var(--bone); border-top-color: var(--so
   background: var(--hull-raised);
   flex: none;
 }
-.actions { display: flex; gap: 8px; flex: none; }
+/* Held against the right edge whether the buttons sit beside the name or on
+   their own line under it, so the row reads the same either way. They wrap among
+   themselves as a last resort, for the case where even a full line is not enough
+   for all of them. */
+.actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-left: auto; }
 .actions a.ghost { text-decoration: none; display: inline-block; }
 
 /* The staging list sits between two controls rather than under a heading, so it

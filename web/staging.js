@@ -182,9 +182,20 @@ export async function openStage(transferId) {
     bitmap: async (count) => bitmapOf(await held(), count),
     // ponytail: a stage is only ever removed by the transfer that owns it, so
     // one abandoned part way through holds its chunks until the owner clears
-    // the origin's storage. The ceiling is that nothing sweeps. Lifting it
-    // means listing the staging directory at startup and dropping every id the
-    // server no longer reports as an open transfer.
+    // the origin's storage. The ceiling is that nothing sweeps.
+    //
+    // Lifting it is not a matter of listing this directory and dropping every
+    // id the server does not report as an open transfer. Only a receiving
+    // stage is named by its transfer's id. A sending one is named by an id
+    // minted during preparation that lives only inside that transfer's sealed
+    // meta record, and the server never learns it, so it can never report it.
+    // The live set is the union of the transfer ids this device is receiving
+    // and the stage field read out of the sealed meta record of every transfer
+    // this device sent, which means a sweep has to open those records before it
+    // may drop anything. It must also spare a directory belonging to a
+    // preparation still in flight, whose record does not exist yet. A sweep
+    // that skipped either step would delete the sealed chunks of every queued
+    // transfer still waiting to be delivered.
     clear: async () => {
       const staging = await stagingRoot();
       await staging.removeEntry(checkedId(transferId), { recursive: true });

@@ -75,6 +75,15 @@ function checkTransferId(id) {
 // the ids that name a transfer come from the same pass that seals them. The
 // sealed metadata carries this name, which is how the sender finds the chunks
 // again after the page has been closed and reopened.
+//
+// ponytail: an id minted here is unreachable if the page dies before the sealed
+// record that carries it is written. The ceiling is that a preparation
+// interrupted after the first chunk has been staged and before the record goes
+// up leaves a directory whose name nothing else records, so no later sweep can
+// tell it from a live one. Lifting it means noting the id durably on this
+// device before the first chunk is written and clearing that note once the
+// record is up, which is what would let a sweep tell an abandoned preparation
+// from one still running.
 const newStageId = () => hex(crypto.getRandomValues(new Uint8Array(16)));
 
 const workerPool = () => sealPool(poolSize(), () => new Worker(

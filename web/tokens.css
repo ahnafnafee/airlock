@@ -127,6 +127,8 @@
   --icon-moon: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M20%2013.4A8.4%208.4%200%200%201%2010.6%204a8.4%208.4%200%201%200%209.4%209.4%22%2F%3E%3C%2Fsvg%3E");
   --icon-auto: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%228.6%22%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%2F%3E%3Cpath%20d%3D%22M12%203.4a8.6%208.6%200%200%201%200%2017.2z%22%20fill%3D%22%23000%22%2F%3E%3C%2Fsvg%3E");
 
+  --icon-github: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M12%201.7a10.3%2010.3%200%200%200-3.26%2020.07c.52.1.71-.22.71-.5v-1.75c-2.87.62-3.48-1.38-3.48-1.38-.47-1.2-1.15-1.52-1.15-1.52-.94-.64.07-.63.07-.63%201.04.07%201.58%201.07%201.58%201.07.92%201.58%202.42%201.12%203.01.86.09-.67.36-1.13.65-1.39-2.29-.26-4.7-1.15-4.7-5.1%200-1.13.4-2.05%201.06-2.77-.11-.26-.46-1.31.1-2.73%200%200%20.87-.28%202.85%201.06a9.9%209.9%200%200%201%205.19%200c1.98-1.34%202.85-1.06%202.85-1.06.56%201.42.21%202.47.1%202.73.66.72%201.06%201.64%201.06%202.77%200%203.96-2.42%204.83-4.72%205.09.37.32.7.95.7%201.92v2.85c0%20.28.19.61.72.5A10.3%2010.3%200%200%200%2012%201.7z%22%2F%3E%3C%2Fsvg%3E");
+
   --wordmark: 17px;
   --title: clamp(1.75rem, 3.4vw, 2.375rem);
   --prose: 15px;
@@ -148,6 +150,9 @@
   /* The rail's head. The nav starts here, so it is one value and not two that
      have to be kept in agreement by hand. */
   --rail-head: 86px;
+  /* The rail's foot, which holds the controls that belong to the app rather
+     than to any one view. The nav stops here. */
+  --rail-foot: 60px;
   --content: 1120px;
   --strip: clamp(44px, 5.5vw, 64px);
   --strip-seam: 3px;

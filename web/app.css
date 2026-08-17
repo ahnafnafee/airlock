@@ -325,10 +325,19 @@ select:hover { border-color: var(--green); }
   outline-offset: 2px;
 }
 
-/* Three states, one control: follow the system, force light, force dark. It sits
-   in the header because that is the one element every screen has, including the
-   ones before a passphrase exists. */
-#theme {
+#tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* The theme control has three states rather than two: follow the system, force
+   light, force dark. Both of these sit outside the views because they are true
+   of the app rather than of any screen, including the screens that come before
+   a passphrase exists. */
+#theme,
+#source {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -344,9 +353,19 @@ select:hover { border-color: var(--green); }
   transition: color 120ms ease, border-color 120ms ease;
 }
 
-#theme:hover {
+#theme:hover,
+#source:hover {
   border-color: var(--green);
   color: var(--green);
+}
+
+#source::before {
+  content: "";
+  width: 17px;
+  height: 17px;
+  background: currentColor;
+  -webkit-mask: var(--icon-github) center / contain no-repeat;
+  mask: var(--icon-github) center / contain no-repeat;
 }
 
 #theme::before {
@@ -806,13 +825,14 @@ nav button[aria-current="page"] { color: var(--green); }
   }
 
   nav {
-    inset: var(--rail-head) auto 0 0;
+    inset: var(--rail-head) auto var(--rail-foot) 0;
     width: var(--rail-w);
     flex-direction: column;
     justify-content: flex-start;
     border-top: 0;
     border-right: 1px solid var(--line);
     padding: 0 0 0 env(safe-area-inset-left, 0px);
+    overflow-y: auto;
   }
 
   nav button {
@@ -830,12 +850,19 @@ nav button[aria-current="page"] { color: var(--green); }
 
   nav button:hover { background: var(--raised); }
 
-  /* The foot of the rail, which is where a setting belongs: available from every
-     screen and never in the way of the thing the screen is for. */
-  #theme {
+  /* The foot of the rail. Ruled off from the view list above it, because these
+     are not views and a reader should not have to work that out from the icons. */
+  #tools {
     position: fixed;
     z-index: 21;
-    inset: auto auto 18px calc(18px + env(safe-area-inset-left, 0px));
+    inset: auto auto 0 0;
+    width: var(--rail-w);
+    height: var(--rail-foot);
+    margin-left: 0;
+    padding: 0 18px 0 calc(18px + env(safe-area-inset-left, 0px));
+    border-top: 1px solid var(--line);
+    border-right: 1px solid var(--line);
+    background: var(--surface);
   }
 
   /* The active view is a filled pill rather than a marked edge, which is what

@@ -42,7 +42,14 @@ try {
 <header>
   <h1 class="wordmark">Airlock</h1>
   <span id="me" class="data muted"></span>
-  <button type="button" id="theme" aria-label="Theme: follow the system"></button>
+  <!-- Controls that belong to the app rather than to any one view. On a wide
+       screen they sit at the foot of the rail; on a narrow one they ride in the
+       header, which is the only chrome a phone has. -->
+  <div id="tools">
+    <button type="button" id="theme" aria-label="Theme: follow the system"></button>
+    <a id="source" href="https://github.com/ahnafnafee/airlock"
+       target="_blank" rel="noopener noreferrer" aria-label="Airlock on GitHub"></a>
+  </div>
 </header>
 
 <section id="install" hidden>

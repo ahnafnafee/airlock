@@ -411,9 +411,12 @@ function urlBase64ToUint8Array(base64) {
 // carries on unnotified rather than refusing to open.
 async function subscribePush() {
   if (!state.config.vapidKey || !('Notification' in window)) return;
+  // Never asks. Boot has no user gesture to spend, and iOS refuses the prompt
+  // without one and records that refusal as the answer, which would burn the
+  // only chance this device gets. enablePush owns the asking.
+  if (Notification.permission !== 'granted') return;
   try {
     const reg = await navigator.serviceWorker.ready;
-    if (await Notification.requestPermission() !== 'granted') return;
     const sub = await reg.pushManager.getSubscription()
       || await reg.pushManager.subscribe({
         userVisibleOnly: true,
@@ -423,6 +426,29 @@ async function subscribePush() {
   } catch (err) {
     console.warn('push subscription failed', err);
   }
+}
+
+// Whether this device could be told about an arrival but has not been asked yet.
+// A view uses this to decide whether to offer the ask at all, so a person who
+// has already answered, either way, is never asked twice.
+export function pushOffered(scope = globalThis) {
+  return Boolean(state.config?.vapidKey && 'Notification' in scope
+    && 'PushManager' in scope && scope.Notification.permission === 'default');
+}
+
+// The ask, which must be called from inside a click. Returns whether this device
+// will now be notified, so the caller can say what happened rather than leaving
+// a button that looks like it did nothing.
+export async function enablePush() {
+  if (!('Notification' in globalThis)) return false;
+  try {
+    if (await Notification.requestPermission() !== 'granted') return false;
+  } catch (err) {
+    console.warn('notification permission request failed', err);
+    return false;
+  }
+  await subscribePush();
+  return true;
 }
 
 async function registerWorker() {
@@ -533,18 +559,33 @@ async function boot() {
       'This server has no passphrase yet. Every device you set up must enter the same one.';
     $('passphrase').autocomplete = 'new-password';
   }
+  // Deriving the key is deliberately slow, so the form has to say it is working
+  // or a person reads the stillness as a dead button and presses again. The flag
+  // is the real guard: a disabled button still allows implicit submission from
+  // the passphrase field, and a second derivation would enter the app twice.
+  let deriving = false;
   $('unlock-form').addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (deriving) return;
+    deriving = true;
+    const go = $('unlock-go');
+    go.disabled = true;
+    go.textContent = 'Unlocking';
     $('unlock-error').textContent = '';
     try {
       if (await unlock($('passphrase').value)) {
         await equalize();
         enterApp();
+        return;
       }
-      else $('unlock-error').textContent =
+      $('unlock-error').textContent =
         'That passphrase does not match the one this server was set up with.';
     } catch (err) {
       $('unlock-error').textContent = err.message;
+    } finally {
+      deriving = false;
+      go.disabled = false;
+      go.textContent = 'Unlock';
     }
   });
 }

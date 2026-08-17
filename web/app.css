@@ -31,6 +31,21 @@ a:hover { color: #7FE0C0; }
 .data.key { font-weight: 700; }
 .muted { color: var(--vapor); }
 .bad { color: var(--breach); }
+
+/* An offer the reader may take or ignore. It sits inside the chamber rather than
+   on the hull so it reads as part of the view, not as a banner over it. */
+.notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 18px;
+  padding: 12px 14px;
+  background: var(--chamber);
+  /* Seam, not sodium: the signal colors each carry one meaning across the whole
+     app, and an offer is neither in transit nor sealed nor a failure. */
+  border-left: 2px solid var(--control-seam);
+}
 .sealed { color: var(--seal); }
 
 header {

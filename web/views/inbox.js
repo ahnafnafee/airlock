@@ -1,4 +1,4 @@
-import { registerView, state, el, onInbox } from '../app.js';
+import { registerView, state, el, onInbox, pushOffered, enablePush } from '../app.js';
 import { api } from '../api.js';
 import { openStage } from '../staging.js';
 import { renderStrip } from '../strip.js';
@@ -276,9 +276,31 @@ export async function terminateTransfer(t, meta, outbound, mutate, deps = {}) {
   return { terminal: true, error: mutationError };
 }
 
+// Notifications are what makes a closed app worth closing, and the browser will
+// only ask while a click is asking for it. The offer sits here because the inbox
+// is where the absence is felt, and it appears only while the answer is still
+// open: once this device has said yes or no, it is never asked again.
+function offerPush(host) {
+  if (!pushOffered()) return;
+  const go = el('button', { class: 'ghost', type: 'button' }, 'Turn on notifications');
+  go.addEventListener('click', async () => {
+    go.disabled = true;
+    if (await enablePush()) {
+      host.replaceChildren('This device will be told when a file arrives.');
+      return;
+    }
+    host.replaceChildren(
+      'Notifications stay off. Your browser settings for this site can turn them back on.');
+  });
+  host.append('Files arrive whether or not this app is open. ', go);
+  host.hidden = false;
+}
+
 registerView('inbox', 'Inbox', (panel) => {
   const list = el('ul', { class: 'rows' });
-  panel.append(el('h2', {}, 'Inbox'), list);
+  const ask = el('p', { class: 'muted notice', hidden: true });
+  panel.append(el('h2', {}, 'Inbox'), ask, list);
+  offerPush(ask);
 
   // Which refresh owns the list. Rows are built before anything on screen is
   // touched, and a run that is overtaken while awaiting drops its work rather

@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ensurePaired, listen, onDevices, onInbox, retryDelay, secureEnough, __setStreamImpl,
-  RETRY_BASE_MS, RETRY_CAP_MS,
+  ensurePaired, listen, onDevices, onInbox, pushOffered, retryDelay, secureEnough,
+  state, __setStreamImpl, RETRY_BASE_MS, RETRY_CAP_MS,
 } from './app.js';
 
 // EventSource readyState, per the HTML standard. Restated here rather than
@@ -288,4 +288,39 @@ test('an origin without web crypto is refused rather than half-run', () => {
   assert.equal(secureEnough({ isSecureContext: true, crypto: {} }), false);
   assert.equal(secureEnough({ isSecureContext: true }), false);
   assert.equal(secureEnough({}), false);
+});
+
+// iOS refuses Notification.requestPermission unless a user gesture is asking,
+// and it records that refusal as the answer. Boot has no gesture to spend, so a
+// prompt fired there burns the only chance the device gets and background
+// receive, the whole reason to leave the app closed, never works on the platform
+// that needs it most. The ask therefore belongs to a click, and this decides
+// whether a view offers one.
+test('the notification offer appears only while the answer is still open', () => {
+  const config = state.config;
+  const scope = (permission) => ({ Notification: { permission }, PushManager: function () {} });
+  try {
+    state.config = { vapidKey: 'k' };
+    assert.equal(pushOffered(scope('default')), true);
+
+    // Already answered, either way. Asking again is noise at best; on a browser
+    // that treats a second prompt as a denial it is worse.
+    assert.equal(pushOffered(scope('granted')), false);
+    assert.equal(pushOffered(scope('denied')), false);
+
+    // Nothing to subscribe to: the server has no VAPID key configured.
+    state.config = { vapidKey: '' };
+    assert.equal(pushOffered(scope('default')), false);
+
+    // Push is not implemented here at all, so the offer would lead nowhere.
+    state.config = { vapidKey: 'k' };
+    assert.equal(pushOffered({ Notification: { permission: 'default' } }), false);
+    assert.equal(pushOffered({ PushManager: function () {} }), false);
+
+    // Before the config read has landed there is nothing to decide on.
+    state.config = null;
+    assert.equal(pushOffered(scope('default')), false);
+  } finally {
+    state.config = config;
+  }
 });

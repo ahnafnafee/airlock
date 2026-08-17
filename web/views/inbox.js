@@ -3,7 +3,7 @@ import { api } from '../api.js';
 import { renderStrip } from '../strip.js';
 import { RUNG, exportFile } from '../export.js';
 import { DOMAIN, MODE_SEALED, openRecord, modeOf, b64decode } from '../crypto.js';
-import { isStandalone } from '../ios.js';
+import { isIOS, isStandalone } from '../ios.js';
 
 // What a row says once a save lands. None of these is a failure: the bytes are
 // on the device and their tags verified during assembly, so the only thing an
@@ -30,6 +30,17 @@ const REPORT = {
 // out of the one list that still knew about it.
 const SAVED = new Set([RUNG.SAVE_PICKER, RUNG.SHARE]);
 
+// Whether an outcome put the file anywhere outside this app at all.
+//
+// Deliberately broader than SAVED, and the two answer different questions. SAVED
+// is what this app can *prove* happened, and it decides whether a row may be
+// cleared. This is what probably happened, and it decides whether the button
+// warns you before doing it twice: a browser download is unwitnessed, but it did
+// occur, and pressing Save again after one produces a second copy the browser
+// names "file (2)" rather than replacing the first. Only a declined export left
+// the file exactly where it was.
+export const handedOver = (rung) => rung !== RUNG.KEEP;
+
 // The share sheet is preferred only where nothing below it reaches the operating
 // system. Two conditions together say that without asking what browser this is.
 // A window with no browser chrome has no downloads shelf and no address bar, so
@@ -42,8 +53,19 @@ const SAVED = new Set([RUNG.SAVE_PICKER, RUNG.SHARE]);
 //
 // The decision is made here rather than inside the cascade because a share needs
 // the user gesture this click is part of, and only the click knows it has one.
-function preferShare(file, nav = navigator, win = window) {
-  return Boolean(isStandalone(win)
+// Narrowed to iOS on purpose. The three conditions below describe a Home Screen
+// web app on iOS, but they also describe an installed app on Android, where they
+// are the wrong answer: an anchor download there is visible, lands in Downloads,
+// and is named by the browser, which puts a duplicate's suffix where it belongs
+// as "file (2).apk". Handing the same file to the share sheet instead lets the
+// receiving app name it, and Android's own storage layer appends to the whole
+// display name, extension included, producing "file.apk (2)".
+//
+// So the share sheet stays the rung for the platform that has nothing better,
+// and Android takes the download it always had.
+export function preferShare(file, nav = navigator, win = window) {
+  return Boolean(isIOS(nav)
+    && isStandalone(win)
     && typeof win.showSaveFilePicker !== 'function'
     && nav.canShare?.({ files: [file] }));
 }
@@ -702,6 +724,13 @@ registerView('inbox', 'Inbox', (panel) => {
       // rung where it works and a dead end where it does not, and which of those
       // a browser is cannot be detected. Assembling first makes the outcome
       // reportable and the action repeatable.
+      // Whether this row has already put the file somewhere. A transfer that
+      // reached a rung with no receipt keeps its row and its button, which is
+      // the only way to retry a hand-off nobody witnessed, but a button that
+      // still reads Save is indistinguishable from one that has never been
+      // pressed. Pressing it again is a second download, and the browser names
+      // that one "file (2)" rather than replacing the first.
+      let exported = false;
       const save = el('button', {
         class: 'ghost', type: 'button', 'aria-label': about('Save'),
         onclick: async () => {
@@ -720,6 +749,7 @@ registerView('inbox', 'Inbox', (panel) => {
             });
             detailNode.textContent = REPORT[rung];
             detailNode.className = 'data muted';
+            exported = exported || handedOver(rung);
             await settleAfterSave(t, meta, rung);
           } catch (err) {
             detailNode.textContent = `Could not save. ${err.message}`;
@@ -731,7 +761,7 @@ registerView('inbox', 'Inbox', (panel) => {
             // assembled and reaches the operating system with its gesture
             // intact. A saved file is also worth saving again somewhere else.
             save.disabled = false;
-            save.textContent = 'Save';
+            save.textContent = exported ? 'Save again' : 'Save';
           }
         },
       }, 'Save');

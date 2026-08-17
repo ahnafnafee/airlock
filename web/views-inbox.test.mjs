@@ -46,7 +46,7 @@ function stubDocument() {
 
 stubDocument();
 const {
-  bitsSet, cleanLocalTransfer, elsewhereText, progressBitmap, readRow,
+  bitsSet, cleanLocalTransfer, elsewhereText, handedOver, preferShare, progressBitmap, readRow,
   reconcileLocalTransfers, rowActions, settleAfterSave, terminateTransfer,
 } = await import('./views/inbox.js');
 const { RUNG } = await import('./export.js');
@@ -359,4 +359,58 @@ test('the elsewhere line names every device and only this transfer', () => {
 
 test('a transfer nobody else is saving has nothing to say', () => {
   assert.equal(elsewhereText(ID, new Map()), '');
+});
+
+// Two questions that look like one. Whether a row may be cleared is about what
+// this app can prove; whether the button warns before saving again is about what
+// probably happened. A browser download is unwitnessed, so it may not clear the
+// row, but it did put a file on disk and pressing Save again makes a second copy
+// the browser names "file (2)". Collapsing these into one set gets one of the
+// two behaviours wrong whichever set you pick.
+test('an unwitnessed download still counts as having handed the file over', () => {
+  assert.equal(handedOver(RUNG.DOWNLOAD), true, 'a download did put a file somewhere');
+  assert.equal(settleAfterSaveClears(RUNG.DOWNLOAD), false, 'but it cannot prove it');
+
+  for (const rung of [RUNG.SAVE_PICKER, RUNG.SHARE]) {
+    assert.equal(handedOver(rung), true);
+    assert.equal(settleAfterSaveClears(rung), true, `${rung} resolves against a real outcome`);
+  }
+
+  // A declined export is the one outcome that left the file exactly where it
+  // was, so the next press is a first attempt rather than a second copy.
+  assert.equal(handedOver(RUNG.KEEP), false);
+  assert.equal(settleAfterSaveClears(RUNG.KEEP), false);
+});
+
+// Reads the same rule settleAfterSave applies, without a server or a transfer.
+function settleAfterSaveClears(rung) {
+  return [RUNG.SAVE_PICKER, RUNG.SHARE].includes(rung);
+}
+
+// Which rung a platform takes decides who names the file, and the two name a
+// duplicate differently. Chrome's downloader inserts before the extension, as
+// "file (2).apk". A share target on Android is named by the storage layer, which
+// appends to the whole display name and gives "file.apk (2)", clobbering the
+// extension. The share sheet is right only where there is nothing better.
+test('the share sheet is preferred on iOS and nowhere else', () => {
+  const file = { name: 'x.apk' };
+  const canShare = { canShare: () => true, userAgent: 'x' };
+  const installed = { matchMedia: () => ({ matches: true }), navigator: {} };
+
+  const iphone = { ...canShare, userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)' };
+  assert.equal(preferShare(file, iphone, installed), true, 'iOS has no better rung');
+
+  // Same shape in every other respect, and still the wrong answer, because an
+  // Android download is visible and correctly named.
+  const android = { ...canShare, userAgent: 'Mozilla/5.0 (Linux; Android 15; Pixel 10 Pro)' };
+  assert.equal(preferShare(file, android, installed), false);
+
+  // A browser with a real save picker never needed the share sheet either.
+  const desktop = { matchMedia: () => ({ matches: true }), navigator: {}, showSaveFilePicker() {} };
+  assert.equal(preferShare(file, iphone, desktop), false);
+
+  // In a tab rather than an installed window there is browser chrome, so a
+  // download is visible and the anchor is fine.
+  const tab = { matchMedia: () => ({ matches: false }), navigator: {} };
+  assert.equal(preferShare(file, iphone, tab), false);
 });

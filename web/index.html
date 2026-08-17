@@ -117,7 +117,10 @@ try {
     <form id="unlock-form">
       <p>
         <label class="label" for="passphrase">Passphrase</label>
-        <input type="password" id="passphrase" autocomplete="current-password" required>
+        <span class="reveal">
+          <input type="password" id="passphrase" autocomplete="current-password" required>
+          <button type="button" id="peek" aria-label="Show the passphrase" aria-pressed="false"></button>
+        </span>
       </p>
       <p><button class="primary" type="submit" id="unlock-go">Unlock</button></p>
     </form>

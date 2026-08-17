@@ -471,6 +471,23 @@ export function storedTheme(store = themeStore()) {
   }
 }
 
+// Looking at what you typed. A passphrase this long is easy to mistype and
+// nothing can tell you that you did: the server never sees it, and a wrong one
+// is indistinguishable from a right one until it fails to open anything.
+function wireReveal() {
+  const field = $('passphrase');
+  const peek = $('peek');
+  if (!field || !peek) return;
+  peek.addEventListener('click', () => {
+    const showing = field.getAttribute('type') === 'text';
+    field.setAttribute('type', showing ? 'password' : 'text');
+    peek.setAttribute('aria-pressed', showing ? 'false' : 'true');
+    peek.setAttribute('aria-label', showing ? 'Show the passphrase' : 'Hide the passphrase');
+    // Back where it was, so looking does not cost the caret.
+    field.focus();
+  });
+}
+
 function wireTheme() {
   const button = globalThis.document?.getElementById?.('theme');
   if (!button) return;
@@ -719,6 +736,7 @@ async function boot() {
   }
 
   $('unlock').hidden = false;
+  wireReveal();
   if (state.config.check === null) {
     $('unlock-title').textContent = 'Choose a passphrase';
     $('unlock-note').textContent =

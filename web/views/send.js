@@ -105,11 +105,11 @@ registerView('send', 'Send', (panel) => {
     type: 'file', multiple: true, hidden: true, webkitdirectory: true,
   });
 
-  // The hatch says only what this browser has been seen to do. The drop line is
-  // drawn on the first drag that carries files and not before, so on a phone it
-  // never appears and the picker is the whole hatch, which is the honest shape
-  // of the weakest inbound story any engine has.
-  const dropLine = el('span', { hidden: true }, 'Drop files here, ');
+  // What the chamber is for, in the words a person would use. The headline says
+  // only what this browser has been seen to do: a device that has never been
+  // shown a drag is told to add files rather than to drop them, which is the
+  // honest shape of the weakest inbound story any engine has.
+  const note = el('div', {}, 'Anything, any size. A 50 GB video is fine.');
   const choose = el('button', { type: 'button', onclick: () => picker.click() }, 'Choose files');
   // Detected rather than assumed, and verified again after a pick: Firefox on
   // Android accepts this attribute and then returns an empty relative path for
@@ -118,20 +118,13 @@ registerView('send', 'Send', (panel) => {
     type: 'button',
     hidden: !('webkitdirectory' in HTMLInputElement.prototype),
     onclick: () => folder.click(),
-  }, 'or a folder');
-  // The folder button sits on its own line rather than trailing the first one,
-  // so the sentence above it reads the same whether or not the drop line is
-  // there. Chained on one line it would say "or choose or a folder".
-  // The chamber said nothing about itself: every word in it was on a button, so
-  // an empty one read as a panel that had failed to load. This is the line that
-  // says what the chamber is for, and it is always here, unlike the drop line
-  // above which appears only on an engine that has proved it accepts a drag.
-  const hatch = el('p', { class: 'hatch' }, 'Nothing staged yet');
+  }, 'Choose a folder');
+  const hatch = el('p', { class: 'hatch' }, 'Add files to send');
   // The two choices sit side by side on one line: they are alternatives, and
   // stacking them made the second read as a lesser afterthought of the first.
   const drop = el('div', { id: 'drop' },
     hatch,
-    el('div', {}, dropLine),
+    note,
     el('div', { class: 'row' }, choose, folderButton),
     picker, folder);
 
@@ -182,6 +175,16 @@ registerView('send', 'Send', (panel) => {
   const edits = el('div', { hidden: true });
   // Byte offsets under the strip.
   const ruler = el('div', { hidden: true });
+
+  // Whether this browser has been seen to accept a drag, which decides whether
+  // the chamber asks for a drop or for a pick.
+  let dragging = false;
+  const paintHatch = () => {
+    hatch.textContent = staged.length
+      ? `${staged.length} ${staged.length === 1 ? 'file' : 'files'} ready to send`
+      : (dragging ? 'Drop files here' : 'Add files to send');
+    note.hidden = staged.length > 0;
+  };
 
   panel.append(
     el('h2', {}, 'Send'),
@@ -240,11 +243,10 @@ registerView('send', 'Send', (panel) => {
     });
     sendButton.disabled = staged.length === 0;
     sendButton.textContent = staged.length > 1 ? `Send ${staged.length} files` : 'Send';
-    // The chamber says what is in it. It read "Nothing staged yet" over a list
-    // of staged files, which is the one sentence on the screen contradicted by
-    // the screen itself.
-    hatch.textContent = staged.length === 0 ? 'Nothing staged yet'
-      : `${staged.length} ${staged.length === 1 ? 'file' : 'files'} ready to send`;
+    // The chamber says what is in it. It read as empty over a list of staged
+    // files, which is the one sentence on a screen contradicted by the screen
+    // itself.
+    paintHatch();
   };
 
   sendButton.addEventListener('click', async () => {
@@ -462,8 +464,8 @@ registerView('send', 'Send', (panel) => {
   // from there, which is the correct order: an affordance that appears late is
   // an affordance, and one that appears wrongly is a lie.
   const paintInbound = (caps) => {
-    dropLine.hidden = !caps.drop;
-    choose.textContent = caps.drop ? 'or choose' : 'Choose files';
+    dragging = caps.drop;
+    paintHatch();
     pasteHint.hidden = !caps.paste;
     const card = installCard(caps);
     installNote.hidden = card === null;

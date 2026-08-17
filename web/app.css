@@ -58,6 +58,7 @@ header {
    differ only in the ink: the mark keeps its green in both. The name stays in
    the element for anything that reads the page rather than looks at it. */
 .wordmark {
+  grid-column: 1;
   width: 118px;
   height: 34px;
   min-width: 0;
@@ -84,6 +85,7 @@ header {
    it. A segmented control rather than a list, because these are four states of
    one thing and not four destinations. */
 nav {
+  grid-column: 2;
   display: flex;
   gap: 2px;
   justify-self: center;
@@ -162,7 +164,10 @@ nav .count:empty { display: none; }
 /* The right group, which balances the mark on the left so the switcher between
    them lands on the middle of the window rather than on the middle of whatever
    is left over. */
+/* Column three explicitly, so it stays on the right on the screens that come
+   before the switcher exists. */
 .bar-end {
+  grid-column: 3;
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -870,6 +875,53 @@ button.primary + .staged { margin-top: 18px; }
 body > section main { max-width: 460px; }
 
 #unlock-form { margin-top: 24px; }
+
+/* A passphrase long enough to be worth having is long enough to mistype, and
+   there is nobody to ask if it is wrong: the server cannot check it and a
+   failure just says no. Being able to look is what makes it recoverable. */
+.reveal {
+  display: block;
+  position: relative;
+}
+
+.reveal input { padding-right: 52px; }
+
+#peek {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--ink-faint);
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+#peek:hover { color: var(--ink); }
+
+#peek::before {
+  content: "";
+  width: 18px;
+  height: 18px;
+  background: currentColor;
+  -webkit-mask: var(--icon-eye) center / contain no-repeat;
+  mask: var(--icon-eye) center / contain no-repeat;
+}
+
+#peek[aria-pressed="true"] { color: var(--accent-deep); }
+
+#peek[aria-pressed="true"]::before {
+  -webkit-mask-image: var(--icon-eye-shut);
+  mask-image: var(--icon-eye-shut);
+}
 #unlock-form p { margin: 0 0 14px; }
 #unlock-form .label { display: block; margin-bottom: 8px; }
 
@@ -930,25 +982,84 @@ body > section li { margin-bottom: 8px; }
     padding-bottom: 10px;
   }
 
-  /* The switcher takes its own line under the mark rather than competing with
-     it for a width neither of them has. */
-  nav {
-    order: 3;
-    width: 100%;
-    margin: 0;
-    overflow-x: auto;
-    scrollbar-width: none;
+  header {
+    flex-wrap: nowrap;
+    grid-template-columns: auto 1fr;
   }
 
-  nav::-webkit-scrollbar { display: none; }
+  /* The switcher leaves the bar entirely and becomes a floating bar at the foot
+     of the screen, which is where a thumb is. Squeezed into the header it had
+     to scroll, so three of the four views were off the side of a bar that is
+     supposed to show where you are. */
+  nav {
+    position: fixed;
+    z-index: 30;
+    inset: auto 12px calc(12px + env(safe-area-inset-bottom, 0px)) 12px;
+    /* Left and right are both set, but a grid child that is centered rather
+       than stretched shrinks to fit them instead of spanning between them, and
+       the bar came out half the width of the screen with its labels touching. */
+    justify-self: stretch;
+    justify-content: space-between;
+    gap: 4px;
+    padding: 8px;
+    background: var(--surface);
+    box-shadow: var(--shadow-lift);
+  }
 
   nav button {
-    flex: 1 0 auto;
+    flex: 1 1 0;
+    flex-direction: column;
     justify-content: center;
-    padding: 8px 14px;
+    gap: 4px;
+    min-width: 0;
+    padding: 8px 4px;
+    border-radius: var(--r-md);
+    font-size: 11.5px;
+    white-space: nowrap;
   }
 
-  main { padding-top: 28px; }
+  /* Each view's own mark, so the bar can be read at a glance rather than word
+     by word, which is what a thumb-height control needs. */
+  nav button::before {
+    content: "";
+    width: 20px;
+    height: 20px;
+    flex: none;
+    background: currentColor;
+    -webkit-mask: var(--icon) center / contain no-repeat;
+    mask: var(--icon) center / contain no-repeat;
+  }
+
+  nav button[data-view="send"] { --icon: var(--icon-send); }
+  nav button[data-view="inbox"] { --icon: var(--icon-inbox); }
+  nav button[data-view="history"] { --icon: var(--icon-history); }
+  nav button[data-view="devices"] { --icon: var(--icon-devices); }
+
+  nav button[aria-current="page"] {
+    background: var(--tint);
+    color: var(--accent-deep);
+    box-shadow: none;
+  }
+
+  /* The count sits on the mark rather than beside the word, which has no room
+     for it here. */
+  nav .count {
+    position: absolute;
+    margin: -26px 0 0 20px;
+  }
+
+  main {
+    padding-top: 28px;
+    /* Clear of the floating bar, plus the room it needs beneath it. */
+    padding-bottom: calc(104px + env(safe-area-inset-bottom, 0px));
+  }
+
+  #toasts {
+    bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+    left: calc(16px + env(safe-area-inset-left, 0px));
+    right: calc(16px + env(safe-area-inset-right, 0px));
+    max-width: none;
+  }
 
   #drop { padding: 40px 22px; }
 
@@ -974,11 +1085,6 @@ body > section li { margin-bottom: 8px; }
   .staged .actions { width: auto; }
   .staged .actions .ghost { flex: none; }
 
-  #toasts {
-    left: calc(16px + env(safe-area-inset-left, 0px));
-    right: calc(16px + env(safe-area-inset-right, 0px));
-    max-width: none;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -2,9 +2,10 @@
 
 <div align="center">
 
-<img height="120" src="./docs/assets/logo.svg" alt="Airlock">
-
-<h1>Airlock</h1>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/logo-dark.png">
+  <img src="./docs/assets/logo-light.png" alt="Airlock" height="66">
+</picture>
 
 **Send files between your own devices. Encrypted before they leave.**
 
@@ -167,43 +168,48 @@ that device. Check the ACLs in your [admin console](https://login.tailscale.com/
 
 ## 📸 Screenshots
 
-Light and dark, on a desktop and a phone. Airlock follows your system theme and
-has a switch if you would rather it did not.
-
 <div align="center">
 
-<img src="./docs/assets/screens/send.png" alt="The Send screen with three files staged. A dashed drop area reads 3 files ready to send, a line underneath says the files are sealed on this device and the server stores what it cannot read, and a recipient picker sits above a green Send 3 files button." width="88%">
+<img src="./docs/assets/screens/send.png" alt="The Send screen with three files staged. A panel reads 3 files ready to send above green Choose files and Choose a folder buttons, a line confirms the files are sealed on this device and the server stores what it cannot read, and a row of destination chips sits above a green Send 3 files button." width="88%">
 
-<sub>**Send.** Drop files in, choose where they go, press one button.</sub>
+<sub>**Send.** Drop files in, pick where they go, press one button. Nothing is
+chosen for you: the destination is a decision you make each time.</sub>
 
 <br/><br/>
 
-<img src="./docs/assets/screens/send-progress.png" alt="A finished send. A green bar is divided into segments of different widths, one per piece of the file, with a byte ruler underneath reading 0 B to 3.1 MB, and a caption saying the file was sent and how many of its pieces the server already had." width="88%">
+<img src="./docs/assets/screens/send-progress.png" alt="A finished send. A green bar is divided into segments of different widths, one per piece of the file, with a byte ruler beneath it and a caption saying the file was sent and how many of its pieces the server already had." width="88%">
 
 <sub>**The chunk strip.** One segment per piece, at the width that piece really
 occupies. Resend a file you edited and the parts that did not change are already
-green, which is what deduplication looks like instead of a claim about it.</sub>
+green, which is what deduplication looks like rather than a claim about it.</sub>
 
 <br/><br/>
 
-<img src="./docs/assets/screens/inbox-dark.png" alt="The Inbox in dark mode, listing three received files as cards with their size, when they arrived, and buttons to act on each." width="88%">
+<img src="./docs/assets/screens/inbox.png" alt="The Inbox listing received files as cards, each with its size, when it arrived, and buttons to act on it." width="88%">
 
-<sub>**Inbox.** What has arrived and is waiting for you. Saving a file clears it
-from the list.</sub>
+<sub>**Inbox.** What has arrived and is waiting. Saving a file clears it from the
+list, and anything nobody collects clears itself.</sub>
 
 <br/><br/>
 
-<img src="./docs/assets/screens/history-dark.png" alt="The History screen in dark mode listing past transfers with their filenames, direction and when each one was cleared." width="88%">
+<img src="./docs/assets/screens/history.png" alt="The History screen listing past transfers with filenames, direction and when each was cleared, ten to a page, with Newer and Older controls under the list reading 1 to 10 of 12." width="88%">
 
 <sub>**History.** What passed through, after the files themselves are gone.</sub>
 
 <br/><br/>
 
-<img src="./docs/assets/screens/mobile-send.png" alt="Airlock on a phone showing the Send screen, with the drop area, the recipient picker and the Send button stacked in one column above a bottom tab bar." width="30%">
+<img src="./docs/assets/screens/mobile-send.png" alt="Airlock on a phone showing the Send screen, with the drop panel, destination chips and Send button in one column above a floating bar holding Send, Inbox, History and Devices." width="30%">
 &nbsp;&nbsp;
-<img src="./docs/assets/screens/mobile-inbox-dark.png" alt="Airlock on a phone in dark mode showing the Inbox with a received file." width="30%">
+<img src="./docs/assets/screens/mobile-inbox.png" alt="Airlock on a phone showing the Inbox, with received files as cards above the floating navigation bar." width="30%">
 
 <sub>**On a phone**, installed to the home screen and working offline.</sub>
+
+<br/><br/>
+
+<img src="./docs/assets/screens/inbox-dark.png" alt="The same Inbox in dark mode, with a near-black ground and the same green accent." width="88%">
+
+<sub>**Dark mode.** Airlock follows your system theme, and there is a switch in
+the bar if you would rather it did not.</sub>
 
 </div>
 

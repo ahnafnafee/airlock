@@ -76,6 +76,11 @@ type Server struct {
 	// what holds when the caller is not the app.
 	progressMu   sync.Mutex
 	progressSeen map[string]time.Time
+
+	// The manifest with this build's version written into it. Built on first
+	// request and held, because it changes only when the binary does.
+	manifestOnce sync.Once
+	manifestBody []byte
 }
 
 // How often one device's progress on one transfer may be announced. Slow enough
@@ -160,6 +165,12 @@ func (s *Server) routes() {
 		clone.URL.Path = "/"
 		files.ServeHTTP(w, clone)
 	}))
+	// Ahead of the catch-all so the version reaches the installed app. Served
+	// from the same embedded file the rest of the client comes from, with the
+	// one field the binary is authoritative for written in as it goes, rather
+	// than a number copied into the file that would then have to be remembered.
+	s.mux.HandleFunc("GET /manifest.webmanifest", s.open(s.manifest))
+
 	s.mux.HandleFunc("GET /", s.open(files.ServeHTTP))
 }
 
@@ -305,6 +316,36 @@ func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// manifest serves the web app manifest with this build's version in it.
+//
+// Parsed and re-encoded rather than string-substituted: a manifest that fails
+// to parse is one the browser refuses outright, taking installability and the
+// share target with it, and that is not a failure worth risking to save a JSON
+// round trip. Built once and held, because it changes only when the binary does.
+func (s *Server) manifest(w http.ResponseWriter, r *http.Request) {
+	s.manifestOnce.Do(func() {
+		raw, err := fs.ReadFile(s.cfg.Static, "manifest.webmanifest")
+		if err != nil {
+			return
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			return
+		}
+		doc["version"] = version
+		if out, err := json.Marshal(doc); err == nil {
+			s.manifestBody = out
+		}
+	})
+	if s.manifestBody == nil {
+		http.Error(w, "manifest unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/manifest+json")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(s.manifestBody)
+}
+
 func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"auth":       s.cfg.Auth,
@@ -313,6 +354,7 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 		"ttlMinutes": int(s.cfg.TTL / time.Minute),
 		"vapidKey":   s.cfg.Push.PublicKey(),
 		"stunPort":   s.cfg.StunPort,
+		"version":    version,
 		"check":      nil,
 	}
 	if b, err := os.ReadFile(filepath.Join(s.cfg.DataDir, "check.bin")); err == nil {

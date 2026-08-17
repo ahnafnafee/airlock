@@ -320,6 +320,13 @@ export function listen() {
       const channel = arrivalChannel(globalThis, globalThis.document, subscribed, from);
       if (channel === 'toast') toast(`A file arrived from ${from}.`);
       else if (channel === 'local') showLocalNotice(from);
+      // Only for an actual arrival. A catch-up on a fresh stream carries no
+      // sender, and chiming through a list of things that were already there
+      // would make every reload sound like a delivery. Nothing waits on it and
+      // nothing reports it: a sound that will not play is not a failure.
+      if (from) {
+        import('./chime.js').then(({ chime }) => chime('arrive')).catch(() => {});
+      }
       // Every one of the three re-reads what changed, whether or not it was
       // worth announcing.
       for (const fn of listeners) fn();

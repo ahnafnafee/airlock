@@ -45,6 +45,11 @@ func newTestServerWithLimits(t *testing.T, allow bool, maxRecord int, maxTotal i
 	static := fstest.MapFS{
 		"index.html": &fstest.MapFile{Data: []byte("<h1>hi</h1>")},
 		"sw.js":      &fstest.MapFile{Data: []byte("// worker")},
+		// Carries the fields the install prompt rests on, so a test can tell
+		// re-encoding that preserved them from re-encoding that did not.
+		"manifest.webmanifest": &fstest.MapFile{Data: []byte(
+			`{"name":"Airlock","id":"/","start_url":"/","display":"standalone",` +
+				`"icons":[{"src":"/icon-192.png","sizes":"192x192","type":"image/png"}]}`)},
 	}
 	srv := NewServer(ServerConfig{
 		Chunks: chunks, Transfers: transfers, Devices: devices, Push: &Pusher{},
@@ -1517,5 +1522,46 @@ func TestProgressRationingForgetsOldEntries(t *testing.T) {
 	s.tooSoon("fresh", "pixel", base.Add(2*time.Hour))
 	if len(s.progressSeen) > 1024 {
 		t.Fatalf("stale rationing entries were kept: %d", len(s.progressSeen))
+	}
+}
+
+// The installed app and the binary serving it must never disagree about what
+// they are running, which they would the moment the version were written down
+// in two places. Both of these read the same variable, and this is what says so
+// out loud: a manifest with its own hardcoded number would pass every other
+// test in this file while telling a phone the wrong thing for months.
+func TestTheVersionIsReportedIdenticallyEverywhere(t *testing.T) {
+	s, _ := newTestServer(t, true)
+
+	res := httptest.NewRecorder()
+	s.ServeHTTP(res, httptest.NewRequest("GET", "/manifest.webmanifest", nil))
+	if res.Code != http.StatusOK {
+		t.Fatalf("manifest = %d, want 200", res.Code)
+	}
+	if ct := res.Header().Get("Content-Type"); ct != "application/manifest+json" {
+		t.Fatalf("manifest content type = %q", ct)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("the manifest no longer parses, which makes the app uninstallable: %v", err)
+	}
+	if doc["version"] != version {
+		t.Fatalf("manifest version = %v, want %q", doc["version"], version)
+	}
+	// The fields the install prompt rests on have to survive the re-encoding.
+	for _, key := range []string{"name", "id", "start_url", "icons", "display"} {
+		if _, ok := doc[key]; !ok {
+			t.Fatalf("re-encoding the manifest dropped %q", key)
+		}
+	}
+
+	res = httptest.NewRecorder()
+	s.ServeHTTP(res, httptest.NewRequest("GET", "/api/config", nil))
+	var cfg map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["version"] != version {
+		t.Fatalf("config version = %v, want %q", cfg["version"], version)
 	}
 }

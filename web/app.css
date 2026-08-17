@@ -108,7 +108,14 @@ main {
 
 body > section main { max-width: 632px; }
 
-#views > [data-view="send"] { max-width: 660px; }
+/* Centered, not just bounded. A max-width with no inline margin pins the panel
+   to the left of whatever space it is given, which on a tablet leaves a column
+   of empty hull down one side and reads as a layout that failed rather than as
+   a measure that was chosen. */
+#views > [data-view="send"] {
+  max-width: 660px;
+  margin-inline: auto;
+}
 
 h2 {
   margin: 0 0 clamp(20px, 2.6vw, 30px);

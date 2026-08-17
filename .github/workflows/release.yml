@@ -93,9 +93,65 @@ jobs:
           rm -f *.sha256
           ls -la
 
+      # The generated notes are a list of commits, which tells someone who
+      # already knows the project what changed and tells a first-time downloader
+      # nothing. This is the part that says which file to take and how to check
+      # it. The commit list is appended below it by generate_release_notes.
+      - name: Write the release notes
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          cat > NOTES.md <<EOF
+          **Airlock** is self-hosted, end-to-end encrypted file transfer between your own
+          devices, over your Tailscale network. One binary, an installable web app, no
+          accounts and no public port.
+
+          ### Which file do I want
+
+          | Your machine | Download |
+          | --- | --- |
+          | Linux, most PCs and servers | \`airlock_${TAG}_linux_amd64\` |
+          | Linux on a Pi or an ARM VPS | \`airlock_${TAG}_linux_arm64\` |
+          | Mac, Apple silicon | \`airlock_${TAG}_darwin_arm64\` |
+          | Mac, Intel | \`airlock_${TAG}_darwin_amd64\` |
+          | Windows | \`airlock_${TAG}_windows_amd64.exe\` |
+          | Windows on ARM | \`airlock_${TAG}_windows_arm64.exe\` |
+
+          ### Getting started
+
+          \`\`\`bash
+          curl -LO https://github.com/${REPO}/releases/download/${TAG}/airlock_${TAG}_linux_amd64
+          curl -LO https://github.com/${REPO}/releases/download/${TAG}/SHA256SUMS
+          sha256sum --check --ignore-missing SHA256SUMS
+          chmod +x airlock_${TAG}_linux_amd64
+          ./airlock_${TAG}_linux_amd64
+          \`\`\`
+
+          It prints the one URL that works. Open it on any device on your tailnet,
+          choose a passphrase, and send a file. That is the whole setup.
+
+          **You need** [Tailscale](https://tailscale.com) on at least two devices, and
+          [HTTPS certificates enabled](https://tailscale.com/kb/1153/enabling-https) on
+          your tailnet. Airlock needs a real certificate because the browser needs a
+          secure context: without one there is no Web Crypto and no service worker, and
+          the client cannot work at all.
+
+          Setup, options and the security model are in the
+          [README](https://github.com/${REPO}#readme).
+
+          ### Verifying a download
+
+          Every binary ships its own \`.sha256\`, and \`SHA256SUMS\` carries all six.
+
+          ---
+          EOF
+          cat NOTES.md
+
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           draft: false
+          body_path: NOTES.md
           generate_release_notes: true
           files: staged/*

@@ -276,7 +276,7 @@ func TestRevocationClosesTheTargetStreamAndPublishesADevicesEvent(t *testing.T) 
 
 func TestRevocationRemovesTheTargetsPushSubscriptions(t *testing.T) {
 	s, devices := newTestServer(t, true)
-	pusher, err := NewPusher(t.TempDir(), "mailto:test@invalid")
+	pusher, err := NewPusher(t.TempDir(), "mailto:test@invalid", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +320,7 @@ func (b *delayedSubscriptionBody) Read(p []byte) (int, error) {
 
 func TestRevocationWinsAgainstAnAlreadyAuthorizedPushSubscribe(t *testing.T) {
 	s, devices := newTestServer(t, true)
-	pusher, err := NewPusher(t.TempDir(), "mailto:test@invalid")
+	pusher, err := NewPusher(t.TempDir(), "mailto:test@invalid", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

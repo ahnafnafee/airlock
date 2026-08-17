@@ -14,7 +14,7 @@ import (
 
 func TestVapidKeysPersistAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
-	p, err := NewPusher(dir, "mailto:test@invalid")
+	p, err := NewPusher(dir, "mailto:test@invalid", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,7 +22,7 @@ func TestVapidKeysPersistAcrossRestart(t *testing.T) {
 		t.Fatal("a VAPID public key should be generated on first run")
 	}
 
-	again, err := NewPusher(dir, "mailto:test@invalid")
+	again, err := NewPusher(dir, "mailto:test@invalid", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestVapidKeysPersistAcrossRestart(t *testing.T) {
 
 func TestSubscribeIsIdempotentPerEndpoint(t *testing.T) {
 	dir := t.TempDir()
-	p, err := NewPusher(dir, "mailto:test@invalid")
+	p, err := NewPusher(dir, "mailto:test@invalid", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestSubscribeIsIdempotentPerEndpoint(t *testing.T) {
 		t.Fatalf("count = %d, want 1 for a repeated endpoint", p.Count())
 	}
 
-	reloaded, err := NewPusher(dir, "mailto:test@invalid")
+	reloaded, err := NewPusher(dir, "mailto:test@invalid", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestSubscribeIsIdempotentPerEndpoint(t *testing.T) {
 
 func TestRemoveNodeStopsGenericPushAndPersists(t *testing.T) {
 	dir := t.TempDir()
-	p, err := NewPusher(dir, "mailto:test@invalid")
+	p, err := NewPusher(dir, "mailto:test@invalid", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestRemoveNodeStopsGenericPushAndPersists(t *testing.T) {
 		t.Fatalf("generic push targets after removal = %v, want [desktop]", got)
 	}
 
-	reloaded, err := NewPusher(dir, "mailto:test@invalid")
+	reloaded, err := NewPusher(dir, "mailto:test@invalid", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestRemoveNodeStopsGenericPushAndPersists(t *testing.T) {
 }
 
 func TestSubscribeRejectsMissingEndpoint(t *testing.T) {
-	p, err := NewPusher(t.TempDir(), "mailto:test@invalid")
+	p, err := NewPusher(t.TempDir(), "mailto:test@invalid", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestSubscribeRejectsMissingEndpoint(t *testing.T) {
 // endpoint that names something other than a push service over https is a way
 // to aim the server at a host of the caller's choosing.
 func TestSubscribeRejectsNonHTTPSEndpoints(t *testing.T) {
-	p, err := NewPusher(t.TempDir(), "mailto:test@invalid")
+	p, err := NewPusher(t.TempDir(), "mailto:test@invalid", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestSubscribeRejectsNonHTTPSEndpoints(t *testing.T) {
 }
 
 func TestTargetsExcludeTheSenderAndRespectAddressing(t *testing.T) {
-	p, err := NewPusher(t.TempDir(), "mailto:test@invalid")
+	p, err := NewPusher(t.TempDir(), "mailto:test@invalid", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestTargetsExcludeTheSenderAndRespectAddressing(t *testing.T) {
 // every device behind the silent one in the list waits on it forever. Neither
 // failure logs anything, and neither can be pruned, because nothing ever errors.
 func TestNotifySurvivesAnEndpointThatNeverAnswers(t *testing.T) {
-	p, err := NewPusher(t.TempDir(), "mailto:test@invalid")
+	p, err := NewPusher(t.TempDir(), "mailto:test@invalid", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

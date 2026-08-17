@@ -259,7 +259,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	pusher, err := NewPusher(*dataDir, *vapidSubject)
+	pusher, err := NewPusher(*dataDir, *vapidSubject, time.Duration(*ttlHours)*time.Hour)
 	if err != nil {
 		return err
 	}

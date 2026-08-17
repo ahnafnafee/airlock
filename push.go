@@ -32,6 +32,10 @@ const pushTimeout = 10 * time.Second
 // no information, so there is no length for a record size to hide.
 const pushRecordBytes = 1024
 
+// The ceiling a push service will honor regardless of what is asked for. Four
+// weeks is the documented maximum for both Mozilla's autopush and FCM.
+const maxPushTTL = 28 * 24 * 60 * 60
+
 type subscription struct {
 	Node string               `json:"node"`
 	Sub  webpush.Subscription `json:"sub"`
@@ -48,15 +52,36 @@ type vapidKeys struct {
 type Pusher struct {
 	dir     string
 	subject string
-	keys    vapidKeys
-	client  *http.Client
+	// How long a push service should hold a notification for a device that is
+	// not reachable when it is sent. A phone asleep, out of signal, or with its
+	// browser not running is the ordinary case rather than the exception, and a
+	// notification dropped before the device comes back is one the owner never
+	// learns about while the file is still there to collect.
+	ttl    uint32
+	keys   vapidKeys
+	client *http.Client
 
 	mu   sync.Mutex
 	subs []subscription
 }
 
-func NewPusher(dir, subject string) (*Pusher, error) {
-	p := &Pusher{dir: dir, subject: subject, client: &http.Client{Timeout: pushTimeout}}
+func NewPusher(dir, subject string, hold time.Duration) (*Pusher, error) {
+	// Never outlive the transfer it announces. A notification that arrives after
+	// the sweep has taken the file opens an inbox with nothing in it, which reads
+	// as the app losing something rather than as an expiry working correctly.
+	seconds := int64(hold / time.Second)
+	if seconds < 0 {
+		seconds = 0
+	}
+	if seconds > int64(maxPushTTL) {
+		seconds = int64(maxPushTTL)
+	}
+	p := &Pusher{
+		dir:     dir,
+		subject: subject,
+		ttl:     uint32(seconds),
+		client:  &http.Client{Timeout: pushTimeout},
+	}
 
 	// Only a genuinely absent file may be replaced. Any other read failure is
 	// reported rather than treated as "no keys yet", because generating a fresh
@@ -210,7 +235,7 @@ func (p *Pusher) Notify(recipients []string, sender string) {
 				Subscriber:      p.subject,
 				VAPIDPublicKey:  p.keys.Public,
 				VAPIDPrivateKey: p.keys.Private,
-				TTL:             3600,
+				TTL:             int(p.ttl),
 				RecordSize:      pushRecordBytes,
 			})
 			if err != nil {

@@ -4,11 +4,16 @@
 
 .DESCRIPTION
     A browser-only product cannot install a shell extension and should not try.
-    What it can do is register a per-user context-menu command pointing at the
-    launcher Chrome or Edge already creates when the PWA is installed. That
-    launcher takes a file path and hands it to the app's launchQueue, the same
-    path the Open with menu uses, so the file is staged in the Send view and
-    waits for a destination.
+    What it can do is register a per-user context-menu command that invokes the
+    launcher Chrome or Edge already creates when the PWA is installed, the same
+    way those browsers invoke it for the Open with menu. The file is then handed
+    to the app's launchQueue, staged in the Send view, and waits for a
+    destination.
+
+    Invoked the same way, exactly: the launcher must be given the profile, the
+    app id, and --single-argument. Handed a bare path it opens the browser on it
+    as though the path were a URL, which puts the file in a tab and never
+    reaches the app at all.
 
     Nothing is shipped but a registry key. A helper that uploaded straight from
     the shell would need the passphrase, and it would become a second
@@ -65,7 +70,20 @@ if (-not $launcher) {
 # uninstall-context-menu.ps1 restates this path on purpose, so either script can
 # be run on its own. Renaming the key means editing both.
 $path = 'Software\Classes\*\shell\Airlock'
-$command = "`"$($launcher.FullName)`" `"%1`""
+
+# Both halves of the app's address are in the launcher's own path, which is
+# <User Data>\<profile>\Web Applications\_crx_<app id>\Airlock.exe. Read from
+# there rather than asked for, so the entry cannot end up addressing a different
+# profile's copy of the same app.
+#
+# Every argument here is load-bearing. Without --app-id the launcher opens the
+# browser rather than the app; without --single-argument a path holding a space
+# or an ampersand is split into several arguments and none of them is the file.
+# This is the same command line the browser writes for its own Open with
+# handlers, which is the point: one way in, already known to work.
+$appId = $launcher.Directory.Name -replace '^_crx_', ''
+$profile = $launcher.Directory.Parent.Parent.Name
+$command = "`"$($launcher.FullName)`" --profile-directory=$profile --app-id=$appId --single-argument %1"
 
 # The launcher is a stub the browser copies for every installed app, so its own
 # first icon is the browser's, not Airlock's. Beside it the browser writes an

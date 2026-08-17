@@ -541,6 +541,20 @@ function paintStrip(strip, p) {
 }
 
 async function sendNow(files) {
+  // The same reason a save takes one: a device left alone mid-upload parks its
+  // radio, and the connection does not recover to full speed when it wakes.
+  // Held across the whole batch rather than per file, so it is not dropped and
+  // retaken between two files of a ten-file send.
+  const { transfersActive } = await import('../wake.js');
+  await transfersActive(1);
+  try {
+    return await sendBatch(files);
+  } finally {
+    await transfersActive(-1);
+  }
+}
+
+async function sendBatch(files) {
   const {
     recipient, progress, ruler, edits, key, status, announcement,
   } = requireControls();

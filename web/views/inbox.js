@@ -186,7 +186,20 @@ async function readElsewhere(id, node, get = api.getProgress) {
 
 async function saveTransfer(transferId, meta = null, onPercent = null) {
   const { assembleTransfer } = await import('../receive.js');
+  const { transfersActive } = await import('../wake.js');
   const publish = progressPublisher(transferId);
+  // A save is the longest thing this app does and the one a person is least
+  // likely to sit and watch. Left alone, the device parks its radio and the
+  // download stalls at a fraction of what the link can carry.
+  await transfersActive(1);
+  try {
+    return await runSave(transferId, meta, onPercent, assembleTransfer, publish);
+  } finally {
+    await transfersActive(-1);
+  }
+}
+
+async function runSave(transferId, meta, onPercent, assembleTransfer, publish) {
   // The row already decrypted this transfer's metadata to draw its name, and
   // handing it over is what lets an already-assembled file reach the export
   // with no network in between. A save picker and a share sheet both spend the

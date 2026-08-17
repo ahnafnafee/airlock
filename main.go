@@ -24,7 +24,7 @@ import (
 )
 
 //go:embed web/index.html web/tokens.css web/app.css web/api.js web/app.js web/crypto.js web/cdc.js web/upload.js web/strip.js web/thumb.js web/sw.js web/naming.js web/notification.js web/views
-//go:embed web/staging.js web/stage-worker.js web/receive.js
+//go:embed web/staging.js web/stage-worker.js web/receive.js web/wake.js
 //go:embed web/sealpool.js web/seal-worker.js
 //go:embed web/assemble.js web/assemble-worker.js web/export.js web/inbound.js web/ios.js
 //go:embed web/fonts

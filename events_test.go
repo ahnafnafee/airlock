@@ -294,3 +294,102 @@ func TestOnlineListsSubscribedNodesOnce(t *testing.T) {
 		t.Fatalf("after both desktop streams closed, Online = %v", got)
 	}
 }
+
+// Progress is its own event because a nudge means "re-read the inbox", and a
+// save ticking for the length of a large file would have every other device
+// re-reading and re-decrypting the whole list to learn one number.
+func TestProgressReachesWatchersAndNotTheSavingDevice(t *testing.T) {
+	e := NewEvents()
+	pixel, closePixel := e.Subscribe("pixel")
+	desktop, closeDesktop := e.Subscribe("desktop")
+	defer closePixel()
+	defer closeDesktop()
+
+	e.PublishProgress(nil, "abc123", "pixel")
+
+	got, ok := recv(t, desktop)
+	if !ok {
+		t.Fatal("a device that can see the transfer should be told it moved")
+	}
+	// The id and the device travel; how far along it is deliberately does not,
+	// so a watcher has to read it from the endpoint that scopes it.
+	if want := "progress:abc123:pixel"; got != want {
+		t.Fatalf("progress message = %q, want %q", got, want)
+	}
+	select {
+	case v := <-pixel:
+		t.Fatalf("the saving device was told about its own progress: %q", v)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// Addressing holds for progress exactly as it does for an arrival: a device with
+// no claim on the transfer must not learn that it exists, let alone that
+// somebody is part way through saving it.
+func TestProgressRespectsAddressing(t *testing.T) {
+	e := NewEvents()
+	pixel, closePixel := e.Subscribe("pixel")
+	stranger, closeStranger := e.Subscribe("stranger")
+	defer closePixel()
+	defer closeStranger()
+
+	e.PublishProgress([]string{"pixel", "laptop"}, "abc123", "laptop")
+
+	if _, ok := recv(t, pixel); !ok {
+		t.Fatal("an addressee should be told the transfer moved")
+	}
+	select {
+	case v := <-stranger:
+		t.Fatalf("a device with no claim on the transfer was told about it: %q", v)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// The framing matters as much as the routing: the client splits the data field
+// on its first colon to recover the transfer and the device, so a frame that
+// carried the wrong event name or lost either half would leave a watcher with
+// no way to tell which row moved.
+func TestEventsRouteStreamsProgressWithItsTransferAndDevice(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", ts.URL+"/api/events", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for s.cfg.Events.Count() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the handler never subscribed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Published as another device, because the one doing the saving is the one
+	// device the event deliberately never reaches.
+	s.cfg.Events.PublishProgress(nil, "abc123", "pixel-10-pro")
+
+	lines := bufio.NewScanner(res.Body)
+	named := false
+	for lines.Scan() {
+		if lines.Text() == "event: progress" {
+			named = true
+			continue
+		}
+		if named {
+			if want := "data: abc123:pixel-10-pro"; lines.Text() != want {
+				t.Fatalf("progress frame = %q, want %q", lines.Text(), want)
+			}
+			return
+		}
+	}
+	t.Fatalf("the stream ended without a progress event: %v", lines.Err())
+}

@@ -71,7 +71,10 @@ self.addEventListener('message', async (event) => {
       const percent = Math.floor((done * 100) / total);
       if (percent === said) return;
       said = percent;
-      self.postMessage({ percent });
+      // The position travels with the percent because the page publishes this
+      // to the other devices as a bitmap, which needs the count and the total
+      // rather than the rounded figure a person reads.
+      self.postMessage({ percent, done, total });
     };
     const file = await assemble(transfer, meta, {
       mk, mode: MODE_SEALED, hashes, cids, stage, onChunk,

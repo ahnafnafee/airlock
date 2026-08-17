@@ -1360,3 +1360,156 @@ func TestChunkLimitIsNotRaisedByARoomyRecordCap(t *testing.T) {
 		t.Fatalf("maxChunks = %d, want the configured 5", tr.maxChunks)
 	}
 }
+
+// The inbox carries what other devices have saved, because the progress
+// endpoint only answers a question somebody knew to ask. A page opened after a
+// save finished, or while another view was on screen, has no event coming, and
+// without this it would show nothing about a file that has already landed.
+func TestInboxCarriesWhatOtherDevicesHaveSaved(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, err := tr.Create("laptop", []string{"pixel", "ipad"}, []string{cid(1), cid(2), cid(3)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two of three chunks written, which is 2 bits set in a one-byte bitmap.
+	if err := tr.SetProgress(rec.ID, "pixel", []byte{0b00000011}); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := tr.Inbox("laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("inbox has %d transfers, want 1", len(list))
+	}
+	if got := list[0].Saved["pixel"]; got != 2 {
+		t.Fatalf("pixel saved = %d, want 2 chunks", got)
+	}
+	// A device that has written nothing is absent rather than reported as zero,
+	// so the map names the devices that have actually started.
+	if _, ok := list[0].Saved["ipad"]; ok {
+		t.Fatal("a device that has not started should not appear")
+	}
+}
+
+// A device is never told about its own progress: it knows, and a row reporting
+// a save back to the device performing it is noise.
+func TestInboxOmitsTheViewersOwnProgress(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, err := tr.Create("laptop", []string{"pixel"}, []string{cid(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.SetProgress(rec.ID, "pixel", []byte{0b00000001}); err != nil {
+		t.Fatal(err)
+	}
+
+	mine, err := tr.Inbox("pixel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := mine[0].Saved["pixel"]; ok {
+		t.Fatal("a device was told its own save progress")
+	}
+	// The same transfer still reports it to the sender watching from elsewhere.
+	theirs, err := tr.Inbox("laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if theirs[0].Saved["pixel"] != 1 {
+		t.Fatalf("sender saw %v, want pixel at 1 chunk", theirs[0].Saved)
+	}
+}
+
+// A page closed or killed mid-save never runs the code that takes its figure
+// back, so the figure has to expire on its own. Without this a row reports a
+// file as nearly arrived forever, which is worse than saying nothing: it names
+// a number that will never change and never be true.
+func TestAnAbandonedSaveStopsBeingReported(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, err := tr.Create("laptop", []string{"pixel"}, []string{cid(1), cid(2), cid(3)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.SetProgress(rec.ID, "pixel", []byte{0b00000011}); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := tr.Inbox("laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list[0].Saved["pixel"] != 2 {
+		t.Fatalf("a fresh figure should be reported, got %v", list[0].Saved)
+	}
+
+	// Age it past the window without waiting for one.
+	dir, err := tr.transferDir(rec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-progressStale - time.Minute)
+	if err := os.Chtimes(filepath.Join(dir, progressName("pixel")), old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err = tr.Inbox("laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := list[0].Saved["pixel"]; ok {
+		t.Fatalf("an abandoned figure was still reported: %v", list[0].Saved)
+	}
+}
+
+// A device that finished has the file, and that stays true however long ago it
+// happened. Expiring a completed figure would erase the one thing worth keeping.
+func TestAFinishedSaveIsReportedHoweverOldItIs(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, err := tr.Create("laptop", []string{"pixel"}, []string{cid(1), cid(2), cid(3)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.SetProgress(rec.ID, "pixel", []byte{0b00000111}); err != nil {
+		t.Fatal(err)
+	}
+	dir, _ := tr.transferDir(rec.ID)
+	old := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(filepath.Join(dir, progressName("pixel")), old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := tr.Inbox("laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list[0].Saved["pixel"] != 3 {
+		t.Fatalf("a completed save should still be reported, got %v", list[0].Saved)
+	}
+}
+
+// Withdrawing is an all-zero bitmap rather than a deletion, because the
+// endpoint's contract is a bitmap matching the chunk list. It has to read back
+// as nothing at all, not as a device sitting at zero percent.
+func TestAWithdrawnFigureReadsAsAbsent(t *testing.T) {
+	tr, _ := newTransfers(t)
+	rec, _, err := tr.Create("laptop", []string{"pixel"}, []string{cid(1), cid(2), cid(3)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.SetProgress(rec.ID, "pixel", []byte{0b00000011}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.SetProgress(rec.ID, "pixel", []byte{0}); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := tr.Inbox("laptop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := list[0].Saved["pixel"]; ok {
+		t.Fatalf("a withdrawn figure was still reported: %v", list[0].Saved)
+	}
+}

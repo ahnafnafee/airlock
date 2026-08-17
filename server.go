@@ -69,12 +69,57 @@ type Server struct {
 	cfg    ServerConfig
 	mux    *http.ServeMux
 	pushMu sync.Mutex
+
+	// When each device last had progress on each transfer announced to the
+	// others. The write itself is never rationed; this bounds the fan-out it
+	// triggers. The app throttles itself to one update a second, and this is
+	// what holds when the caller is not the app.
+	progressMu   sync.Mutex
+	progressSeen map[string]time.Time
+
+	// The manifest with this build's version written into it. Built on first
+	// request and held, because it changes only when the binary does.
+	manifestOnce sync.Once
+	manifestBody []byte
 }
 
+// How often one device's progress on one transfer may be announced. Slow enough
+// that a save cannot flood every other device with reads, fast enough that a
+// figure on another screen still looks live.
+const progressEvery = 500 * time.Millisecond
+
 func NewServer(cfg ServerConfig) *Server {
-	s := &Server{cfg: cfg, mux: http.NewServeMux()}
+	s := &Server{
+		cfg:          cfg,
+		mux:          http.NewServeMux(),
+		progressSeen: map[string]time.Time{},
+	}
 	s.routes()
 	return s
+}
+
+// tooSoon reports whether this device's progress on this transfer was already
+// announced within the window, and records the announcement when it was not.
+//
+// The map is swept rather than allowed to grow: it holds one entry per device
+// per transfer being saved, and a transfer that is swept from the store would
+// otherwise leave its entry behind for the life of the process.
+func (s *Server) tooSoon(id, node string, now time.Time) bool {
+	s.progressMu.Lock()
+	defer s.progressMu.Unlock()
+	key := id + ":" + node
+	if last, ok := s.progressSeen[key]; ok && now.Sub(last) < progressEvery {
+		return true
+	}
+	if len(s.progressSeen) > 1024 {
+		for k, seen := range s.progressSeen {
+			if now.Sub(seen) > time.Hour {
+				delete(s.progressSeen, k)
+			}
+		}
+	}
+	s.progressSeen[key] = now
+	return false
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
@@ -120,6 +165,12 @@ func (s *Server) routes() {
 		clone.URL.Path = "/"
 		files.ServeHTTP(w, clone)
 	}))
+	// Ahead of the catch-all so the version reaches the installed app. Served
+	// from the same embedded file the rest of the client comes from, with the
+	// one field the binary is authoritative for written in as it goes, rather
+	// than a number copied into the file that would then have to be remembered.
+	s.mux.HandleFunc("GET /manifest.webmanifest", s.open(s.manifest))
+
 	s.mux.HandleFunc("GET /", s.open(files.ServeHTTP))
 }
 
@@ -265,6 +316,36 @@ func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// manifest serves the web app manifest with this build's version in it.
+//
+// Parsed and re-encoded rather than string-substituted: a manifest that fails
+// to parse is one the browser refuses outright, taking installability and the
+// share target with it, and that is not a failure worth risking to save a JSON
+// round trip. Built once and held, because it changes only when the binary does.
+func (s *Server) manifest(w http.ResponseWriter, r *http.Request) {
+	s.manifestOnce.Do(func() {
+		raw, err := fs.ReadFile(s.cfg.Static, "manifest.webmanifest")
+		if err != nil {
+			return
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			return
+		}
+		doc["version"] = version
+		if out, err := json.Marshal(doc); err == nil {
+			s.manifestBody = out
+		}
+	})
+	if s.manifestBody == nil {
+		http.Error(w, "manifest unavailable", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/manifest+json")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(s.manifestBody)
+}
+
 func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"auth":       s.cfg.Auth,
@@ -273,6 +354,7 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 		"ttlMinutes": int(s.cfg.TTL / time.Minute),
 		"vapidKey":   s.cfg.Push.PublicKey(),
 		"stunPort":   s.cfg.StunPort,
+		"version":    version,
 		"check":      nil,
 	}
 	if b, err := os.ReadFile(filepath.Join(s.cfg.DataDir, "check.bin")); err == nil {
@@ -480,14 +562,39 @@ func (s *Server) getRecord(w http.ResponseWriter, r *http.Request) {
 // verified identity rather than the body, so no device can claim delivery on
 // another's behalf.
 func (s *Server) putProgress(w http.ResponseWriter, r *http.Request) {
+	id, node := r.PathValue("id"), who(r).Node
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if fail(w, err) {
 		return
 	}
-	if fail(w, s.cfg.Transfers.SetProgress(r.PathValue("id"), who(r).Node, body)) {
+	if fail(w, s.cfg.Transfers.SetProgress(id, node, body)) {
 		return
 	}
+	// The write always lands; only the announcement is rationed. Those are
+	// different costs. A write is one bounded, idempotent file replaced in
+	// place, and refusing it would drop updates a caller cannot resend,
+	// including the last one, which is the state every watcher is left looking
+	// at. An announcement is amplification: one request becomes a message to
+	// every device that can see the transfer and a read back from each of them.
+	// So the rate limit belongs here, where the fan-out is, and a suppressed
+	// announcement costs a watcher nothing but a slightly later figure.
+	if info, err := s.cfg.Transfers.Get(id); err == nil && !s.tooSoon(id, node, time.Now()) {
+		s.cfg.Events.PublishProgress(progressAudience(info), id, node)
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// Who is entitled to watch a transfer move. The addressees, plus the device that
+// sent it, which is the one most likely to be watching and is not in To.
+//
+// An empty To means the transfer was addressed to every device, and an empty
+// recipient list is how the event layer spells that, so it is passed through
+// rather than turned into a list that would narrow it.
+func progressAudience(info *TransferInfo) []string {
+	if len(info.To) == 0 {
+		return nil
+	}
+	return append(append([]string{}, info.To...), info.Sender)
 }
 
 func (s *Server) getProgress(w http.ResponseWriter, r *http.Request) {
@@ -640,6 +747,12 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			}
 			if msg == "devices" {
 				fmt.Fprint(w, "event: devices\ndata: 1\n\n")
+			} else if detail, ok := strings.CutPrefix(msg, "progress:"); ok {
+				// "<transfer id>:<device>". Neither half can contain a newline
+				// or a colon: the id is hex and a device name is a DNS label,
+				// so the framing this field rests on holds and the client can
+				// split on the first colon.
+				fmt.Fprintf(w, "event: progress\ndata: %s\n\n", detail)
 			} else {
 				// The data field is the sending device's name, and empty when
 				// the nudge is not about an arrival. A device name cannot

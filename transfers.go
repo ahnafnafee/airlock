@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -59,6 +60,13 @@ type TransferInfo struct {
 	Complete bool     `json:"complete"`
 	Meta     string   `json:"meta"`
 	Thumb    string   `json:"thumb"`
+	// How many chunks each device has written, for the devices that have
+	// started. Carried with the list rather than left to the progress endpoint
+	// alone, because that endpoint only ever answers a question somebody knew
+	// to ask: a page opened after a save, or while looking at another view, has
+	// no event coming and would show nothing at all. This is the state a fresh
+	// render starts from, and the stream keeps it current from there.
+	Saved map[string]int `json:"saved,omitempty"`
 }
 
 // Tombstone records that a transfer existed and ended. It counts chunks rather
@@ -484,10 +492,69 @@ func (t *Transfers) Inbox(node string) ([]*TransferInfo, error) {
 		if !visibleTo(info.Sender, info.To, node) || contains(info.Declined, node) {
 			continue
 		}
+		info.Saved = t.savedCounts(info, node)
 		out = append(out, info)
 	}
 	return out, nil
 }
+
+// How far each other device has got with a transfer. Only the others: this
+// device knows its own state without being told, and a row reporting a save
+// back to the device performing it is noise.
+//
+// A device with nothing written is left out rather than reported as zero, so
+// the map names devices that have actually started. Scoping is the caller's
+// visibility of the transfer, already established above, which is the same rule
+// the progress endpoint applies.
+func (t *Transfers) savedCounts(info *TransferInfo, viewer string) map[string]int {
+	dir, err := t.transferDir(info.ID)
+	if err != nil {
+		return nil
+	}
+	var saved map[string]int
+	for _, who := range info.To {
+		if who == viewer {
+			continue
+		}
+		p := filepath.Join(dir, progressName(who))
+		stat, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		bitmap, err := t.progressOf(info.ID, who)
+		if err != nil || len(bitmap) == 0 {
+			continue
+		}
+		n := 0
+		for _, b := range bitmap {
+			n += bits.OnesCount8(b)
+		}
+		if n == 0 {
+			continue
+		}
+		// A part-finished figure that has stopped moving is not evidence of a
+		// save in progress; it is the last thing a device managed to say before
+		// it stopped saying anything. A page closed or killed mid-save never
+		// runs the code that would take its figure back, so the figure has to
+		// be able to expire on its own or a row reports a file as nearly there
+		// forever. A finished one never expires: that device has the file, and
+		// that stays true however long ago it happened.
+		if n < len(info.Cids) && time.Since(stat.ModTime()) > progressStale {
+			continue
+		}
+		if saved == nil {
+			saved = map[string]int{}
+		}
+		saved[who] = n
+	}
+	return saved
+}
+
+// How long an unfinished figure stands without being updated before it is
+// treated as abandoned. Generously longer than the client's own one-a-second
+// reporting, because a single chunk on a slow link can take a while and a save
+// that is merely crawling must not be mistaken for one that has died.
+const progressStale = 2 * time.Minute
 
 // visibleTo reports whether a node may see and act on a transfer. One predicate
 // serves the inbox, the history and deletion, because the device that can see a

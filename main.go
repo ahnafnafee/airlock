@@ -24,7 +24,7 @@ import (
 )
 
 //go:embed web/index.html web/tokens.css web/app.css web/api.js web/app.js web/crypto.js web/cdc.js web/upload.js web/strip.js web/thumb.js web/sw.js web/naming.js web/notification.js web/views
-//go:embed web/staging.js web/stage-worker.js web/receive.js
+//go:embed web/staging.js web/stage-worker.js web/receive.js web/wake.js web/chime.js
 //go:embed web/sealpool.js web/seal-worker.js
 //go:embed web/assemble.js web/assemble-worker.js web/export.js web/inbound.js web/ios.js
 //go:embed web/fonts
@@ -32,9 +32,18 @@ import (
 //go:embed web/screenshot-wide.png web/screenshot-narrow.png
 var webFS embed.FS
 
-// Set at build time with -X main.version. A build made any other way says so
-// rather than claiming a release it is not.
-var version = "dev"
+// The one place a version is read from. Everything that shows one reads it
+// here: the -version flag, /api/config, and the web manifest the installed app
+// registers against, so a phone and the binary serving it cannot disagree about
+// what they are running.
+//
+// A release overwrites this with its tag, via -X main.version in the build. The
+// value below is therefore what a build made any other way reports, and it is
+// kept at the version last released so a local build says something true rather
+// than something that has to be decoded. It must stay a var: as a const the
+// linker cannot write to it and every release would quietly ship this string
+// instead of its own tag.
+var version = "v0.2.0"
 
 var (
 	showVersion     = flag.Bool("version", false, "print the version and exit")

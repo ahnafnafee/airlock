@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { RUNG, exportFile, exportRungs } from './export.js';
 import {
-  assemble, assembledFile, chunkSource, reconcileAssembled, removeAssembled,
+  READAHEAD, assemble, assembledFile, chunkSource, reconcileAssembled, removeAssembled,
 } from './assemble.js';
 import { MODE_SEALED, chunkIdentity, sealChunk } from './crypto.js';
 
@@ -152,6 +152,45 @@ test('assembly reads the next chunk while the current one is opening', async () 
   await assembling;
 
   assert.equal(readAhead, true, 'chunk 1 should start loading before chunk 0 arrives');
+});
+
+// Every chunk of a server-held transfer is a round trip away, so what decides how
+// long a save takes is how many of those trips are in the air at once. One at a
+// time pays the latency once per chunk with the link otherwise idle, which is
+// invisible on a LAN and dominates everything the moment the server is not on one.
+test('assembly keeps several chunk reads in flight, not one', async () => {
+  const mk = await masterKey();
+  const plains = Array.from({ length: 8 }, (_, i) => new Uint8Array(7).fill(i + 1));
+  const { hashes, cids, sealed } = await sealedChunks(mk, plains);
+  const size = plains.reduce((n, p) => n + p.length, 0);
+
+  let open = 0;
+  let peak = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const stage = {
+    get: async (i) => {
+      open++;
+      peak = Math.max(peak, open);
+      await gate;
+      open--;
+      return sealed[i];
+    },
+    remove: async () => {},
+  };
+
+  const assembling = assemble(ID, { ...META, size }, {
+    mk, mode: MODE_SEALED, hashes, cids, stage, root: fakeStorage(),
+  });
+  // Let every read the loop is willing to start get started.
+  for (let i = 0; i < 50; i++) await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  const reached = peak;
+  release();
+  await assembling;
+
+  assert.ok(reached >= READAHEAD,
+    `expected at least ${READAHEAD} reads in flight, saw ${reached}`);
 });
 
 test('a chunk that fails its tag aborts assembly rather than writing a short file', async () => {

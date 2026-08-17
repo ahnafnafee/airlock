@@ -12,8 +12,15 @@ const mkP = deriveMaster('test passphrase', b64encode(new Uint8Array(16).fill(3)
 const TRANSFER = 'a'.repeat(32);
 
 function fakeFile(bytes, name = 'f.bin', type = 'application/octet-stream') {
+  // Every byte range the uploader asks for, so a test can assert on what it did
+  // not need to read as well as on what it sent.
+  const reads = [];
   return {
-    name, type, size: bytes.length,
+    name, type, size: bytes.length, reads,
+    slice(from, to) {
+      reads.push([from, to]);
+      return { arrayBuffer: async () => bytes.slice(from, to).buffer };
+    },
     stream() {
       let off = 0;
       return new ReadableStream({
@@ -302,9 +309,15 @@ test('an empty file sends its sealed records without inventing a chunk', async (
   assert.deepEqual(api.calls.records.map((x) => x.kind), ['chunklist', 'meta']);
   assert.equal(result.total, 0);
   assert.equal(result.sent, 0);
-  assert.deepEqual(await sealedMeta(api), {
+  const { sentMs, ...described } = await sealedMeta(api);
+  assert.deepEqual(described, {
     name: 'empty.txt', size: 0, mime: 'application/octet-stream',
   });
+  // Separated out because it is the one field that cannot be asserted by value.
+  // It still has to be there and still has to be a duration: History reads it,
+  // and a string or a negative number would render as a nonsense row.
+  assert.equal(typeof sentMs, 'number');
+  assert.ok(sentMs >= 0);
 });
 
 test('progress reports how many chunks are on the wire', async () => {
@@ -438,4 +451,58 @@ test('a re-send reports where the held chunks are, not just how many', async () 
   assert.deepEqual(r.heldAt, expected, 'every position except the changed one should report as held');
   assert.deepEqual(reports.at(-1).storedAt, [middle],
     `the stored position should be the one that changed, got ${JSON.stringify(reports.at(-1).storedAt)}`);
+});
+
+// Pass one already records where every boundary falls, so pass two reads each
+// chunk at its offset instead of running the chunker again to rediscover one
+// that is written down. The saving worth having is not the arithmetic, it is
+// what is no longer read: re-cutting had to stream the whole file whatever the
+// server already held, so a re-send paid a full second read of a twenty
+// gigabyte file to establish that almost none of it needed to go up.
+test('a re-send reads only the chunks that are actually missing', async () => {
+  const held = new Set();
+  const data = pseudoRandom(20000, 31);
+
+  const firstFile = fakeFile(data);
+  await uploadThroughServer(firstFile, {
+    mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api: fakeApi(held),
+  });
+  assert.ok(firstFile.reads.length > 0, 'a first send has to read every chunk it uploads');
+
+  const againFile = fakeFile(data);
+  const again = fakeApi(held);
+  await uploadThroughServer(againFile, {
+    mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api: again,
+  });
+
+  assert.equal(again.calls.chunks.length, 0, 'nothing should need uploading');
+  assert.deepEqual(againFile.reads, [], 'and so nothing should be read from the file');
+});
+
+test('an edited file reads only the byte range that changed', async () => {
+  const held = new Set();
+  const data = pseudoRandom(20000, 33);
+  await uploadThroughServer(fakeFile(data), {
+    mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api: fakeApi(held),
+  });
+
+  const edited = Uint8Array.from(data);
+  edited[edited.length - 200] ^= 0xff;
+  const editedFile = fakeFile(edited);
+  const resend = fakeApi(held);
+  const r = await uploadThroughServer(editedFile, {
+    mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api: resend,
+  });
+
+  assert.ok(r.sent > 0 && r.sent < r.total, 'only part of the file should re-send');
+  assert.equal(editedFile.reads.length, r.sent,
+    'exactly one read per chunk that had to go up, and none for the rest');
+  // Every read is a real, non-empty range inside the file, in file order.
+  let last = -1;
+  for (const [from, to] of editedFile.reads) {
+    assert.ok(to > from, `an empty range ${from}..${to} would seal nothing`);
+    assert.ok(to <= edited.length, 'a read past the end would truncate a chunk');
+    assert.ok(from > last, 'chunks are read in file order');
+    last = from;
+  }
 });

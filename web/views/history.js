@@ -10,6 +10,19 @@ function ago(iso) {
   return `${Math.round(mins / 1440)}d ago`;
 }
 
+// took renders a send duration at a resolution a person can act on. Sub-second
+// precision below ten seconds, because that is where the difference between two
+// and five matters; whole seconds above it, because nobody times a minute-long
+// upload to the tenth.
+export function took(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const s = ms / 1000;
+  if (s < 10) return `${s.toFixed(1)}s`;
+  if (s < 60) return `${Math.round(s)}s`;
+  const mins = Math.floor(s / 60);
+  return `${mins}m ${String(Math.round(s - mins * 60)).padStart(2, '0')}s`;
+}
+
 // nameOf returns the filename a tombstone still carries, or the reason the row
 // cannot vouch for one.
 //
@@ -27,27 +40,36 @@ function ago(iso) {
 // all and its name would be whatever the writer chose. Nothing in this build
 // ever sends unsealed, so this is the same refusal the inbox makes, in the
 // words the visual spec reserves for it.
+// The duration comes back with it because both live in the same sealed record,
+// and opening it twice would cost a second decryption per row on a phone.
 async function nameOf(t) {
+  const only = (name) => ({ name, sentMs: null });
+
   // A transfer swept before its metadata record landed leaves a tombstone with
   // nothing sealed in it. Nothing was withheld and nothing is wrong, so this is
   // its own state rather than a decryption failure.
-  if (!t.meta) return 'Incomplete transfer';
+  if (!t.meta) return only('Incomplete transfer');
 
   let record;
   try {
     record = b64decode(t.meta);
   } catch {
-    return 'Sealed with a different passphrase';
+    return only('Sealed with a different passphrase');
   }
   if (modeOf(record) !== MODE_SEALED) {
-    return 'Not sealed. Anyone with access to the server can read this.';
+    return only('Not sealed. Anyone with access to the server can read this.');
   }
   try {
     const meta = JSON.parse(new TextDecoder().decode(
       await openRecord(state.mk, DOMAIN.META, t.id, record)));
-    return typeof meta.name === 'string' ? meta.name : 'Unnamed transfer';
+    return {
+      name: typeof meta.name === 'string' ? meta.name : 'Unnamed transfer',
+      // Absent on anything sent before the sender started recording it, which is
+      // a row with no timing rather than a row with a wrong one.
+      sentMs: typeof meta.sentMs === 'number' ? meta.sentMs : null,
+    };
   } catch {
-    return 'Sealed with a different passphrase';
+    return only('Sealed with a different passphrase');
   }
 }
 
@@ -113,12 +135,20 @@ registerView('history', 'History', (panel) => {
     page = at.page;
     for (const t of showing.slice(at.from, at.to)) {
       const direction = t.sender === state.me.node ? 'sent' : `from ${t.sender}`;
+      const { name, sentMs } = await nameOf(t);
+      // The duration is the sender's, so it is worth saying whose it is on a row
+      // that came from somewhere else. Dropped entirely when the record has no
+      // timing rather than shown as a zero.
+      const spent = took(sentMs);
+      const detail = spent
+        ? `${direction} · sent in ${spent} · cleared ${ago(t.endedAt)}`
+        : `${direction} · cleared ${ago(t.endedAt)}`;
       list.append(el('li', {},
         // The text block absorbs the row's free space so a long filename
         // ellipsizes instead of forcing the row wider than its column.
         el('div', { class: 'rowtext' },
-          el('div', { class: 'name' }, await nameOf(t)),
-          el('div', { class: 'data muted' }, `${direction} · cleared ${ago(t.endedAt)}`))));
+          el('div', { class: 'name' }, name),
+          el('div', { class: 'data muted' }, detail))));
     }
 
     if (at.pages === 1) return;

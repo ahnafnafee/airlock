@@ -1,4 +1,4 @@
-import { registerView, state, el, onInbox, notifyStatus, pushCapable, enableNotifications, toast } from '../app.js';
+import { registerView, state, el, onInbox, onProgress, notifyStatus, pushCapable, enableNotifications, toast } from '../app.js';
 import { api } from '../api.js';
 import { renderStrip } from '../strip.js';
 import { RUNG, exportFile } from '../export.js';
@@ -11,10 +11,24 @@ import { isStandalone } from '../ios.js';
 // Save button and waits.
 const REPORT = {
   [RUNG.SAVE_PICKER]: 'Saved',
-  [RUNG.DOWNLOAD]: 'Saved',
+  // Not 'Saved'. Clicking an anchor hands the file to the browser and returns
+  // whether or not anything came of it, so this is the last thing this app
+  // actually witnessed rather than a claim about where the bytes ended up.
+  [RUNG.DOWNLOAD]: 'Sent to your downloads',
   [RUNG.SHARE]: 'Shared',
   [RUNG.KEEP]: 'Ready to save',
 };
+
+// Which outcomes are evidence that the file reached somewhere outside this app.
+//
+// Only two of the rungs come back with a receipt. The save picker resolves when
+// its write has finished, and the share sheet resolves when the platform has
+// taken the file. An anchor click reports nothing at all: it returns the moment
+// the click is dispatched, and whether a download started, was blocked for want
+// of a gesture, or was cancelled by the person watching it is not observable
+// from here. Treating that as a save is how a transfer nobody kept gets cleared
+// out of the one list that still knew about it.
+const SAVED = new Set([RUNG.SAVE_PICKER, RUNG.SHARE]);
 
 // The share sheet is preferred only where nothing below it reaches the operating
 // system. Two conditions together say that without asking what browser this is.
@@ -43,10 +57,14 @@ function preferShare(file, nav = navigator, win = window) {
 // on one sent to all of them the others still get their copy. Deleting would
 // take it from everybody the moment the first device saved it.
 //
-// A cancelled export is not an arrival. RUNG.KEEP means the file is assembled
-// and still here, which is the one outcome that has to stay in the list.
+// Cleared only against a receipt, never against an attempt. A cancelled export
+// is not an arrival, and neither is one whose outcome this app never saw: the
+// anchor rung returns the same value whether the file was written, blocked for
+// want of a gesture, or cancelled in the browser's own download UI. A row that
+// stays is a row somebody can save again. A row cleared on a save that never
+// happened is a file the person has to notice is missing.
 export async function settleAfterSave(t, meta, rung, deps = {}) {
-  if (rung === RUNG.KEEP) return false;
+  if (!SAVED.has(rung)) return false;
   const decline = deps.decline || api.decline;
   const clean = deps.cleanLocalTransfer || cleanLocalTransfer;
   try {
@@ -72,14 +90,166 @@ export async function settleAfterSave(t, meta, rung, deps = {}) {
 // full width would overflow by exactly this much.
 const ROW_PADDING = 16;
 
+// One bit per chunk, set for every chunk this device has written. Assembly runs
+// strictly in file order, so the set bits are always a prefix; the shape is a
+// bitmap rather than a count because that is what the endpoint already stores,
+// validates against the chunk list, and scopes to the people entitled to see it.
+//
+// Bit i lives in byte i>>3 at 1<<(i&7). Only this app writes and reads these, so
+// the convention need only be consistent, but a reader counting bits deserves to
+// know which end they start from.
+export function progressBitmap(done, total) {
+  const bytes = new Uint8Array((total + 7) >> 3);
+  for (let i = 0; i < done; i++) bytes[i >> 3] |= 1 << (i & 7);
+  return bytes;
+}
+
+// Publishing progress is a courtesy to the other devices and must never be able
+// to fail a save, so every error here is swallowed. The server refuses updates
+// that arrive too fast; this keeps them from being sent in the first place, so
+// the common case costs no request rather than a refused one.
+export function progressPublisher(transferId, put = api.putProgress, now = () => Date.now()) {
+  let last = 0;
+  let chunks = 0;
+  const send = (bitmap) => {
+    Promise.resolve().then(() => put(transferId, bitmap)).catch(() => {});
+  };
+  return {
+    report(done, total) {
+      if (!total) return;
+      chunks = total;
+      // The last chunk always reports, whatever the clock says, or the final
+      // state another device is left looking at is whatever the last tick
+      // happened to catch.
+      const finished = done >= total;
+      if (!finished && now() - last < 1000) return;
+      last = now();
+      send(progressBitmap(done, total));
+    },
+    // A save that stopped part way leaves nothing another device can use: a
+    // retry truncates the output and starts from the first chunk, so the bytes
+    // it had counted are gone. Without this the last figure it managed to
+    // publish stands forever, and a row goes on reporting a file as most of the
+    // way there when nothing is coming.
+    //
+    // Zero rather than a deletion, because the endpoint's contract is a bitmap
+    // whose length matches the chunk list, and a device that has nothing is
+    // exactly what all-zero says. Nothing is sent if no figure was ever
+    // published; there would be nothing to take back.
+    withdraw() {
+      if (!chunks) return;
+      last = 0;
+      send(progressBitmap(0, chunks));
+    },
+  };
+}
+
+const POPCOUNT = new Uint8Array(256);
+for (let i = 1; i < 256; i++) POPCOUNT[i] = (i & 1) + POPCOUNT[i >> 1];
+
+export const bitsSet = (bytes) => {
+  let n = 0;
+  for (const b of bytes) n += POPCOUNT[b];
+  return n;
+};
+
+// How far other devices have got with a transfer, in whole percents, keyed by
+// transfer and device. It lives outside the rows because this view rebuilds
+// every row on every nudge, and a figure that died with its element would blank
+// itself each time somebody else's save happened to arrive.
+const elsewhere = new Map();
+// The element showing that line, per transfer on screen. Rebuilt with the rows.
+const elsewhereShown = new Map();
+// What each transfer's figures are measured against. Kept apart from the
+// elements on purpose: an event about a transfer whose row is not currently
+// drawn, because another view is open, must still be recorded rather than
+// dropped, or switching to the inbox would show nothing until the next tick of
+// somebody else's save.
+const elsewhereChunks = new Map();
+
+const elsewhereKey = (id, node) => `${id}:${node}`;
+
+// One line naming every other device working on this transfer. Reads as a
+// sentence rather than a bar because several devices can be saving the same
+// file at once, and three bars stacked under one row is a chart nobody asked
+// for.
+export function elsewhereText(id, at = elsewhere) {
+  const parts = [];
+  for (const [key, percent] of at) {
+    const cut = key.indexOf(':');
+    if (key.slice(0, cut) !== id) continue;
+    const node = key.slice(cut + 1);
+    parts.push(percent >= 100 ? `${node} saved it` : `${node} saving ${percent}%`);
+  }
+  return parts.join(' · ');
+}
+
+function paintElsewhere(id) {
+  const el = elsewhereShown.get(id);
+  if (!el) return;
+  const text = elsewhereText(id);
+  el.textContent = text;
+  el.hidden = text === '';
+}
+
+// Read one device's progress on one transfer. The stream said only that it
+// changed; the figure comes from the endpoint that scopes it to the people
+// entitled to the transfer, so a device that cannot see it learns nothing.
+async function readElsewhere(id, node, get = api.getProgress) {
+  const chunks = elsewhereChunks.get(id);
+  if (!chunks) return;
+  try {
+    const bitmap = new Uint8Array(await get(id, node));
+    const percent = Math.min(100, Math.floor((bitsSet(bitmap) * 100) / chunks));
+    elsewhere.set(elsewhereKey(id, node), percent);
+    paintElsewhere(id);
+  } catch {
+    // Another device's progress is a courtesy. Without it the row is exactly the
+    // row it was before, which is why nothing here is reported.
+  }
+}
+
 async function saveTransfer(transferId, meta = null, onPercent = null) {
   const { assembleTransfer } = await import('../receive.js');
+  const { transfersActive } = await import('../wake.js');
+  const publish = progressPublisher(transferId);
+  // A save is the longest thing this app does and the one a person is least
+  // likely to sit and watch. Left alone, the device parks its radio and the
+  // download stalls at a fraction of what the link can carry.
+  await transfersActive(1);
+  try {
+    return await runSave(transferId, meta, onPercent, assembleTransfer, publish);
+  } catch (err) {
+    // Ended without finishing, so whatever figure the other devices are showing
+    // is now a claim about a file that is not arriving.
+    publish.withdraw();
+    throw err;
+  } finally {
+    await transfersActive(-1);
+  }
+}
+
+async function runSave(transferId, meta, onPercent, assembleTransfer, publish) {
   // The row already decrypted this transfer's metadata to draw its name, and
   // handing it over is what lets an already-assembled file reach the export
   // with no network in between. A save picker and a share sheet both spend the
   // click's gesture, and a gesture does not survive two round trips.
-  const file = await assembleTransfer(transferId, { meta, onPercent });
-  return exportFile(file, { preferShare: preferShare(file) });
+  const file = await assembleTransfer(transferId, {
+    meta,
+    onPercent: (percent, done, total) => {
+      onPercent?.(percent);
+      publish.report(done, total);
+    },
+  });
+  const rung = await exportFile(file, { preferShare: preferShare(file) });
+  // Only where the file actually reached somewhere, which is the same evidence
+  // settleAfterSave clears the row on. A cancelled export and a hand-off with
+  // no receipt both leave the person still deciding, and a completion sound
+  // would tell them it was over.
+  if (SAVED.has(rung)) {
+    import('../chime.js').then(({ chime }) => chime('saved')).catch(() => {});
+  }
+  return rung;
 }
 
 function humanSize(bytes) {
@@ -362,6 +532,11 @@ registerView('inbox', 'Inbox', (panel) => {
   // The nudge says only that something changed, so the list is re-read rather
   // than patched from the event.
   onInbox(() => refresh());
+  // Deliberately not a refresh. Another device ticking along with a save changes
+  // one line on one row, and rebuilding the list would re-decrypt every name and
+  // remint every thumbnail several times a second for the duration of somebody
+  // else's download.
+  onProgress((id, node) => readElsewhere(id, node));
 
   async function refresh() {
     // Re-read rather than trusted from mount time. Permission can change in
@@ -401,6 +576,16 @@ registerView('inbox', 'Inbox', (panel) => {
     const minted = [];
     const rows = [];
     const ready = [];
+    // The elements are about to be replaced, and a figure kept for a transfer
+    // that has left the list would otherwise be held for the life of the page.
+    elsewhereShown.clear();
+    const listed = new Set(transfers.map((t) => t.id));
+    for (const key of [...elsewhere.keys()]) {
+      if (!listed.has(key.slice(0, key.indexOf(':')))) elsewhere.delete(key);
+    }
+    for (const id of [...elsewhereChunks.keys()]) {
+      if (!listed.has(id)) elsewhereChunks.delete(id);
+    }
     for (const t of transfers) {
       rows.push(await row(t, minted, ready));
     }
@@ -469,6 +654,22 @@ registerView('inbox', 'Inbox', (panel) => {
 
     const detailNode = el('div', { class: 'data muted' }, detail);
     const noteNode = note ? el('div', { class: 'data muted' }, note) : null;
+    // What the other devices are doing with this same transfer. Its own line
+    // rather than part of the detail, because the detail belongs to this device
+    // and the two change for entirely unrelated reasons.
+    const elsewhereNode = el('div', { class: 'data muted', hidden: true });
+    elsewhereShown.set(t.id, elsewhereNode);
+    elsewhereChunks.set(t.id, t.chunkCount);
+    // Seeded from what the server already knows, not just from events yet to
+    // arrive. A save that finished before this page was opened, or while
+    // another view was on screen, has no event coming, and without this the row
+    // would stay silent about a file that has already landed elsewhere.
+    for (const [node, count] of Object.entries(t.saved || {})) {
+      if (!t.chunkCount) continue;
+      elsewhere.set(elsewhereKey(t.id, node),
+        Math.min(100, Math.floor((count * 100) / t.chunkCount)));
+    }
+    paintElsewhere(t.id);
 
     const actions = el('div', { class: 'actions' });
     // Every row offers the same three words, so a screen reader announces "Save,
@@ -565,7 +766,7 @@ registerView('inbox', 'Inbox', (panel) => {
       // The text block absorbs the row's free space so the thumbnail stays
       // against the name it belongs to rather than drifting to the far side.
       el('div', { class: 'rowtext' },
-        el('div', { class: 'name' }, name), detailNode, noteNode || []),
+        el('div', { class: 'name' }, name), detailNode, elsewhereNode, noteNode || []),
       actions);
     // Only while it has something to say. A transfer whose every chunk is here
     // draws a solid bar, which is the same picture for "complete" as a filled

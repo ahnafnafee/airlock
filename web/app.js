@@ -773,6 +773,15 @@ async function boot() {
       if (await unlock($('passphrase').value)) {
         await equalize();
         enterApp();
+        // The one moment worth asking at. This device has just been set up, so
+        // the answer means something, and the submit that got here is still the
+        // gesture Firefox and Safari require before they will show the prompt
+        // at all. Asking on load instead is refused outright on those two and
+        // earns Chrome's quiet UI on the third, where the ask becomes an icon
+        // in the address bar that nobody sees. Asked once: a decision already
+        // made leaves the status set, and the Inbox carries the button for
+        // anyone who wants to change it later.
+        if (notifyStatus() === 'unset') await enableNotifications();
         return;
       }
       $('unlock-error').textContent =

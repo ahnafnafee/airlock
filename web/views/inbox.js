@@ -72,13 +72,13 @@ export async function settleAfterSave(t, meta, rung, deps = {}) {
 // full width would overflow by exactly this much.
 const ROW_PADDING = 16;
 
-async function saveTransfer(transferId, meta = null) {
+async function saveTransfer(transferId, meta = null, onPercent = null) {
   const { assembleTransfer } = await import('../receive.js');
   // The row already decrypted this transfer's metadata to draw its name, and
   // handing it over is what lets an already-assembled file reach the export
   // with no network in between. A save picker and a share sheet both spend the
   // click's gesture, and a gesture does not survive two round trips.
-  const file = await assembleTransfer(transferId, { meta });
+  const file = await assembleTransfer(transferId, { meta, onPercent });
   return exportFile(file, { preferShare: preferShare(file) });
 }
 
@@ -415,7 +415,10 @@ registerView('inbox', 'Inbox', (panel) => {
         from: name,
         action: {
           label: 'Save',
-          run: () => saveTransfer(id, meta)
+          // The notice hands over its own button so a save started from here
+          // reports into the thing that was pressed, rather than going quiet
+          // for as long as the file is large.
+          run: (go) => saveTransfer(id, meta, (percent) => { go.textContent = `Saving ${percent}%`; })
             .then((rung) => settleAfterSave({ id }, meta, rung).then(() => refresh()))
             .catch((err) => toast(`Could not save. ${err.message}`, { from: name })),
         },
@@ -504,8 +507,16 @@ registerView('inbox', 'Inbox', (panel) => {
           // A save runs for as long as the file is large, and a second one
           // started underneath it would decrypt the same chunks twice.
           save.disabled = true;
+          // Decrypting a large transfer runs for minutes, and until it lands
+          // nothing about the row changes. A greyed button is what a broken one
+          // looks like, so the row says what it is doing and how far it has got.
+          save.textContent = 'Saving';
+          detailNode.textContent = 'Saving';
+          detailNode.className = 'data muted';
           try {
-            const rung = await saveTransfer(t.id, meta);
+            const rung = await saveTransfer(t.id, meta, (percent) => {
+              detailNode.textContent = `Saving ${percent}%`;
+            });
             detailNode.textContent = REPORT[rung];
             detailNode.className = 'data muted';
             await settleAfterSave(t, meta, rung);
@@ -519,6 +530,7 @@ registerView('inbox', 'Inbox', (panel) => {
             // assembled and reaches the operating system with its gesture
             // intact. A saved file is also worth saving again somewhere else.
             save.disabled = false;
+            save.textContent = 'Save';
           }
         },
       }, 'Save');

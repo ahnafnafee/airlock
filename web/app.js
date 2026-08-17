@@ -534,7 +534,10 @@ export function toast(message, { from = '', action = null, after = TOAST_MS } = 
     go.addEventListener('click', async () => {
       go.disabled = true;
       try {
-        await action.run();
+        // The button is handed to the action so slow work can report into it.
+        // A notice whose one control greys out and then says nothing for a
+        // minute reads as broken.
+        await action.run(go);
       } finally {
         node.remove();
       }

@@ -61,8 +61,20 @@ self.addEventListener('message', async (event) => {
     // The mode is a constant rather than anything that crossed a wire. Every
     // record this transfer rests on was required to be sealed before its Save
     // was offered, and a plaintext chunk carries no tag to verify.
+    // A save on a large file runs for minutes, and a button that only greys out
+    // is indistinguishable from one that did nothing. Progress crosses as whole
+    // percents: a fifty gigabyte transfer is tens of thousands of chunks, and a
+    // message per chunk would spend more effort narrating the work than doing
+    // it, while a hundred messages is the most a person can read anyway.
+    let said = -1;
+    const onChunk = (done, total) => {
+      const percent = Math.floor((done * 100) / total);
+      if (percent === said) return;
+      said = percent;
+      self.postMessage({ percent });
+    };
     const file = await assemble(transfer, meta, {
-      mk, mode: MODE_SEALED, hashes, cids, stage,
+      mk, mode: MODE_SEALED, hashes, cids, stage, onChunk,
     });
     self.postMessage({ file });
   } catch (err) {

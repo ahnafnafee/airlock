@@ -47,7 +47,9 @@ const spawnAssembler = () => new Worker(
 // server, so this is an action that can be retried as often as it takes: nothing
 // it reads is consumed, and a failed attempt leaves the transfer exactly as it
 // found it.
-export async function assembleTransfer(transferId, { spawn = spawnAssembler, meta: known = null } = {}) {
+export async function assembleTransfer(transferId, {
+  spawn = spawnAssembler, meta: known = null, onPercent = null,
+} = {}) {
   if (!TRANSFER_ID.test(transferId || '')) {
     throw new Error('a malformed transfer id has nothing to assemble');
   }
@@ -92,11 +94,17 @@ export async function assembleTransfer(transferId, { spawn = spawnAssembler, met
       // this waiting on a reply that is never coming, and a save that never
       // settles is a button that never comes back.
       const lost = () => reject(new Error('the assembly worker stopped'));
+      // Not a one-shot listener: the worker reports how far it has got before it
+      // reports the file, and only the last of those messages settles this.
       worker.addEventListener('message', (event) => {
-        const { file, error } = event.data || {};
+        const { file, error, percent } = event.data || {};
+        if (percent !== undefined) {
+          onPercent?.(percent);
+          return;
+        }
         if (error) reject(new Error(error));
         else resolve(file);
-      }, { once: true });
+      });
       worker.addEventListener('error', lost, { once: true });
       worker.addEventListener('messageerror', lost, { once: true });
       // Nothing is consumed and every chunk is replaceable, because the server

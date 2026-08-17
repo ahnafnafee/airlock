@@ -185,7 +185,9 @@ export async function reconcileAssembled(activeTransferIds, { root = null } = {}
 // disk-backed File, which is what lets every export rung stay memory-flat:
 // createObjectURL and navigator.share both take a reference to disk rather than
 // a copy in memory, so a 20 GB export costs what a 20 MB one does.
-export async function assemble(transferId, meta, { mk, mode, hashes, cids, stage, root = null }) {
+export async function assemble(transferId, meta, {
+  mk, mode, hashes, cids, stage, root = null, onChunk = null,
+}) {
   const out = await assembledDir(root);
   const handle = await out.getFileHandle(transferId, { create: true });
 
@@ -217,6 +219,10 @@ export async function assemble(transferId, meta, { mk, mode, hashes, cids, stage
       access.write(plain, { at });
       at += plain.length;
       await stage.remove(i);
+      // Reported by chunk rather than by byte, because a chunk is the unit that
+      // actually completes: a caller drawing a bar wants the count that only
+      // ever moves forward.
+      onChunk?.(i + 1, hashes.length);
     }
     access.flush();
     if (at !== meta.size) {

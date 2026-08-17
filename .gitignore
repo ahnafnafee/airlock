@@ -8,3 +8,7 @@ airlock.exe
 /dz/
 /.env
 /backups/
+
+# Crash dumps from the Git Bash shell, which land in whatever directory was
+# current when a tool died. Never part of the project.
+*.stackdump

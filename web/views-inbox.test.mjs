@@ -267,6 +267,33 @@ test('a cancelled export is not an arrival and stays in the inbox', async () => 
   assert.deepEqual(calls, []);
 });
 
+// The anchor rung returns the moment the click is dispatched. A download that
+// Chrome blocked for want of a gesture, or that the person cancelled while
+// watching it, is indistinguishable from one that landed, so clearing on it
+// takes the row away from a file nobody actually has.
+test('a download with no receipt leaves the transfer listed', async () => {
+  const calls = [];
+  const deps = {
+    decline: async (id) => { calls.push(`decline:${id}`); },
+    cleanLocalTransfer: async () => { calls.push('clean'); },
+  };
+  assert.equal(await settleAfterSave({ id: ID }, {}, RUNG.DOWNLOAD, deps), false);
+  assert.deepEqual(calls, [], 'nothing may be declined on an unwitnessed save');
+});
+
+// The two rungs that do resolve against a real outcome still clear the row, or
+// every saved file would pile up in the one list that is meant to show what is
+// outstanding.
+test('a share the platform accepted clears the transfer', async () => {
+  const calls = [];
+  const deps = {
+    decline: async (id) => { calls.push(`decline:${id}`); },
+    cleanLocalTransfer: async () => { calls.push('clean'); },
+  };
+  assert.equal(await settleAfterSave({ id: ID }, {}, RUNG.SHARE, deps), true);
+  assert.deepEqual(calls, [`decline:${ID}`, 'clean']);
+});
+
 // The file is saved either way, so a server that refuses leaves a stale row
 // rather than a lost file, and nothing local is reclaimed on the strength of a
 // request that did not land.
@@ -276,6 +303,8 @@ test('a refused clearing keeps the local copy', async () => {
     decline: async () => { throw new Error('offline'); },
     cleanLocalTransfer: async () => { calls.push('clean'); },
   };
-  assert.equal(await settleAfterSave({ id: ID }, {}, RUNG.DOWNLOAD, deps), false);
+  // A rung that does carry a receipt, so the decline is actually attempted and
+  // it is the server's refusal being tested rather than the outcome check above.
+  assert.equal(await settleAfterSave({ id: ID }, {}, RUNG.SAVE_PICKER, deps), false);
   assert.deepEqual(calls, []);
 });

@@ -11,10 +11,24 @@ import { isStandalone } from '../ios.js';
 // Save button and waits.
 const REPORT = {
   [RUNG.SAVE_PICKER]: 'Saved',
-  [RUNG.DOWNLOAD]: 'Saved',
+  // Not 'Saved'. Clicking an anchor hands the file to the browser and returns
+  // whether or not anything came of it, so this is the last thing this app
+  // actually witnessed rather than a claim about where the bytes ended up.
+  [RUNG.DOWNLOAD]: 'Sent to your downloads',
   [RUNG.SHARE]: 'Shared',
   [RUNG.KEEP]: 'Ready to save',
 };
+
+// Which outcomes are evidence that the file reached somewhere outside this app.
+//
+// Only two of the rungs come back with a receipt. The save picker resolves when
+// its write has finished, and the share sheet resolves when the platform has
+// taken the file. An anchor click reports nothing at all: it returns the moment
+// the click is dispatched, and whether a download started, was blocked for want
+// of a gesture, or was cancelled by the person watching it is not observable
+// from here. Treating that as a save is how a transfer nobody kept gets cleared
+// out of the one list that still knew about it.
+const SAVED = new Set([RUNG.SAVE_PICKER, RUNG.SHARE]);
 
 // The share sheet is preferred only where nothing below it reaches the operating
 // system. Two conditions together say that without asking what browser this is.
@@ -43,10 +57,14 @@ function preferShare(file, nav = navigator, win = window) {
 // on one sent to all of them the others still get their copy. Deleting would
 // take it from everybody the moment the first device saved it.
 //
-// A cancelled export is not an arrival. RUNG.KEEP means the file is assembled
-// and still here, which is the one outcome that has to stay in the list.
+// Cleared only against a receipt, never against an attempt. A cancelled export
+// is not an arrival, and neither is one whose outcome this app never saw: the
+// anchor rung returns the same value whether the file was written, blocked for
+// want of a gesture, or cancelled in the browser's own download UI. A row that
+// stays is a row somebody can save again. A row cleared on a save that never
+// happened is a file the person has to notice is missing.
 export async function settleAfterSave(t, meta, rung, deps = {}) {
-  if (rung === RUNG.KEEP) return false;
+  if (!SAVED.has(rung)) return false;
   const decline = deps.decline || api.decline;
   const clean = deps.cleanLocalTransfer || cleanLocalTransfer;
   try {

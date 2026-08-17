@@ -77,56 +77,48 @@ async function direct(overrides = {}) {
   };
 }
 
-// A stage that holds the given positions. Anything not listed here has no
-// directory at all, which is what a transfer that has not started arriving
-// looks like on disk.
-function stages(holdings) {
-  return async (transferId) => {
-    if (!(transferId in holdings)) throw new Error('no such directory');
-    return { held: async () => new Set(holdings[transferId]) };
-  };
-}
-
 test('a transfer the server holds no chunk of still renders its real name', async () => {
-  const row = await readRow(await direct(), mk, stages({}));
+  const row = await readRow(await direct(), mk);
   assert.equal(row.name, 'holiday.mp4');
   // The size comes from the same record as the name, so it lands with it.
   assert.equal(row.detail, '1.5 KB · from mac-mini · just now');
   assert.ok(row.meta);
 });
 
-test('Save is offered once this device holds every chunk', async () => {
-  const row = await readRow(await direct(), mk, stages({ [ID]: [0, 1, 2] }));
+test('Save is offered once the server holds every chunk', async () => {
+  const row = await readRow(await direct({ complete: true, missing: [] }), mk);
   assert.equal(row.saveable, true);
   assert.equal(row.note, undefined);
+  assert.deepEqual(row.heldAt, [0, 1, 2]);
 });
 
 test('a partly arrived transfer says what it is waiting for and offers no Save', async () => {
-  const row = await readRow(await direct(), mk, stages({ [ID]: [0] }));
+  const row = await readRow(await direct({ missing: [CIDS[1], CIDS[2]] }), mk);
   assert.equal(row.name, 'holiday.mp4');
   assert.equal(row.saveable, false);
   assert.equal(row.note, 'Still arriving. 1 of 3 chunks so far.');
 });
 
 test('a sparse arrival keeps the chunk positions that are actually present', async () => {
-  const row = await readRow(await direct(), mk, stages({ [ID]: [2] }));
+  const row = await readRow(await direct({ missing: [CIDS[0], CIDS[1]] }), mk);
   assert.equal(row.reach, 1);
   assert.deepEqual(row.heldAt, [2]);
 });
 
-test('a stage that does not exist yet reads as not yet rather than as an error', async () => {
-  const row = await readRow(await direct(), mk, stages({}));
+test('a transfer with nothing landed yet reads as not yet rather than as an error', async () => {
+  const row = await readRow(await direct(), mk);
   assert.equal(row.saveable, false);
   assert.equal(row.note, 'Still arriving. 0 of 3 chunks so far.');
 });
 
-test('a chunk the server happens to hold counts toward the same total', async () => {
-  // Assembly reads a position from the stage and falls back to the server, so a
-  // position either one holds is a position this device can put in the file.
-  const t = await direct({ missing: [CIDS[0], CIDS[1]] });
-  assert.equal((await readRow(t, mk, stages({ [ID]: [0] }))).note,
-    'Still arriving. 2 of 3 chunks so far.');
-  assert.equal((await readRow(t, mk, stages({ [ID]: [0, 1] }))).saveable, true);
+// A file can hold the same chunk many times, so the count is over positions and
+// not over the length of the missing list: a repeat the server lacks would
+// otherwise subtract twice and report a transfer as further along than it is.
+test('the count is over positions rather than over the missing set', async () => {
+  const t = await direct({ cids: [CIDS[0], CIDS[0], CIDS[1]], missing: [CIDS[0]] });
+  const row = await readRow(t, mk);
+  assert.equal(row.note, 'Still arriving. 1 of 3 chunks so far.');
+  assert.deepEqual(row.heldAt, [2]);
 });
 
 test('a transfer the server holds is saveable without asking this disk', async () => {
@@ -142,14 +134,14 @@ test('a transfer the server holds is saveable without asking this disk', async (
 });
 
 test('a transfer whose metadata record has not landed is the only nameless row', async () => {
-  const row = await readRow(await direct({ meta: '' }), mk, stages({ [ID]: [0, 1, 2] }));
+  const row = await readRow(await direct({ meta: '' }), mk);
   assert.equal(row.name, 'Incomplete transfer');
   assert.equal(row.saveable, false);
 });
 
 test('an outbound transfer is status and delete only on its sender', async () => {
   const row = await readRow(
-    await direct({ complete: true, missing: [] }), mk, stages({}), 'mac-mini');
+    await direct({ complete: true, missing: [] }), mk, 'mac-mini');
 
   assert.equal(row.outbound, true);
   assert.equal(row.saveable, false);
@@ -159,28 +151,16 @@ test('an outbound transfer is status and delete only on its sender', async () =>
   assert.deepEqual(rowActions(row), ['delete']);
 
   const inbound = await readRow(
-    await direct({ complete: true, missing: [] }), mk, stages({}), 'phone');
+    await direct({ complete: true, missing: [] }), mk, 'phone');
   assert.deepEqual(rowActions(inbound), ['save', 'decline', 'delete']);
 });
 
-test('terminal cleanup uses the sender stage and removes the assembled file', async () => {
-  const stage = 'b'.repeat(32);
-  const cleared = [];
+test('terminal cleanup removes the assembled file', async () => {
   const removed = [];
-  const deps = {
-    openStage: async (id) => ({ clear: async () => { cleared.push(id); } }),
-    removeAssembled: async (id) => { removed.push(id); },
-  };
+  const deps = { removeAssembled: async (id) => { removed.push(id); } };
 
-  await cleanLocalTransfer(await direct(), { stage }, true, deps);
-  assert.deepEqual(cleared, [stage]);
-  assert.deepEqual(removed, [ID]);
-
-  cleared.length = 0;
-  removed.length = 0;
   await cleanLocalTransfer(await direct(), {}, false, deps);
-  assert.deepEqual(cleared, [ID], 'a receiver stage is named by the transfer');
-  assert.deepEqual(removed, [ID]);
+  assert.deepEqual(removed, [ID], 'the decrypted copy is the only local thing left to reclaim');
 });
 
 test('a lost terminal response is completed from the authoritative inbox', async () => {
@@ -190,55 +170,68 @@ test('a lost terminal response is completed from the authoritative inbox', async
     calls.push('mutate');
     throw new Error('response lost');
   }, {
-    cancelReceive: async (id) => { calls.push(`cancel:${id}`); },
-    resumeReceive: () => { calls.push('resume'); },
     inbox: async () => [],
     cleanLocalTransfer: async () => { calls.push('clean'); },
   });
 
   assert.equal(outcome.terminal, true);
-  assert.deepEqual(calls, [`cancel:${ID}`, 'mutate', 'clean']);
+  assert.deepEqual(calls, ['mutate', 'clean']);
 });
 
-test('a refused terminal mutation resumes an arrival the server still lists', async () => {
+// The server still lists it, so the mutation genuinely did not commit and the
+// decrypted copy has to stay: throwing it away here would delete the one thing
+// a retry could still save.
+test('a refused terminal mutation reclaims nothing', async () => {
   const t = await direct();
   const calls = [];
   const outcome = await terminateTransfer(t, {}, false, async () => {
     throw new Error('refused');
   }, {
-    cancelReceive: async () => { calls.push('cancel'); },
-    resumeReceive: (id) => { calls.push(`resume:${id}`); },
     inbox: async () => [t],
     cleanLocalTransfer: async () => { calls.push('clean'); },
   });
 
   assert.equal(outcome.terminal, false);
   assert.equal(outcome.uncertain, false);
-  assert.deepEqual(calls, ['cancel', `resume:${ID}`]);
+  assert.deepEqual(calls, []);
 });
 
-test('a successful inbox snapshot cancels before reclaiming absent local data', async () => {
+// An inbox read that failed says nothing about what the server holds, so the
+// outcome is reported as uncertain and nothing local is discarded on the
+// strength of it.
+test('an unreadable inbox leaves the outcome uncertain and reclaims nothing', async () => {
+  const t = await direct();
+  const calls = [];
+  const outcome = await terminateTransfer(t, {}, false, async () => {
+    throw new Error('refused');
+  }, {
+    inbox: async () => { throw new Error('offline'); },
+    cleanLocalTransfer: async () => { calls.push('clean'); },
+  });
+
+  assert.equal(outcome.terminal, false);
+  assert.equal(outcome.uncertain, true);
+  assert.deepEqual(calls, []);
+});
+
+test('a successful inbox snapshot reclaims what it no longer lists', async () => {
   const order = [];
   await reconcileLocalTransfers([{ id: ID }], {
-    reconcileReceives: async (active) => { order.push(`sessions:${[...active]}`); },
     reconcileReceiverStages: async (active) => { order.push(`stages:${[...active]}`); },
     reconcileAssembled: async (active) => { order.push(`outputs:${[...active]}`); },
   });
-  assert.equal(order[0], `sessions:${ID}`);
-  assert.deepEqual(new Set(order.slice(1)), new Set([`stages:${ID}`, `outputs:${ID}`]));
+  assert.deepEqual(new Set(order), new Set([`stages:${ID}`, `outputs:${ID}`]));
 });
 
 test('a name this device cannot vouch for is never rendered as one', async () => {
   // Both refusals survive the looser gate: a record sealed under another
   // passphrase, and one sent unsealed, which nothing in this build ever does.
-  const wrong = await readRow(await direct({ meta: await metaFor(other) }), mk,
-    stages({ [ID]: [0, 1, 2] }));
+  const wrong = await readRow(await direct({ meta: await metaFor(other) }), mk);
   assert.equal(wrong.name, 'Cannot open');
   assert.equal(wrong.saveable, false);
   assert.match(wrong.detail, /sealed with a different passphrase/);
 
-  const plain = await readRow(await direct({ meta: await metaFor(mk, MODE_PLAIN) }), mk,
-    stages({ [ID]: [0, 1, 2] }));
+  const plain = await readRow(await direct({ meta: await metaFor(mk, MODE_PLAIN) }), mk);
   assert.equal(plain.name, 'Cannot open');
   assert.equal(plain.saveable, false);
   assert.match(plain.detail, /Not sealed/);

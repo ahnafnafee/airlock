@@ -400,12 +400,9 @@ test('a successful send refreshes an already-mounted sender inbox locally', asyn
       });
       return { total: 2, held: 1, sent: 1, inflight: 0, heldAt: [0], storedAt: [1] };
     },
-    direct: async () => { throw new Error('the held path was expected'); },
   });
 
-  const hold = find(sendPanel, (n) => n.getAttribute('id') === 'hold');
   const button = find(sendPanel, (n) => n.className === 'primary');
-  hold.checked = true;
   sendView.stageFiles([new File(['sent'], 'sent.txt', { type: 'text/plain' })]);
 
   button.fire('click');
@@ -425,13 +422,10 @@ test('a failed file stays staged and the batch reports it after later files succ
       if (file.name === 'again.txt') throw new Error('connection lost');
       return { total: 0, held: 0, sent: 0, inflight: 0 };
     },
-    direct: async () => { throw new Error('the held path was expected'); },
   });
 
-  const hold = find(sendPanel, (n) => n.getAttribute('id') === 'hold');
   const button = find(sendPanel, (n) => n.className === 'primary');
   const list = find(sendPanel, (n) => n.getAttribute('aria-label') === 'Staged files');
-  hold.checked = true;
   sendView.stageFiles([
     new File(['first'], 'again.txt', { type: 'text/plain' }),
     new File(['second'], 'done.txt', { type: 'text/plain' }),

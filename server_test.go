@@ -1243,44 +1243,13 @@ func TestDeclineNudgesEveryAffectedParty(t *testing.T) {
 	}
 }
 
-func TestPresenceAndSignalRoutes(t *testing.T) {
-	s, devices := newTestServer(t, true)
+func TestPresenceReportsNobodyWithNoStreamsOpen(t *testing.T) {
+	s, _ := newTestServer(t, true)
 
 	var online []string
 	json.Unmarshal(do(t, s, "GET", "/api/presence", "").Body.Bytes(), &online)
 	if len(online) != 0 {
 		t.Fatalf("presence = %v with no streams open", online)
-	}
-
-	// The relay reaches approved devices only, so the target has to be one
-	// before the queued-versus-refused distinction below means anything.
-	if code := do(t, s, "POST", "/api/signal", `{"to":"desktop","payload":"x"}`).Code; code != http.StatusNotFound {
-		t.Fatalf("signal to a device this server has never seen = %d, want 404", code)
-	}
-	devices.Seen("desktop", "owner@example.com", "")
-
-	// No stream for the target, so the sender is told to leave it queued.
-	if code := do(t, s, "POST", "/api/signal", `{"to":"desktop","payload":"x"}`).Code; code != http.StatusServiceUnavailable {
-		t.Fatalf("signal to an absent node = %d, want 503", code)
-	}
-}
-
-func TestSignalRejectsAnOversizePayload(t *testing.T) {
-	s, _ := newTestServer(t, true)
-	huge := `{"to":"desktop","payload":"` + strings.Repeat("x", 200000) + `"}`
-	if code := do(t, s, "POST", "/api/signal", huge).Code; code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("code = %d, want 413", code)
-	}
-}
-
-func TestSignalRejectsAPayloadThatWouldBreakTheStreamFraming(t *testing.T) {
-	// The stream writes the payload into one SSE data field, which ends at the
-	// first newline. The encoding that keeps that true is the client's, so the
-	// server has to hold the caller to it rather than trust it.
-	s, devices := newTestServer(t, true)
-	devices.Seen("desktop", "owner@example.com", "")
-	if code := do(t, s, "POST", "/api/signal", `{"to":"desktop","payload":"a\nevent: inbox\ndata: 1\n\n"}`).Code; code != http.StatusBadRequest {
-		t.Fatalf("code = %d, want 400", code)
 	}
 }
 

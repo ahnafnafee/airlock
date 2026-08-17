@@ -226,12 +226,12 @@ func TestResolveAllowedUsersFailsClosed(t *testing.T) {
 
 func TestTailscaleListenerRejectsUnknownMode(t *testing.T) {
 	setFlag(t, tailscaleMode, "hsot")
-	ln, ident, stunAddrs, err := tailscaleListener()
+	ln, ident, err := tailscaleListener()
 	if err == nil {
 		t.Fatal("an unknown --tailscale-mode was accepted")
 	}
-	if ln != nil || ident != nil || stunAddrs != nil {
-		t.Fatal("a failed dispatch still returned a listener, an identity function or an address")
+	if ln != nil || ident != nil {
+		t.Fatal("a failed dispatch still returned a listener or an identity function")
 	}
 	if !strings.Contains(err.Error(), `"hsot"`) {
 		t.Fatalf("error %q does not name the rejected mode", err)

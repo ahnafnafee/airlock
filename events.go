@@ -6,7 +6,6 @@ import "sync"
 // detail: a client that receives one re-fetches its inbox, which keeps every
 // filename behind the encryption boundary and makes a dropped event harmless.
 //
-// It doubles as the delivery half of a signalling postbox. Those messages are
 // addressed to one node and carry an opaque payload this package never parses,
 // and unlike a nudge they may not be dropped.
 type Events struct {
@@ -136,29 +135,4 @@ func (e *Events) Online() []string {
 		}
 	}
 	return out
-}
-
-// Send delivers one opaque signalling payload to every stream a node holds and
-// reports whether anything received it. The caller needs that answer: a sender
-// whose offer went nowhere leaves the transfer queued rather than waiting for a
-// reply that will never arrive.
-//
-// The payload is a string this server never parses.
-func (e *Events) Send(to, payload string) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	delivered := false
-	for _, s := range e.subs {
-		if s.node != to {
-			continue
-		}
-		select {
-		case s.ch <- "signal:" + payload:
-			delivered = true
-		default:
-			// This stream is not draining. Another tab may still take it, so
-			// keep going rather than declaring failure here.
-		}
-	}
-	return delivered
 }

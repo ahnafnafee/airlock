@@ -24,7 +24,7 @@ import (
 )
 
 //go:embed web/index.html web/tokens.css web/app.css web/api.js web/app.js web/crypto.js web/cdc.js web/upload.js web/strip.js web/thumb.js web/sw.js web/naming.js web/notification.js web/views
-//go:embed web/peer.js web/staging.js web/stage-worker.js web/session.js web/wake.js web/local-transfers.js
+//go:embed web/staging.js web/stage-worker.js web/receive.js
 //go:embed web/sealpool.js web/seal-worker.js
 //go:embed web/assemble.js web/assemble-worker.js web/export.js web/inbound.js web/ios.js
 //go:embed web/manifest.webmanifest web/icon-192.png web/icon-512.png web/icon-maskable.png web/icon-badge.png
@@ -267,13 +267,11 @@ func run() error {
 
 	var ln net.Listener
 	var ident IdentityFunc
-	// The addresses STUN answers on, which are the ones the HTTPS listener bound.
-	var stunAddrs []string
 	root := http.NewServeMux()
 
 	switch *authMode {
 	case "tailscale":
-		ln, ident, stunAddrs, err = tailscaleListener()
+		ln, ident, err = tailscaleListener()
 	case "token":
 		token := os.Getenv("AIRLOCK_TOKEN")
 		if token == "" {
@@ -282,7 +280,6 @@ func run() error {
 			return errors.New("--auth=token requires AIRLOCK_TOKEN; refusing to start unauthenticated")
 		}
 		ln, err = net.Listen("tcp", *addr)
-		stunAddrs = []string{*addr}
 		ident = tokenIdentity(token)
 		root.HandleFunc("GET /login", loginHandler(token))
 	default:
@@ -292,32 +289,10 @@ func run() error {
 		return err
 	}
 
-	// A peer connection gathers only obfuscated host candidates on a tailnet, and
-	// nothing can resolve them across a routed tunnel, so without this the direct
-	// path never opens a channel. Failing to bind is not fatal: holding on the
-	// server still works, and refusing to start would trade the whole product for
-	// one of its two paths.
-	stunPort := 0
-	if conns, err := listenSTUN(stunAddrs); err != nil {
-		log.Printf("stun is not available, so direct transfers may not connect: %v", err)
-	} else {
-		for _, conn := range conns {
-			go serveSTUN(conn)
-		}
-		stunPort = *port
-		if *authMode == "token" {
-			if _, p, err := net.SplitHostPort(*addr); err == nil {
-				stunPort, _ = strconv.Atoi(p)
-			}
-		}
-		log.Printf("stun answering on udp %v", stunAddrs)
-	}
-
 	root.Handle("/", NewServer(ServerConfig{
 		Chunks: chunks, Transfers: transfers, Devices: devices, Push: pusher,
 		Events: events, Ident: ident, DataDir: *dataDir, CDC: cdcDefaults,
 		TTLHours: *ttlHours, Salt: salt, Static: static, Auth: *authMode,
-		StunPort: stunPort,
 	}))
 
 	go sweepLoop(transfers)

@@ -4,16 +4,12 @@ import {
 } from './crypto.js';
 import { sealPool, poolSize } from './sealpool.js';
 import { makeThumbnail } from './thumb.js';
-import { rememberOutboundStage } from './local-transfers.js';
 
-// A file leaves this device one of two ways, and which one is the owner's choice
-// per transfer. queueForDelivery is the default: the sealed chunks stay on this
-// device's own disk and cross directly to the recipient when both are next
-// online. uploadThroughServer is the exception, taken when the sender would
-// rather not have to be reachable again.
+// A file leaves this device one way: sealed here, then uploaded. What the server
+// is handed is ciphertext and a list of opaque ids, and there is nothing else it
+// can do with either.
 //
-// The direct path reads the file once, sealing and staging as it cuts. The
-// server path reads it twice: pass one computes every chunk id and throws the
+// It reads the file twice. Pass one computes every chunk id and throws the
 // bytes away, and only then can it ask which of them the server lacks, which is
 // the question that decides what pass two seals and sends. Keeping pass one's
 // bytes to avoid the second read would mean holding the whole file in memory,
@@ -239,121 +235,11 @@ export async function uploadThroughServer(file, opts) {
   }
 }
 
-// The default. The sealed chunks go to this device's own staging area, and the
-// server is told only what the transfer is made of: who it is for, which chunk
-// ids, and the sealed records the recipient needs to make sense of them. Not one
-// byte of content reaches it.
-//
-// The chunks are staged first and the transfer is created once they are all
-// down, which is the only order available: a transfer is named by its chunk ids
-// and those come from the same pass that seals them. It is also the safer order,
-// because a preparation that fails part way is a transfer the server was never
-// told about rather than one sitting on the queue with holes in its stage.
-//
-// The transfer joins the server's queue the moment it is created, so what is
-// written here is what the direct session reads back when the recipient is
-// reachable, whether that is a second later or after this page has been closed
-// and reopened.
-export async function queueForDelivery(file, opts) {
-  const {
-    mk, mode, to, cdc, api, openStage, newPool, onProgress = () => {},
-    rememberOutboundStage: rememberStage = rememberOutboundStage,
-  } = opts;
-
-  const stageId = newStageId();
-  const stage = await openStage(stageId);
-
-  // Nothing is held and nothing is in flight. Held means a chunk the recipient
-  // already has, and no recipient has been asked yet: the dedup question is put
-  // to the peer over the wire when the session runs, never to the server, which
-  // is not the recipient and has no say in what this device must be able to hand
-  // over itself. Nothing is in flight either, because sealing onto this device's
-  // own disk is not a chunk in transit and must never paint as one.
-  //
-  // The total is unknown until the file has been cut, which is the price of
-  // cutting and sealing in the same pass, so it stays zero until it is known.
-  const progress = { id: null, total: 0, held: 0, sent: 0, inflight: 0 };
-
-  // Every position is staged, including the repeats. The peer asks for chunk 7
-  // of this transfer by position, so a file that repeats a chunk has to answer
-  // for each place it appears, and a position left empty because some other
-  // transfer happened to hold that id is a chunk this device could never hand
-  // over.
-  let cids;
-  let hashes;
-  try {
-    ({ cids, hashes } = await prepare(file, {
-      mk,
-      mode,
-      cdc,
-      stageId,
-      newPool,
-      onProgress: (sealed) => {
-        progress.sent = sealed;
-        onProgress({ ...progress });
-      },
-    }));
-  } catch (err) {
-    // Nothing has reached the server yet, so there is no transfer to take back
-    // down, but the chunks that did land have nothing that will ever read them.
-    // Best effort, because the reason the caller needs is the original one.
-    await stage.clear().catch(() => {});
-    throw err;
-  }
-
-  progress.total = cids.length;
-  onProgress({ ...progress });
-
-  try {
-    const { id } = await api.createTransfer(cids, to, false);
-    progress.id = checkTransferId(id);
-    await uploadRecords(api, mk, mode, id, file, hashes, stageId);
-    // This registry only helps later cleanup find the stage. At this point the
-    // transfer and all of its records are usable, so losing that bookkeeping
-    // must not roll the successful send back.
-    try {
-      await rememberStage(id, stageId);
-    } catch (err) {
-      console.warn('outbound stage registry update failed', err);
-    }
-  } catch (err) {
-    // From here on a transfer may exist on the queue whose records are missing,
-    // and every later drain would offer it and fail. Remove it when possible;
-    // if removal cannot be confirmed, retain the stage that transfer names. A
-    // transfer whose id came back malformed is the one that cannot be removed,
-    // because deleting it would build a URL from the very string that was
-    // refused.
-    if (progress.id) {
-      try {
-        await withRetry(() => api.deleteTransfer(progress.id));
-      } catch {
-        // The server still has a transfer whose sealed metadata names this
-        // stage. Preserve the only direct-delivery copy so the two can be
-        // repaired or removed together later.
-        throw err;
-      }
-    }
-    // A confirmed DELETE, a refused create, or an unusable returned id leaves
-    // no server transfer that can ever lead back to this stage.
-    await stage.clear().catch(() => {});
-    throw err;
-  }
-
-  return progress;
-}
-
-async function uploadRecords(api, mk, mode, id, file, hashes, stage = null) {
+async function uploadRecords(api, mk, mode, id, file, hashes) {
   const meta = await sealRecord(mk, mode, DOMAIN.META, id, enc(JSON.stringify({
     name: file.name,
     size: file.size,
     mime: file.type || 'application/octet-stream',
-    // Where this device staged the sealed chunks, on the direct path only. The
-    // chunks are written before the transfer exists, so the directory cannot be
-    // named by the transfer's id, and this is what lets the sender find them
-    // again after a reload. It rides in the sealed record rather than in a
-    // second store, so it lasts exactly as long as the transfer does and the
-    // server never learns it. The recipient has no use for it and ignores it.
-    ...(stage ? { stage } : {}),
   })));
   const list = await sealRecord(mk, mode, DOMAIN.LIST, id, packHashes(hashes));
 
@@ -364,9 +250,9 @@ async function uploadRecords(api, mk, mode, id, file, hashes, stage = null) {
     ? await sealRecord(mk, mode, DOMAIN.THUMB, id, thumb)
     : null;
 
-  // Meta lands last because it is the announcement trigger. At that instant
-  // the chunk list and optional thumbnail are already readable, and on the held
-  // path every content chunk is too.
+  // Meta lands last because it is the announcement trigger. At that instant the
+  // chunk list, the optional thumbnail and every content chunk are already
+  // readable, so the first Inbox repaint after it can offer a save.
   await withRetry(() => api.putRecord(id, 'chunklist', list));
   if (sealedThumb) {
     // A thumbnail is a nicety. Losing it must never fail the transfer.

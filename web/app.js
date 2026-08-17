@@ -3,7 +3,6 @@ import {
   saveMaster, loadMaster, b64decode, kvGet, kvPut,
 } from './crypto.js';
 import { api, ApiError } from './api.js';
-import { requestPersistence } from './staging.js';
 import { observeCapabilities } from './inbound.js';
 import { inboundTo, needsInstallGate, setBadge } from './ios.js';
 
@@ -175,10 +174,6 @@ function enterApp() {
     if (event.data?.type === 'show' && views.has(event.data.view)) showView(event.data.view);
   });
   listen();
-  // Delivery is peer to peer, so an open app is one that both sends what it owes
-  // and takes what is owed to it. Every failure in here is logged: a device that
-  // cannot run sessions is still a device that can browse its inbox.
-  startSessions().catch((err) => console.warn('session setup failed', err));
 }
 
 // The pending inbound count on the app's own icon. On iOS it is the only rich
@@ -201,48 +196,7 @@ async function refreshBadge() {
 // Loaded here rather than imported at the top so the peer connection and the
 // whole direct-transfer path stay out of the boot path, which is the one an
 // unlock has to wait behind.
-async function startSessions() {
-  // ICE is configured inside the same promise everything else here awaits, so a
-  // peer that offers the instant this stream opens cannot build a connection
-  // before the STUN address is set. Doing it after the import resolved would
-  // leave exactly that window, and a connection built without STUN gathers only
-  // obfuscated host candidates that nothing on a tailnet can resolve.
-  //
-  // The host is whatever this page was opened at, so the address needs no
-  // configuration to agree with the one that already reached this server.
-  const loading = import('./session.js').then(async (session) => {
-    const { useStun } = await import('./peer.js');
-    useStun(state.config?.stunPort || 0, location.hostname);
-    return session;
-  });
-  // Registered before anything is awaited, so a peer that offers the moment this
-  // stream opens is answered rather than missed.
-  onSignal(async (payload) => {
-    try {
-      await (await loading).handleSignal(payload);
-    } catch (err) {
-      console.warn('a signal could not be handled', err);
-    }
-  });
-
-  const { drainQueue } = await loading;
-  // Asked for before anything is staged, so a queued transfer is not evicted
-  // between the two devices being online.
-  //
-  // WebKit shows no prompt for this and grants it heuristically, with being
-  // installed to the Home Screen the heuristic that matters. A refusal is not
-  // fatal and does not deserve a screen, but it changes what a queued transfer
-  // is: storage the browser may reclaim under pressure, so one waiting for a
-  // peer that is away can lose its staged chunks and have to start over.
-  if (!await requestPersistence()) {
-    console.warn('storage is not persistent: a queued transfer may be evicted before it is delivered');
-  }
-  drainQueue();
-  onInbox(() => drainQueue());
-}
-
 const listeners = new Set();
-const signalListeners = new Set();
 const deviceListeners = new Set();
 
 // A view calls this to be told when something arrives. The event carries no
@@ -263,7 +217,6 @@ export function onDevices(fn) { deviceListeners.add(fn); }
 
 // A signal is the opposite: it carries the whole payload, because a session
 // description has nowhere else to be read from.
-export function onSignal(fn) { signalListeners.add(fn); }
 
 // EventSource readyState CLOSED, per the HTML standard. Written out rather than
 // read off the global so this module also loads in a runtime that has no
@@ -349,14 +302,6 @@ export function listen() {
     // The payload is base64 because an SSE data field ends at the first newline
     // and a session description is full of them. It is passed on untouched: the
     // encoding is the stream's problem and the contents are the session's.
-    //
-    // A signal that arrived while the stream was down cannot be replayed, since
-    // nothing stored it. The catch-up above is what recovers it: the offering
-    // device drains its own queue on the same nudge and offers again.
-    source.addEventListener('signal', (event) => {
-      for (const fn of signalListeners) fn(event.data);
-    });
-
     source.addEventListener('error', () => {
       if (retired) return;
       // Every failure means a gap, whoever closes it. EventSource repairs a

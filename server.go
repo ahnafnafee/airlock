@@ -8,11 +8,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
@@ -114,7 +112,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/push/subscribe", g(s.subscribe))
 	s.mux.HandleFunc("GET /api/events", g(s.events))
 	s.mux.HandleFunc("GET /api/presence", g(s.presence))
-	s.mux.HandleFunc("POST /api/signal", g(s.signal))
 
 	// The file_handlers launch URL has to render the app rather than 404.
 	s.mux.HandleFunc("GET /open", s.open(func(w http.ResponseWriter, r *http.Request) {
@@ -638,12 +635,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
-			if payload, ok := strings.CutPrefix(msg, "signal:"); ok {
-				// A session description is full of newlines and an SSE data
-				// field ends at the first one, so signalling payloads travel
-				// base64 encoded and the client decodes them.
-				fmt.Fprintf(w, "event: signal\ndata: %s\n\n", payload)
-			} else if msg == "devices" {
+			if msg == "devices" {
 				fmt.Fprint(w, "event: devices\ndata: 1\n\n")
 			} else {
 				fmt.Fprint(w, "event: inbox\ndata: 1\n\n")
@@ -658,56 +650,6 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) presence(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.cfg.Events.Online())
-}
-
-// signal is a postbox. It hands one opaque string to a named device and never
-// looks inside: session descriptions and ICE candidates are the peers' business,
-// and a server that parsed them would be a server that had to keep parsing them.
-func (s *Server) signal(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		To      string `json:"to"`
-		Payload string `json:"payload"`
-	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128<<10)).Decode(&req); err != nil {
-		var maxBytes *http.MaxBytesError
-		if errors.As(err, &maxBytes) {
-			http.Error(w, "signal too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		http.Error(w, "bad json", http.StatusBadRequest)
-		return
-	}
-	if req.To == "" || len(req.To) > 128 {
-		http.Error(w, "bad target", http.StatusBadRequest)
-		return
-	}
-	// The stream writes the payload into a single SSE data field, which ends at
-	// the first newline, so the encoding the client is expected to use is a
-	// framing requirement rather than a convention. Enforced here because a
-	// caller that skipped it could otherwise write whole events of its own
-	// choosing into another device's stream.
-	if strings.ContainsAny(req.Payload, "\r\n") {
-		http.Error(w, "payload must be newline free", http.StatusBadRequest)
-		return
-	}
-	// Only a device this server already knows may be signalled, so the relay
-	// cannot be used to reach anything the caller could not reach anyway.
-	if !s.cfg.Devices.Allowed(req.To) {
-		http.Error(w, "unknown device", http.StatusNotFound)
-		return
-	}
-	if !s.cfg.Events.Send(req.To, req.Payload) {
-		// Not an error. The sender uses this to decide to stay queued.
-		http.Error(w, "device is not connected", http.StatusServiceUnavailable)
-		return
-	}
-	// The direct path either works or leaves a transfer sitting at zero chunks
-	// with nothing anywhere to say how far it got. This counts the handshake
-	// without reading it: a run with offers and no answers failed in one place, a
-	// run with both and no chunks failed in another, and the two are otherwise
-	// indistinguishable from the outside.
-	log.Printf("signal %s -> %s (%d bytes)", who(r).Node, req.To, len(req.Payload))
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) inbox(w http.ResponseWriter, r *http.Request) {

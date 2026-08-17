@@ -2,17 +2,12 @@ import {
   registerView, showView, state, el, onDevices, onInbox, notifyInbox,
 } from '../app.js';
 import { api } from '../api.js';
-import { uploadThroughServer, queueForDelivery } from '../upload.js';
-import { openStage } from '../staging.js';
+import { uploadThroughServer } from '../upload.js';
 import { renderStrip } from '../strip.js';
 import { MODE_SEALED } from '../crypto.js';
 import { capabilities, onCapabilities, installCard, filesFromDrop } from '../inbound.js';
-import { peerToPeerAvailable } from '../peer.js';
 
-let sendImpl = {
-  server: uploadThroughServer,
-  direct: queueForDelivery,
-};
+let sendImpl = { server: uploadThroughServer };
 
 // Test seam. Production never calls this.
 export function __setSendImpl(impl) { sendImpl = impl; }
@@ -146,22 +141,6 @@ registerView('send', 'Send', (panel) => {
     'You can also paste a file into this window.');
   const installNote = el('p', { class: 'data muted', hidden: true });
 
-  // The one decision on this screen that puts content on the server, and it is
-  // on. Direct delivery needs both devices awake and reachable at the same
-  // moment, and a phone that locks its screen mid-send is the ordinary case
-  // rather than the unlucky one; a transfer that waits for a second device to
-  // come back is a transfer that looks broken. Holding costs server storage the
-  // server cannot read, which is the cheaper of the two prices. Untick it and
-  // the sealed chunks never leave this device.
-  const hold = el('input', { type: 'checkbox', id: 'hold', checked: true });
-  // A browser with WebRTC turned off cannot open a peer connection at all, so
-  // the direct path is not a choice here, it is a way to queue a transfer that
-  // will never move. The control stays visible rather than being hidden, because
-  // the decision it represents still exists and why it is unavailable is worth
-  // reading.
-  const canGoDirect = peerToPeerAvailable();
-  if (!canGoDirect) hold.disabled = true;
-
   const recipient = el('select', { id: 'to' }, el('option', { value: '' }, 'All my devices'));
   // No visible heading, because the list has to disappear when it is empty. The
   // accessible name carries what the heading would have said.
@@ -190,19 +169,6 @@ registerView('send', 'Send', (panel) => {
     seal,
     pasteHint,
     installNote,
-    el('p', {}, el('label', { class: 'choice', for: 'hold' },
-      hold,
-      el('span', {},
-        el('span', {}, 'Finish sending even if I close the app'),
-        el('span', { class: 'data muted' }, canGoDirect
-          ? 'Your files wait on the server, still sealed, until the other device'
-            + ' picks them up. The server never has the key. Turn this off to'
-            + ' send straight between devices, which needs both awake at the'
-            + ' same time.'
-          : 'Your files wait on the server, still sealed, until the other device'
-            + ' picks them up. The server never has the key. Sending straight'
-            + ' between devices needs WebRTC, which is turned off in this'
-            + ' browser, so it is not available here.')))),
     el('p', { class: 'label' }, el('label', { for: 'to' }, 'To')),
     recipient,
     stagedList,
@@ -214,7 +180,7 @@ registerView('send', 'Send', (panel) => {
     status,
     announcement);
 
-  controls = { recipient, hold, progress, ruler, edits, key, status, announcement };
+  controls = { recipient, progress, ruler, edits, key, status, announcement };
 
   // Rebuilt whole rather than patched, so the index each Remove closes over is
   // the index that row now has. Same row shape the inbox uses: the text block
@@ -253,17 +219,6 @@ registerView('send', 'Send', (panel) => {
   };
 
   sendButton.addEventListener('click', async () => {
-    // A direct transfer is offered to the devices it names and to nobody else,
-    // so one addressed to all devices names no device and would never be
-    // offered at all. It would also never leave the queue, because a transfer
-    // with no addressee can never be delivered to every addressee. Held on the
-    // server the same choice is meaningful: every device sees it in its inbox.
-    if (!hold.checked && !recipient.value) {
-      status.textContent = 'A file sent directly needs a device to send it to.'
-        + ' Choose one, or hold it on the server.';
-      status.className = 'data bad';
-      return;
-    }
     // Taken off the list before the first byte moves, so a second press cannot
     // send the same files twice and anything staged while this runs is left for
     // the next press.
@@ -497,13 +452,11 @@ function paintStrip(strip, p) {
 
 async function sendNow(files) {
   const {
-    recipient, hold, progress, ruler, edits, key, status, announcement,
+    recipient, progress, ruler, edits, key, status, announcement,
   } = requireControls();
   const to = recipient.value ? [recipient.value] : [];
   // Read once for the whole batch, so a stray click mid-send cannot split one
   // press of Send across two destinations.
-  const onServer = hold.checked;
-  let anyQueued = false;
   const failures = [];
   let completed = 0;
   announcement.textContent = '';
@@ -532,9 +485,7 @@ async function sendNow(files) {
           // count is chunks sealed onto this device. Until the file has been cut
           // there is no total to count against, so the caption counts alone and
           // is the only live feedback that pass has.
-          const counted = onServer
-            ? `${p.held} of ${p.total} held`
-            : (p.total ? `${p.sent} of ${p.total} sealed` : `${p.sent} sealed`);
+          const counted = `${p.held} of ${p.total} held`;
           status.textContent = `${file.name} · ${humanSize(file.size)} · ${counted}`;
           progress.setAttribute('role', 'progressbar');
           progress.setAttribute('aria-label', `Sending ${file.name}`);
@@ -550,9 +501,7 @@ async function sendNow(files) {
           }
         },
       };
-      const r = onServer
-        ? await sendImpl.server(file, opts)
-        : await sendImpl.direct(file, { ...opts, openStage });
+      const r = await sendImpl.server(file, opts);
       // Settle the strip. Nothing is in transit once either path resolves, so no
       // segment may be left pulsing amber.
       if (strip) {
@@ -563,13 +512,9 @@ async function sendNow(files) {
         // final: a chunk still in transit may yet be the one that moved.
         strip.marks(edits, r.storedAt || [], 'the edit');
       }
-      status.textContent = onServer
-        ? `Sent ${file.name} · ${r.held} of ${r.total} chunks were already here`
-        // The same words the checkbox promised, so the confirmation reads as
-        // the thing the control said it would do rather than as a new fact.
-        : `Queued ${file.name} · it waits here until both devices are online`;
+      status.textContent =
+        `Sent ${file.name} · ${r.held} of ${r.total} chunks were already here`;
       announcement.textContent = status.textContent;
-      if (!onServer) anyQueued = true;
       completed++;
     } catch (err) {
       // A failed send leaves nothing in transit either, and the chunks that
@@ -599,13 +544,5 @@ async function sendNow(files) {
   // that this batch successfully created, without turning it into an arrival.
   if (completed > 0) notifyInbox();
 
-  // The transfer is on the server's queue from the moment it was created, so
-  // this only decides whether it moves now or on the next time the app is
-  // opened. Not awaited: a direct session takes as long as the file takes, and
-  // the Send view has already said what it did.
-  if (anyQueued) {
-    const { drainQueue } = await import('../session.js');
-    drainQueue().catch((err) => console.warn('the queue did not drain', err));
-  }
   return failures.map(({ file }) => file);
 }

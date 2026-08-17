@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { uploadThroughServer, queueForDelivery } from './upload.js';
+import { uploadThroughServer } from './upload.js';
 import {
   DOMAIN, chunkIdentity, openRecord, sealChunk, deriveMaster,
   MODE_SEALED, MODE_PLAIN, b64encode,
@@ -344,105 +344,6 @@ test('a file made of repeated chunks reports nothing held on its first send', as
   assert.equal(api.calls.chunks.length, new Set(api.calls.chunks).size);
 });
 
-test('a queued transfer stages every chunk and sends the server none of them', async () => {
-  // The whole point of the default path. The server learns what the transfer is
-  // made of and gets the two sealed records the recipient needs to read it, and
-  // not one byte of content.
-  const api = fakeApi();
-  const stage = fakeStage();
-  const r = await queueForDelivery(fakeFile(pseudoRandom(20000, 41)), {
-    mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...queued(stage).opts,
-  });
-  assert.ok(r.total > 1, 'the fixture must produce several chunks');
-  assert.equal(api.calls.created.length, 1);
-  assert.deepEqual(api.calls.created[0].to, ['desktop']);
-  assert.equal(api.calls.chunks.length, 0, 'no content may reach the server on this path');
-  assert.deepEqual(api.calls.records.map((x) => x.kind).sort(), ['chunklist', 'meta']);
-  assert.equal(r.held, 0, 'nothing is held: no recipient has been asked yet');
-  assert.equal(r.sent, r.total);
-  assert.deepEqual(
-    [...stage.staged.keys()].sort((a, b) => a - b),
-    [...Array(r.total).keys()],
-    'every position in the transfer must have a staged chunk behind it');
-});
-
-test('a queued transfer remembers which local stage holds its chunks', async () => {
-  const api = fakeApi();
-  const stage = fakeStage();
-  const wiring = queued(stage);
-
-  const result = await queueForDelivery(fakeFile(pseudoRandom(20000, 45)), {
-    mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...wiring.opts,
-  });
-
-  assert.deepEqual(wiring.remembered, [{
-    transferId: TRANSFER,
-    stageId: stage.keys[0],
-  }]);
-  assert.equal(result.id, TRANSFER);
-});
-
-test('a registry failure does not undo a successfully queued transfer', async () => {
-  const api = fakeApi();
-  const stage = fakeStage();
-  const wiring = queued(stage);
-  wiring.opts.rememberOutboundStage = async () => {
-    throw new Error('the local registry is unavailable');
-  };
-
-  const result = await queueForDelivery(fakeFile(pseudoRandom(20000, 49)), {
-    mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...wiring.opts,
-  });
-
-  assert.equal(result.id, TRANSFER);
-  assert.deepEqual(api.calls.deleted, [], 'the server transfer is already usable');
-  assert.equal(stage.clears.length, 0, 'the stage is still owned by that transfer');
-  assert.ok(stage.staged.size > 0);
-});
-
-test('the file is read once, and the chunks are sealed several at a time', async () => {
-  // The two halves of this task. A second read of a file that may be twenty
-  // gigabytes is the largest single cost there was, and sealing one chunk at a
-  // time uses one core of however many the device has.
-  const api = fakeApi();
-  const stage = fakeStage();
-  const data = pseudoRandom(20000, 61);
-  let reads = 0;
-  const file = fakeFile(data);
-  const stream = file.stream.bind(file);
-  file.stream = () => { reads++; return stream(); };
-
-  const wiring = queued(stage);
-  const r = await queueForDelivery(file, {
-    mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...wiring.opts,
-  });
-  assert.equal(reads, 1, 'the file must be opened exactly once');
-  assert.ok(r.total > 4, 'the fixture must produce more chunks than the pool has workers');
-  assert.ok(wiring.pool.peak > 1, `peak concurrency was ${wiring.pool.peak}, so sealing is serial`);
-  assert.ok(
-    wiring.pool.peak <= wiring.pool.size,
-    `peak concurrency was ${wiring.pool.peak}, above the pool size`);
-  assert.equal(wiring.pool.closed, 1, 'the pool must be closed when the pass ends');
-});
-
-test('the stage is named by the id the sealed metadata carries', async () => {
-  // The chunks are staged before the transfer exists, so the directory cannot be
-  // named by the transfer's id. Nothing else records where they went: a sender
-  // that could not find them again would offer a transfer whose every position
-  // answers with nothing.
-  const api = fakeApi();
-  const stage = fakeStage();
-  await queueForDelivery(fakeFile(pseudoRandom(20000, 67)), {
-    mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...queued(stage).opts,
-  });
-  assert.equal(stage.keys.length, 1);
-  assert.match(stage.keys[0], /^[0-9a-f]{32}$/, 'the stage id must be a well formed id');
-  assert.notEqual(stage.keys[0], TRANSFER, 'the stage cannot be named by an id it predates');
-
-  const meta = await sealedMeta(api);
-  assert.equal(meta.stage, stage.keys[0]);
-  assert.equal(meta.name, 'f.bin', 'the rest of the record must be unchanged');
-});
 
 test('a transfer sent through the server names no staging directory', async () => {
   // The field is where this device put the chunks. On the server path there are
@@ -456,135 +357,6 @@ test('a transfer sent through the server names no staging directory', async () =
   assert.equal('stage' in meta, false);
 });
 
-test('a queued transfer stages a repeated chunk at every position it occupies', async () => {
-  // The peer asks for chunk 7 of this transfer by position. Staging under the
-  // chunk id instead, or claiming an id the way the server path does so it goes
-  // up once, would leave the later positions with no file behind them and the
-  // peer would ask for a chunk this device could not produce.
-  const unit = pseudoRandom(4000, 23);
-  const data = new Uint8Array(unit.length * 5);
-  for (let i = 0; i < 5; i++) data.set(unit, i * unit.length);
-
-  const api = fakeApi();
-  const stage = fakeStage();
-  const r = await queueForDelivery(fakeFile(data), {
-    mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...queued(stage).opts,
-  });
-  assert.ok(new Set(api.calls.created[0].cids).size < r.total, 'the fixture must repeat chunks');
-  assert.equal(stage.staged.size, r.total);
-});
-
-test('a queued transfer stages chunks the server already holds', async () => {
-  // The server is not the recipient. A chunk it kept from an earlier transfer
-  // that was held on the server says nothing about what this device can hand to
-  // a peer, so the missing set has no bearing on what is staged. Reading it here
-  // would produce a queued transfer with holes in it that fails only later, on
-  // the wire, against a device that asked for a position nothing answers.
-  const held = new Set();
-  const data = pseudoRandom(20000, 43);
-  await uploadThroughServer(fakeFile(data), {
-    mk: await mkP, mode: MODE_SEALED, to: [], cdc: CDC, api: fakeApi(held),
-  });
-
-  const api = fakeApi(held);
-  const stage = fakeStage();
-  const r = await queueForDelivery(fakeFile(data), {
-    mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...queued(stage).opts,
-  });
-  assert.equal(
-    api.calls.created[0].cids.filter((cid) => !held.has(cid)).length, 0,
-    'the server must already hold every chunk, or this test asserts nothing');
-  assert.equal(stage.staged.size, r.total);
-});
-
-test('a staging failure clears the partial stage and tells the server nothing', async () => {
-  // The chunks are staged before the transfer is created, which is what makes a
-  // failure part way through cheap to undo: no transfer sits on the queue with
-  // holes in its stage, offered by every later drain and failing forever. What
-  // is left is the chunks that did land, which nothing else would ever sweep.
-  const api = fakeApi();
-  const stage = fakeStage(2);
-  const wiring = queued(stage);
-  await assert.rejects(
-    queueForDelivery(fakeFile(pseudoRandom(20000, 47)), {
-      mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...wiring.opts,
-    }),
-    // Rethrown as it was, so the caption names the reason the write failed
-    // rather than the cleanup that followed it.
-    /staging worker stopped/,
-  );
-  assert.equal(api.calls.created.length, 0, 'the server must never hear about it');
-  assert.deepEqual(api.calls.deleted, []);
-  assert.equal(stage.clears.length, 1, 'the chunks that did land must be cleared');
-  assert.equal(stage.staged.size, 0);
-  assert.equal(wiring.pool.closed, 1, 'a failed pass must still close the pool');
-});
-
-test('a transfer the server refuses leaves nothing staged behind it', async () => {
-  // Everything is on disk by the time the server is asked, so a refusal here is
-  // a stage with no transfer to read it. Nothing else sweeps one.
-  const api = fakeApi();
-  api.createTransfer = async () => { throw new Error('507: storage quota exceeded'); };
-  const stage = fakeStage();
-  await assert.rejects(
-    queueForDelivery(fakeFile(pseudoRandom(20000, 51)), {
-      mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...queued(stage).opts,
-    }),
-    /storage quota/,
-  );
-  assert.equal(stage.clears.length, 1);
-  assert.equal(stage.staged.size, 0);
-});
-
-test('a direct record failure retries server cleanup before clearing its stage', async () => {
-  const api = fakeApi();
-  const original = new Error('the record write failed');
-  let deletes = 0;
-  api.putRecord = async () => { throw original; };
-  api.deleteTransfer = async (id) => {
-    deletes++;
-    if (deletes === 1) throw new Error('the first cleanup attempt failed');
-    api.calls.deleted.push(id);
-  };
-  const stage = fakeStage();
-
-  await assert.rejects(
-    queueForDelivery(fakeFile(pseudoRandom(20000, 57)), {
-      mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...queued(stage).opts,
-    }),
-    (err) => err === original,
-  );
-
-  assert.equal(deletes, 2, 'a transient DELETE failure must be retried');
-  assert.deepEqual(api.calls.deleted, [TRANSFER]);
-  assert.equal(stage.clears.length, 1, 'cleanup was confirmed, so the local stage is now orphaned');
-  assert.equal(stage.staged.size, 0);
-});
-
-test('cleanup failing over a record failure preserves the stage and original error', async () => {
-  // A device offline enough to fail a record write is a device whose DELETE may
-  // fail too. The server still has a transfer naming this local stage, so the
-  // only recovery copy must stay put while the original failure is reported.
-  const api = fakeApi();
-  const original = new Error('the record write failed');
-  let deletes = 0;
-  api.putRecord = async () => { throw original; };
-  api.deleteTransfer = async () => {
-    deletes++;
-    throw new Error('the cleanup request failed');
-  };
-  const stage = fakeStage();
-  await assert.rejects(
-    queueForDelivery(fakeFile(pseudoRandom(20000, 53)), {
-      mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...queued(stage).opts,
-    }),
-    (err) => err === original,
-  );
-  assert.equal(api.calls.created.length, 1, 'the transfer must exist, or this test asserts nothing');
-  assert.ok(deletes > 1, 'DELETE must use the retry policy before cleanup is abandoned');
-  assert.equal(stage.clears.length, 0, 'an unconfirmed server cleanup must not remove the stage');
-  assert.ok(stage.staged.size > 0, 'the staged chunks are the recovery copy');
-});
 
 test('a file with no extension and no detected type transfers', async () => {
   // Common for archives, disk images, and anything from a unix machine. The
@@ -633,18 +405,6 @@ test('unusual names and types reach the sealed metadata unchanged', async () => 
   }
 });
 
-test('a queued empty file sends records and needs no staged chunks', async () => {
-  const api = fakeApi();
-  const stage = fakeStage();
-  const result = await queueForDelivery(fakeFile(new Uint8Array(0), 'empty.txt'), {
-    mk: await mkP, mode: MODE_SEALED, to: ['desktop'], cdc: CDC, api, ...queued(stage).opts,
-  });
-  assert.deepEqual(api.calls.created[0].cids, []);
-  assert.deepEqual(api.calls.records.map((x) => x.kind), ['chunklist', 'meta']);
-  assert.equal(stage.staged.size, 0);
-  assert.equal(result.total, 0);
-  assert.equal(result.sent, 0);
-});
 
 // The strip is a row in file order, so a reader takes a segment's place as that
 // chunk's place in the file. Reporting only counts made every re-send look like

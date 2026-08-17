@@ -318,7 +318,15 @@ export function listen() {
       for (const fn of deviceListeners) fn();
     });
 
-    source.addEventListener('inbox', () => {
+    // The payload is the sending device's name. It is the only part of an
+    // arrival that is not sealed, which is why the notice names the sender
+    // rather than the file: the filename lives inside the metadata record and
+    // opening it is the inbox's job, not this handler's.
+    source.addEventListener('inbox', (event) => {
+      const from = event?.data || '';
+      const channel = arrivalChannel(globalThis, globalThis.document, subscribed);
+      if (channel === 'toast') toast('A file arrived.', { from });
+      else if (channel === 'local') showLocalNotice(from);
       for (const fn of listeners) fn();
     });
 
@@ -423,23 +431,114 @@ async function subscribePush() {
         applicationServerKey: urlBase64ToUint8Array(state.config.vapidKey),
       });
     await api.subscribePush(sub);
+    // Recorded because an arrival has to pick one announcer. Only a subscription
+    // the server actually accepted means the worker will be woken, and assuming
+    // it either doubles every notice or loses it.
+    subscribed = true;
   } catch (err) {
     console.warn('push subscription failed', err);
   }
 }
 
-// Whether this device could be told about an arrival but has not been asked yet.
-// A view uses this to decide whether to offer the ask at all, so a person who
-// has already answered, either way, is never asked twice.
-export function pushOffered(scope = globalThis) {
-  return Boolean(state.config?.vapidKey && 'Notification' in scope
-    && 'PushManager' in scope && scope.Notification.permission === 'default');
+// How long a notice stays up. Long enough to read a filename without looking for
+// it, short enough that a run of arrivals does not build a wall.
+export const TOAST_MS = 6000;
+
+// Whether the server holds a push subscription this device registered. False
+// until one is accepted, which is the honest default: an engine without push,
+// and one whose subscribe failed, both need the page to speak for itself.
+let subscribed = false;
+
+// An arrival the operating system will not announce, shown inside the page.
+// Returns the node so a caller can remove it early; a no-op outside a document,
+// because a module under test has nowhere to put one.
+export function toast(message, { from = '', action = null, after = TOAST_MS } = {}) {
+  if (typeof document === 'undefined') return null;
+  const host = document.getElementById('toasts');
+  if (!host) return null;
+
+  const node = el('div', { class: 'toast' },
+    el('span', { class: 'said' },
+      el('span', {}, message),
+      from ? el('span', { class: 'from' }, from) : ''));
+  // A notice that asks for something has to wait to be answered. Auto-dismissing
+  // it would put a decision on screen and take it away again before a person
+  // crossing the room could act on it, so an actionable notice stays until it is
+  // used or waved off, and only a plain one times out.
+  if (action) {
+    const go = el('button', { class: 'ghost', type: 'button' }, action.label);
+    go.addEventListener('click', async () => {
+      go.disabled = true;
+      try {
+        await action.run();
+      } finally {
+        node.remove();
+      }
+    });
+    const close = el('button', {
+      class: 'dismiss', type: 'button', 'aria-label': `Dismiss: ${message}`,
+    }, '×');
+    close.addEventListener('click', () => node.remove());
+    node.append(go, close);
+  } else {
+    setTimeout(() => node.remove(), after);
+  }
+  host.append(node);
+  return node;
 }
 
-// The ask, which must be called from inside a click. Returns whether this device
-// will now be notified, so the caller can say what happened rather than leaving
-// a button that looks like it did nothing.
-export async function enablePush() {
+// How an arrival should be announced on this device. Three channels, and the
+// rule is that exactly one of them speaks, because two notices for one file is
+// worse than a plain one.
+//
+//   toast:  the page says it. Correct whenever the page is being looked at, and
+//           the only thing left when notifications were refused.
+//   local:  the page raises a system notification itself. This is the case that
+//           was silent: permission granted, window not in front, and no push to
+//           carry it, which is every engine that has notifications without push.
+//   push:   nothing to do here. The service worker will be woken and will speak,
+//           and doing anything more would double it.
+export function arrivalChannel(scope = globalThis, doc = globalThis.document, pushes = false) {
+  if (doc?.visibilityState === 'visible') return 'toast';
+  const granted = 'Notification' in scope && scope.Notification.permission === 'granted';
+  if (!granted) return 'toast';
+  return pushes ? 'push' : 'local';
+}
+
+// Two independent facts, deliberately not collapsed into one.
+//
+// The first is whether this device can show a system notification at all, which
+// is the Notification API and the answer already given to it. The second is
+// whether one can reach the device with the app closed, which additionally needs
+// push. An engine can have the first without the second, and that combination is
+// worth saying out loud rather than treating as "no notifications": arrivals
+// still announce themselves while the app is running.
+//
+//   unavailable: this engine cannot notify, and no click will change that
+//   unset:       never asked, and a click can still ask
+//   blocked:     answered no, and only browser settings can undo it
+//   on:          answered yes
+export function notifyStatus(scope = globalThis) {
+  if (!('Notification' in scope)) return 'unavailable';
+  const answer = scope.Notification.permission;
+  if (answer === 'granted') return 'on';
+  if (answer === 'denied') return 'blocked';
+  return 'unset';
+}
+
+// Whether an arrival can reach this device with the app closed. Both halves are
+// required: the server must have a key to sign with, and the engine must have
+// somewhere to receive.
+export function pushCapable(scope = globalThis) {
+  return Boolean(state.config?.vapidKey && 'PushManager' in scope);
+}
+
+// The ask, which must be called from inside a click. Permission is the whole
+// decision; the push subscription that follows is an upgrade, and an engine that
+// cannot take it still gets notifications while the app is running. Returns
+// whether this device will now be notified, so the caller can say what happened
+// rather than leaving a button that looks like it did nothing.
+export async function enableNotifications() {
   if (!('Notification' in globalThis)) return false;
   try {
     if (await Notification.requestPermission() !== 'granted') return false;
@@ -449,6 +548,25 @@ export async function enablePush() {
   }
   await subscribePush();
   return true;
+}
+
+// Announce an arrival through the operating system from the page itself. This is
+// what covers an engine with notifications but no push: the app is running, so
+// there is a live registration to show through, and without this such a device
+// is silent the moment its window is not the one being looked at.
+async function showLocalNotice(from) {
+  try {
+    const reg = await navigator.serviceWorker?.ready;
+    const body = from ? `From ${from}.` : 'Open Airlock to save it.';
+    if (reg?.showNotification) {
+      await reg.showNotification('A file arrived', { body, tag: 'airlock-arrival' });
+      return;
+    }
+    new Notification('A file arrived', { body });
+  } catch (err) {
+    // The in-app notice already ran for every case this one is the upgrade to.
+    console.warn('local notification failed', err);
+  }
 }
 
 async function registerWorker() {

@@ -22,6 +22,16 @@ import (
 // not a permanently stuck send.
 const pushTimeout = 10 * time.Second
 
+// Every push body is padded to this size before encryption. The library's own
+// default is 4096, and a mobile push endpoint registered as a constrained device
+// refuses that outright: Mozilla's autopush answers 413 for anything much over
+// two kilobytes on such a subscription, which is silent unless the status is
+// read, and means a phone is the one device that never hears about an arrival.
+//
+// Padding buys nothing here in any case. The body is a fixed two bytes carrying
+// no information, so there is no length for a record size to hide.
+const pushRecordBytes = 1024
+
 type subscription struct {
 	Node string               `json:"node"`
 	Sub  webpush.Subscription `json:"sub"`
@@ -201,12 +211,20 @@ func (p *Pusher) Notify(recipients []string, sender string) {
 				VAPIDPublicKey:  p.keys.Public,
 				VAPIDPrivateKey: p.keys.Private,
 				TTL:             3600,
+				RecordSize:      pushRecordBytes,
 			})
 			if err != nil {
 				log.Printf("push to %s: %v", s.Node, err)
 				return
 			}
 			res.Body.Close()
+			// A push service reports a refusal in the status, not in the error,
+			// so a send that never reaches a phone otherwise looks exactly like
+			// one that did. Silence here is the reason "no notification arrived"
+			// has nowhere to be diagnosed from.
+			if res.StatusCode >= 300 {
+				log.Printf("push to %s refused: %s", s.Node, res.Status)
+			}
 			// The push service is the authority on whether an endpoint still
 			// exists. These two codes mean it is gone for good, as opposed to a
 			// transient failure, so the entry is dropped rather than retried

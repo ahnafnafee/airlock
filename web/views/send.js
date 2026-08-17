@@ -120,7 +120,12 @@ registerView('send', 'Send', (panel) => {
   // The folder button sits on its own line rather than trailing the first one,
   // so the sentence above it reads the same whether or not the drop line is
   // there. Chained on one line it would say "or choose or a folder".
+  // The chamber said nothing about itself: every word in it was on a button, so
+  // an empty one read as a panel that had failed to load. This is the line that
+  // says what the chamber is for, and it is always here, unlike the drop line
+  // above which appears only on an engine that has proved it accepts a drag.
   const drop = el('div', { id: 'drop' },
+    el('p', { class: 'hatch' }, 'Nothing staged yet'),
     el('div', {}, dropLine, choose),
     folderButton,
     picker, folder);
@@ -141,11 +146,13 @@ registerView('send', 'Send', (panel) => {
   const installNote = el('p', { class: 'data muted', hidden: true });
 
   // The one decision on this screen that puts content on the server, and it is
-  // off. Left alone, the sealed chunks stay on this device and cross directly
-  // when both devices are online. Ticked, they are uploaded, and the note says
-  // so rather than describing the setting: what it buys and what it costs are
-  // the same sentence.
-  const hold = el('input', { type: 'checkbox', id: 'hold' });
+  // on. Direct delivery needs both devices awake and reachable at the same
+  // moment, and a phone that locks its screen mid-send is the ordinary case
+  // rather than the unlucky one; a transfer that waits for a second device to
+  // come back is a transfer that looks broken. Holding costs server storage the
+  // server cannot read, which is the cheaper of the two prices. Untick it and
+  // the sealed chunks never leave this device.
+  const hold = el('input', { type: 'checkbox', id: 'hold', checked: true });
 
   const recipient = el('select', { id: 'to' }, el('option', { value: '' }, 'All my devices'));
   // No visible heading, because the list has to disappear when it is empty. The
@@ -178,10 +185,12 @@ registerView('send', 'Send', (panel) => {
     el('p', {}, el('label', { class: 'choice', for: 'hold' },
       hold,
       el('span', {},
-        el('span', {}, 'Hold on the server if I go offline'),
+        el('span', {}, 'Finish sending even if I close the app'),
         el('span', { class: 'data muted' },
-          'The file is uploaded encrypted so it arrives even if this device is'
-          + ' closed. Otherwise it waits here until both devices are online.')))),
+          'Your files wait on the server, still sealed, until the other device'
+          + ' picks them up. The server never has the key. Turn this off to send'
+          + ' straight between devices, which needs both awake at the same'
+          + ' time.')))),
     el('p', { class: 'label' }, el('label', { for: 'to' }, 'To')),
     recipient,
     stagedList,

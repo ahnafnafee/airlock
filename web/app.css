@@ -135,15 +135,31 @@ p { text-wrap: pretty; }
   background: var(--hull-active);
 }
 
+/* The empty chamber, drawn as the segments a file becomes. A blank rectangle
+   here read as a missing element rather than as a vessel waiting to be filled,
+   so the bar now shows the chunk strip's own vocabulary before there is a
+   transfer to show it on. */
 #drop::before {
   content: "";
   display: block;
   width: 100%;
   max-width: 520px;
-  height: 56px;
-  margin: 0 auto 18px;
+  height: 34px;
+  margin: 0 auto 20px;
   border: 1px solid var(--seam);
-  background: var(--hull);
+  background:
+    repeating-linear-gradient(
+      to right,
+      var(--hull) 0 26px,
+      var(--seam) 26px 29px);
+  opacity: 0.6;
+}
+
+.hatch {
+  margin: 0 0 4px;
+  color: var(--pressure);
+  font: 700 clamp(1.25rem, 2.4vw, 1.6rem)/1.25 var(--display);
+  letter-spacing: var(--track-panel);
 }
 
 #drop > div {
@@ -721,4 +737,91 @@ nav button[aria-current="page"] {
   #equalize.running .seg { animation: none; }
 
   #equalize.running .seg { background: var(--seal); }
+}
+
+/* Arrival notices. Anchored to the bottom because the nav lives there on a
+   phone and the eye is already low; above the nav's own inset so it never sits
+   under the tab bar. */
+#toasts {
+  position: fixed;
+  z-index: 40;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(104px + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: max-content;
+  max-width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--hull-active);
+  border: 1px solid var(--seam);
+  border-left: 2px solid var(--seal);
+  color: var(--pressure);
+  font-size: var(--prose);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 45%);
+  animation: toast-in 160ms ease-out;
+}
+
+.toast .said {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.toast .ghost {
+  flex: none;
+  min-height: 38px;
+  padding: 8px 14px;
+  pointer-events: auto;
+}
+
+.toast .dismiss {
+  flex: none;
+  width: 30px;
+  min-height: 30px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--vapor);
+  font: 400 19px/1 var(--sans);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.toast .dismiss:hover { color: var(--pressure); }
+
+.toast .from {
+  font-family: var(--utility);
+  font-size: var(--data);
+  color: var(--vapor);
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast { animation: none; }
+}
+
+/* The rail takes the bottom nav's place on a wide screen, so the notice has no
+   tab bar to clear and belongs beside the content rather than under it. */
+@media (min-width: 900px) {
+  #toasts {
+    left: auto;
+    right: 24px;
+    transform: none;
+    bottom: 24px;
+  }
 }

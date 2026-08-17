@@ -1,4 +1,4 @@
-import { registerView, state, el, onInbox, pushOffered, enablePush } from '../app.js';
+import { registerView, state, el, onInbox, notifyStatus, pushCapable, enableNotifications, toast } from '../app.js';
 import { api } from '../api.js';
 import { openStage } from '../staging.js';
 import { renderStrip } from '../strip.js';
@@ -33,6 +33,18 @@ function preferShare(file, nav = navigator, win = window) {
   return Boolean(isStandalone(win)
     && typeof win.showSaveFilePicker !== 'function'
     && nav.canShare?.({ files: [file] }));
+}
+
+// Assembling and exporting, in the one place both the row's button and the
+// arrival notice reach for. One copy because the two must offer the same rung:
+// the export cascade spends the user gesture that started the call, and a second
+// implementation would drift on which rung it reaches for and where the file
+// lands. Imported here rather than at the top so the direct-transfer path stays
+// out of the boot path, exactly as the rest of this module loads it.
+async function saveTransfer(transferId) {
+  const { assembleTransfer } = await import('../session.js');
+  const file = await assembleTransfer(transferId);
+  return exportFile(file, { preferShare: preferShare(file) });
 }
 
 function humanSize(bytes) {
@@ -278,29 +290,66 @@ export async function terminateTransfer(t, meta, outbound, mutate, deps = {}) {
 
 // Notifications are what makes a closed app worth closing, and the browser will
 // only ask while a click is asking for it. The offer sits here because the inbox
-// is where the absence is felt, and it appears only while the answer is still
-// open: once this device has said yes or no, it is never asked again.
-function offerPush(host) {
-  if (!pushOffered()) return;
+// is where the absence is felt, and it is re-read on every refresh rather than
+// decided once at mount: a device can be answered, or blocked, in another tab.
+//
+// A blocked device is the case that must not be silent. A page cannot prompt
+// again once it has been refused, so saying nothing leaves a device permanently
+// quiet with no visible reason and nothing to act on.
+function renderPushOffer(host) {
+  const status = notifyStatus();
+  const pushes = pushCapable();
+
+  // The only silent case, and it earns it: this device is fully set up.
+  if (status === 'on' && pushes) {
+    host.hidden = true;
+    host.replaceChildren();
+    return;
+  }
+  host.hidden = false;
+
+  // Notifications work, but only while Airlock is running. Said plainly rather
+  // than left to be discovered, because the difference only shows up as a file
+  // that arrived hours ago and never announced itself.
+  if (status === 'on') {
+    host.replaceChildren('Notifications are on. This browser can only announce a'
+      + ' file while Airlock is open, so leave it running in a tab to hear about'
+      + ' arrivals.');
+    return;
+  }
+
+  // Nothing a click can fix. Saying so is the point: an offer that silently
+  // omits itself is indistinguishable from a broken one.
+  if (status === 'unavailable') {
+    host.replaceChildren('This browser cannot show notifications. Arrivals appear'
+      + ' in this list, and in a notice on screen, while Airlock is open.');
+    return;
+  }
+
+  // A page cannot prompt again once refused, so this one points at the switch.
+  if (status === 'blocked') {
+    host.replaceChildren('This device stays quiet when a file arrives.'
+      + ' Notifications are blocked for this site, and only your browser'
+      + ' settings can turn them back on.');
+    return;
+  }
+
   const go = el('button', { class: 'ghost', type: 'button' }, 'Turn on notifications');
   go.addEventListener('click', async () => {
     go.disabled = true;
-    if (await enablePush()) {
-      host.replaceChildren('This device will be told when a file arrives.');
-      return;
-    }
-    host.replaceChildren(
-      'Notifications stay off. Your browser settings for this site can turn them back on.');
+    await enableNotifications();
+    renderPushOffer(host);
   });
-  host.append('Files arrive whether or not this app is open. ', go);
-  host.hidden = false;
+  host.replaceChildren(pushes
+    ? 'Files arrive whether or not this app is open. '
+    : 'Get told when a file arrives while Airlock is open. ', go);
 }
 
 registerView('inbox', 'Inbox', (panel) => {
   const list = el('ul', { class: 'rows' });
   const ask = el('p', { class: 'muted notice', hidden: true });
   panel.append(el('h2', {}, 'Inbox'), ask, list);
-  offerPush(ask);
+  renderPushOffer(ask);
 
   // Which refresh owns the list. Rows are built before anything on screen is
   // touched, and a run that is overtaken while awaiting drops its work rather
@@ -310,6 +359,10 @@ registerView('inbox', 'Inbox', (panel) => {
   // The object URLs currently attached to rows on screen. Released when the rows
   // they belong to are replaced, and never before, because revoking a URL an
   // <img> is still using can blank it.
+  // Which transfers were already saveable the last time this view looked. Null
+  // until the first refresh has run, which is what separates "arrived just now"
+  // from "was already here when the page opened".
+  let prompted = null;
   let showing = [];
   const release = (urls) => {
     for (const url of urls) {
@@ -336,6 +389,10 @@ registerView('inbox', 'Inbox', (panel) => {
     .catch((err) => console.warn('the storage note will not repaint', err));
 
   async function refresh() {
+    // Re-read rather than trusted from mount time. Permission can change in
+    // browser settings, or in another tab, with nothing to tell this page about
+    // it, and the answer decides whether this device can be reached at all.
+    renderPushOffer(ask);
     const mine = ++generation;
     let transfers;
     try {
@@ -379,8 +436,25 @@ registerView('inbox', 'Inbox', (panel) => {
     // for the life of the page, once per repaint per row.
     const minted = [];
     const rows = [];
+    const ready = [];
     for (const t of transfers) {
-      rows.push(await row(t, shortfallFor, minted));
+      rows.push(await row(t, shortfallFor, minted, ready));
+    }
+    // Only what became ready while this view was watching. The first refresh
+    // seeds the set instead of announcing it, because everything already in the
+    // inbox at boot arrived before anyone was here to be told, and a stack of
+    // notices for old transfers on every reload is noise rather than news.
+    const announce = prompted === null ? [] : ready.filter((r) => !prompted.has(r.id));
+    prompted = new Set(ready.map((r) => r.id));
+    for (const { id, name } of announce) {
+      toast('Ready to save.', {
+        from: name,
+        action: {
+          label: 'Save',
+          run: () => saveTransfer(id).catch(
+            (err) => toast(`Could not save. ${err.message}`, { from: name })),
+        },
+      });
     }
     if (mine !== generation) {
       // This run lost the race and its rows will never be attached, so nothing
@@ -396,10 +470,13 @@ registerView('inbox', 'Inbox', (panel) => {
     release(outgoing);
   }
 
-  async function row(t, shortfallFor = () => 0, minted = []) {
+  async function row(t, shortfallFor = () => 0, minted = [], ready = []) {
     const presentation = await readRow(t, state.mk, openStage, state.me?.node);
     const { name, detail, meta, saveable, note, reach, total, heldAt } = presentation;
     const allowedActions = new Set(rowActions(presentation));
+    // Recorded where the decision is already made, so the arrival notice and the
+    // row's own Save button can never disagree about whether a file is ready.
+    if (allowedActions.has('save')) ready.push({ id: t.id, name });
 
     // Carried by the same record as the name, so it appears with the name rather
     // than waiting on the bytes.
@@ -478,11 +555,7 @@ registerView('inbox', 'Inbox', (panel) => {
           // started underneath it would decrypt the same chunks twice.
           save.disabled = true;
           try {
-            // Imported here rather than at the top so the whole direct-transfer
-            // path stays out of the boot path, exactly as the app loads it.
-            const { assembleTransfer } = await import('../session.js');
-            const file = await assembleTransfer(t.id);
-            const rung = await exportFile(file, { preferShare: preferShare(file) });
+            const rung = await saveTransfer(t.id);
             detailNode.textContent = REPORT[rung];
             detailNode.className = 'data muted';
           } catch (err) {

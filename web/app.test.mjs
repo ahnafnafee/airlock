@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ensurePaired, listen, onDevices, onInbox, pushOffered, retryDelay, secureEnough,
+  ensurePaired, arrivalChannel, listen, notifyStatus, onDevices, onInbox, pushCapable, retryDelay,
+  secureEnough,
   state, __setStreamImpl, RETRY_BASE_MS, RETRY_CAP_MS,
 } from './app.js';
 
@@ -296,31 +297,64 @@ test('an origin without web crypto is refused rather than half-run', () => {
 // receive, the whole reason to leave the app closed, never works on the platform
 // that needs it most. The ask therefore belongs to a click, and this decides
 // whether a view offers one.
-test('the notification offer appears only while the answer is still open', () => {
+test('what this device can do about notifications is two facts, not one', () => {
   const config = state.config;
-  const scope = (permission) => ({ Notification: { permission }, PushManager: function () {} });
+  const scope = (permission, push = true) => (push
+    ? { Notification: { permission }, PushManager: function () {} }
+    : { Notification: { permission } });
   try {
     state.config = { vapidKey: 'k' };
-    assert.equal(pushOffered(scope('default')), true);
+    assert.equal(notifyStatus(scope('default')), 'unset');
+    assert.equal(notifyStatus(scope('granted')), 'on');
 
-    // Already answered, either way. Asking again is noise at best; on a browser
-    // that treats a second prompt as a denial it is worse.
-    assert.equal(pushOffered(scope('granted')), false);
-    assert.equal(pushOffered(scope('denied')), false);
+    // A page cannot prompt again after this, so a view that treated it like 'on'
+    // would leave the device quiet forever with nothing on screen to act on.
+    assert.equal(notifyStatus(scope('denied')), 'blocked');
 
-    // Nothing to subscribe to: the server has no VAPID key configured.
+    // No Notification at all. This is the case that used to render nothing,
+    // which is indistinguishable from the app being broken.
+    assert.equal(notifyStatus({}), 'unavailable');
+
+    // Permission is independent of push. An engine can show notifications while
+    // it runs and still have nowhere to receive a push, and reporting that as
+    // "no notifications" would be wrong in the direction that loses arrivals.
+    assert.equal(notifyStatus(scope('granted', false)), 'on');
+    assert.equal(pushCapable(scope('granted', false)), false);
+    assert.equal(pushCapable(scope('granted', true)), true);
+
+    // Push also needs a server that can sign one.
     state.config = { vapidKey: '' };
-    assert.equal(pushOffered(scope('default')), false);
-
-    // Push is not implemented here at all, so the offer would lead nowhere.
-    state.config = { vapidKey: 'k' };
-    assert.equal(pushOffered({ Notification: { permission: 'default' } }), false);
-    assert.equal(pushOffered({ PushManager: function () {} }), false);
-
-    // Before the config read has landed there is nothing to decide on.
+    assert.equal(pushCapable(scope('granted', true)), false);
     state.config = null;
-    assert.equal(pushOffered(scope('default')), false);
+    assert.equal(pushCapable(scope('granted', true)), false);
   } finally {
     state.config = config;
   }
 });
+
+// Exactly one channel speaks per arrival. Two notices for one file is worse than
+// a plain one, and none at all is how an arrival goes unnoticed for hours.
+test('an arrival is announced once, by whichever channel can reach', () => {
+  const visible = { visibilityState: 'visible' };
+  const hidden = { visibilityState: 'hidden' };
+  const perm = (permission) => ({ Notification: { permission } });
+
+  // Being looked at. The page says it, whatever else is available, because a
+  // system banner over the window you are already reading is noise.
+  assert.equal(arrivalChannel(perm('granted'), visible, true), 'toast');
+  assert.equal(arrivalChannel(perm('denied'), visible, false), 'toast');
+
+  // Subscribed and out of sight: the worker will be woken and will speak. Doing
+  // anything here would double it.
+  assert.equal(arrivalChannel(perm('granted'), hidden, true), 'push');
+
+  // The case that was silent. Permission granted, window not in front, and no
+  // push to carry it, which is every engine that has notifications without push.
+  assert.equal(arrivalChannel(perm('granted'), hidden, false), 'local');
+
+  // Refused, so nothing outside the page can speak. The notice waits in the page
+  // rather than being dropped.
+  assert.equal(arrivalChannel(perm('denied'), hidden, true), 'toast');
+  assert.equal(arrivalChannel({}, hidden, true), 'toast');
+});
+

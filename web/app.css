@@ -1,5 +1,24 @@
 * { box-sizing: border-box; }
 
+/* Chrome on Android answers a touch with a translucent block over the element's
+   border box, and that block ignores border-radius: on anything rounded it
+   shows as square corners standing proud of the shape it is meant to be
+   highlighting. Nearly every control here is a pill, so it is wrong nearly
+   everywhere.
+   Turning it off removes the only press feedback touch had, so a replacement
+   comes with it rather than after it. Opacity is the one effect that is
+   correct for every control without knowing anything about it: it needs no
+   background to show against, it cannot fight a button's own colours, and it
+   is clipped to whatever shape the element already has. Zero specificity, so
+   any control wanting a different pressed state simply says so. */
+:where(button, summary, label, a, [role="button"]) {
+  -webkit-tap-highlight-color: transparent;
+}
+
+:where(button, summary, [role="button"]):not(:disabled):active {
+  opacity: 0.7;
+}
+
 html {
   min-height: 100%;
   background: var(--ground);
@@ -115,6 +134,14 @@ nav button {
 }
 
 nav button:hover { color: var(--ink); }
+
+/* A held tab tints toward the state it is about to enter. This is a background
+   rather than the opacity above, so it is clipped to the pill exactly, and it
+   is the tint that makes a press on a bare tab visible at all: dimming alone
+   only fades a label. One step off the track in both themes, which reads as
+   darker on light and lighter on dark, the way a press is expected to in each.
+   The tab already showing its view is left alone; it has nowhere to go. */
+nav button:not([aria-current="page"]):active { background: var(--line-hard); }
 
 nav button[aria-current="page"] {
   background: var(--surface);

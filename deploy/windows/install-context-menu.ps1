@@ -40,12 +40,16 @@ if (-not $roots) {
 # Scoped to the browser profile directories rather than a disk sweep. The
 # launcher is written to <profile>\Web Applications\<app>\Airlock.exe, so a
 # match anywhere else is some other Airlock.exe and is not what this points at.
-# Newest wins, because a profile that installed the app more recently is the one
-# whose launcher is current.
+#
+# Newest wins, and newest is read from the directory rather than from the
+# launcher: the launcher is a stub the browser copies, so every copy carries the
+# stub's own date and they all tie. That tie matters, because an Airlock moved
+# to a new address leaves the app installed at the old one behind, and picking
+# the wrong one gives a menu entry that opens a server nobody is running.
 $launcher = $roots |
     ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter 'Airlock.exe' -Recurse -File -ErrorAction SilentlyContinue } |
     Where-Object { $_.FullName -like '*Web Applications*' } |
-    Sort-Object LastWriteTime -Descending |
+    Sort-Object { $_.Directory.LastWriteTime } -Descending |
     Select-Object -First 1
 
 if (-not $launcher) {
@@ -63,10 +67,18 @@ if (-not $launcher) {
 $path = 'Software\Classes\*\shell\Airlock'
 $command = "`"$($launcher.FullName)`" `"%1`""
 
+# The launcher is a stub the browser copies for every installed app, so its own
+# first icon is the browser's, not Airlock's. Beside it the browser writes an
+# .ico built from the app's manifest icons at every size the shell asks for,
+# which is the mark this menu should carry. Falling back to the stub is still
+# better than no entry, and it is what an older browser leaves behind.
+$icon = Join-Path $launcher.DirectoryName 'Airlock.ico'
+if (-not (Test-Path -LiteralPath $icon)) { $icon = "$($launcher.FullName),0" }
+
 $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($path)
 try {
     $key.SetValue('', 'Send with Airlock')
-    $key.SetValue('Icon', "$($launcher.FullName),0")
+    $key.SetValue('Icon', $icon)
 } finally {
     $key.Close()
 }

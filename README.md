@@ -113,16 +113,52 @@ That passphrase is what unlocks your files, and it never leaves your devices.
 
 <br/>
 
-Airlock installs to your home screen or desktop like a normal app, and works
-offline.
+Airlock installs to your home screen or desktop and gets its own icon and
+window, like a normal app.
 
 - **iPhone / iPad:** Share button, then **Add to Home Screen**
 - **Android:** menu, then **Install app**
 - **Windows / Mac desktop:** the install icon in the address bar (Chrome or Edge)
 
+Where the browser offers it, an **Install** button also appears on the Send
+screen, which saves hunting through a menu that moves between browser releases.
+
 **On iPhone and iPad, install it before entering your passphrase.** A browser tab
 and an installed app keep separate data, so a passphrase typed in the tab will not
 be there in the app.
+
+</details>
+
+<details>
+<summary><kbd>Send from the Windows right-click menu</kbd></summary>
+
+<br/>
+
+Adds **Send with Airlock** to the right-click menu for every file, with the
+Airlock icon. Choosing it opens the app with that file staged and waiting for
+you to pick a destination.
+
+**Install Airlock as an app in Chrome or Edge first.** The menu entry points at
+the launcher the browser creates when you install it, so there is nothing to
+point at until you have. Then, from the repository:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\windows\install-context-menu.ps1
+```
+
+Remove it the same way with `uninstall-context-menu.ps1`.
+
+It writes one per-user registry key and needs no administrator. Nothing is
+installed but that key: the shell hands the file path to the app, which does the
+encrypting, because a helper that uploaded on its own would need your passphrase.
+
+On Windows 11 the entry appears under **Show more options**, which is where
+classic menu entries live. Shift+F10 opens that menu directly.
+
+There is no ready-made `.reg` file to double-click, and there cannot be a
+shareable one: the launcher path contains a per-profile identifier that differs
+on every machine. Finding it is the only thing the script does that a `.reg`
+cannot.
 
 </details>
 

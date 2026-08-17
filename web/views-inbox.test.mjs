@@ -46,8 +46,10 @@ function stubDocument() {
 
 stubDocument();
 const {
-  cleanLocalTransfer, readRow, reconcileLocalTransfers, rowActions, terminateTransfer,
+  cleanLocalTransfer, readRow, reconcileLocalTransfers, rowActions, settleAfterSave,
+  terminateTransfer,
 } = await import('./views/inbox.js');
+const { RUNG } = await import('./export.js');
 
 const SALT = b64encode(new Uint8Array(16).fill(3));
 const mk = await deriveMaster('correct horse battery staple', SALT);
@@ -235,4 +237,45 @@ test('a name this device cannot vouch for is never rendered as one', async () =>
   assert.equal(plain.name, 'Cannot open');
   assert.equal(plain.saveable, false);
   assert.match(plain.detail, /Not sealed/);
+});
+
+// An inbox is a list of what has not arrived yet. A file that reached the
+// operating system has arrived, so leaving it listed turns the inbox into a log
+// that only grows and that nobody can tell apart from outstanding work.
+test('a saved transfer leaves the inbox', async () => {
+  const calls = [];
+  const deps = {
+    decline: async (id) => { calls.push(`decline:${id}`); },
+    cleanLocalTransfer: async () => { calls.push('clean'); },
+  };
+
+  // Declined rather than deleted: on a transfer sent to every device, deleting
+  // would take it from the others the moment the first one saved it.
+  assert.equal(await settleAfterSave({ id: ID }, {}, RUNG.SAVE_PICKER, deps), true);
+  assert.deepEqual(calls, [`decline:${ID}`, 'clean']);
+});
+
+test('a cancelled export is not an arrival and stays in the inbox', async () => {
+  const calls = [];
+  const deps = {
+    decline: async () => { calls.push('decline'); },
+    cleanLocalTransfer: async () => { calls.push('clean'); },
+  };
+  // KEEP means the file is assembled and still here, which is the one outcome
+  // that has to remain listed.
+  assert.equal(await settleAfterSave({ id: ID }, {}, RUNG.KEEP, deps), false);
+  assert.deepEqual(calls, []);
+});
+
+// The file is saved either way, so a server that refuses leaves a stale row
+// rather than a lost file, and nothing local is reclaimed on the strength of a
+// request that did not land.
+test('a refused clearing keeps the local copy', async () => {
+  const calls = [];
+  const deps = {
+    decline: async () => { throw new Error('offline'); },
+    cleanLocalTransfer: async () => { calls.push('clean'); },
+  };
+  assert.equal(await settleAfterSave({ id: ID }, {}, RUNG.DOWNLOAD, deps), false);
+  assert.deepEqual(calls, []);
 });

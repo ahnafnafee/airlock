@@ -46,7 +46,9 @@ export function segmentCount(width, total) {
 // rule is that transfer's own chunk composition, so reading down a list shows
 // which arrivals were mostly bytes this device already held. It is the same
 // scale, the same colors and the same meanings, at the height of a hairline.
-export function renderStrip(container, total, { seam = false, label = 'Transfer progress', sizes = null } = {}) {
+export function renderStrip(container, total, {
+  seam = false, label = 'Transfer progress', sizes = null, width = 0,
+} = {}) {
   const span = total || 1;
   const segments = [];
 
@@ -63,11 +65,13 @@ export function renderStrip(container, total, { seam = false, label = 'Transfer 
   // live state onto a new grid costs more than the segments it would regain.
   applyMetrics(row);
   container.append(row);
-  // The row's own width when it has one, and the space it was put into when it
-  // has not. A strip built inside a hidden panel measures zero, and falling
-  // straight to the cap there draws the widest possible strip in what may be the
-  // narrowest possible place.
-  const count = segmentCount(row.clientWidth || container.clientWidth || 0, total);
+  // A width the caller measured, then this strip's own, then the space it was
+  // put into. The caller's comes first because a row assembled before it is
+  // attached measures zero, and so does everything above it: the whole list is
+  // built off the document and put in place in one move, which is what kept the
+  // count falling to its cap and drawing a strip several times the width of a
+  // phone.
+  const count = segmentCount(width || row.clientWidth || container.clientWidth || 0, total);
   // A segment's width is the share of the file its chunks occupy. Content
   // defined chunking cuts on content, so chunks are not equal, and drawing them
   // equal misplaces every boundary: an edit two thirds of the way through a file

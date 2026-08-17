@@ -303,7 +303,7 @@ test('the send picker offers only paired approved devices except this one', asyn
   await settle();
   // This device is not a destination. Neither a blocked device nor one that has
   // not acquired the master key can read what it is sent.
-  assert.deepEqual(offered(), ['', 'tablet']);
+  assert.deepEqual(offered(), ['', '*', 'tablet']);
 });
 
 test('the send view cannot create an unreadable plaintext transfer', () => {
@@ -315,7 +315,7 @@ test('a device approved after the view mounted becomes selectable', async () => 
   // laptop, and the laptop's picker never learns the phone exists.
   roster = [device('laptop'), device('tablet'), device('phone')];
   await revisit('send');
-  assert.deepEqual(offered(), ['', 'tablet', 'phone']);
+  assert.deepEqual(offered(), ['', '*', 'tablet', 'phone']);
 });
 
 test('a chosen recipient survives a refresh that changes the list', async () => {
@@ -325,9 +325,9 @@ test('a chosen recipient survives a refresh that changes the list', async () => 
   roster = [device('laptop'), device('tablet'), device('phone'), device('watch')];
   await revisit('send');
 
-  assert.deepEqual(offered(), ['', 'tablet', 'phone', 'watch']);
-  // Resetting this because a list reloaded would send the next press of Send to
-  // every device instead of the one that was picked.
+  assert.deepEqual(offered(), ['', '*', 'tablet', 'phone', 'watch']);
+  // Resetting this because a list reloaded would leave the next press of Send
+  // pointing somewhere nobody chose.
   assert.equal(picker().value, 'phone');
 });
 
@@ -355,7 +355,7 @@ test('a refresh the server refuses leaves the options that were confirmed', asyn
   const before = offered();
   failNext = true;
   await revisit('send');
-  // An emptied picker would quietly turn a chosen destination into all devices.
+  // An emptied picker would quietly discard a chosen destination.
   assert.deepEqual(offered(), before);
 });
 
@@ -364,7 +364,7 @@ test('the send picker refreshes when the window comes back to the front', async 
   showView('send');
   doc.fire('visibilitychange');
   await settle();
-  assert.deepEqual(offered(), ['', 'tablet', 'phone', 'printer']);
+  assert.deepEqual(offered(), ['', '*', 'tablet', 'phone', 'printer']);
 });
 
 test('a device approved after the devices view mounted appears in the list', async () => {
@@ -403,6 +403,9 @@ test('a successful send refreshes an already-mounted sender inbox locally', asyn
   });
 
   const button = find(sendPanel, (n) => n.className === 'primary');
+  // Nothing sends until a destination has been chosen, which is the point of
+  // the empty first option.
+  picker().value = '*';
   sendView.stageFiles([new File(['sent'], 'sent.txt', { type: 'text/plain' })]);
 
   button.fire('click');
@@ -426,6 +429,7 @@ test('a failed file stays staged and the batch reports it after later files succ
 
   const button = find(sendPanel, (n) => n.className === 'primary');
   const list = find(sendPanel, (n) => n.getAttribute('aria-label') === 'Staged files');
+  picker().value = '*';
   sendView.stageFiles([
     new File(['first'], 'again.txt', { type: 'text/plain' }),
     new File(['second'], 'done.txt', { type: 'text/plain' }),
@@ -457,4 +461,43 @@ test('staging snapshots a file before its disk handle can change', () => {
     },
   }]);
   assert.equal(snapshots, 1);
+});
+
+// Where a file goes is the one decision on this screen that cannot be taken
+// back, so it is never inherited and never assumed. An unanswered picker is not
+// permission to send to everything.
+test('nothing sends until a destination has been chosen', async () => {
+  showView('send');
+  await settle();
+  // Named rather than counted, because the staged list outlives one test and a
+  // count would fold this file in with whatever an earlier one left behind.
+  const attempted = [];
+  sendView.__setSendImpl({
+    server: async (file) => {
+      attempted.push(file.name);
+      return { total: 0, held: 0, sent: 0, inflight: 0 };
+    },
+  });
+
+  const button = find(sendPanel, (n) => n.className === 'primary');
+  const list = find(sendPanel, (n) => n.getAttribute('aria-label') === 'Staged files');
+  // The panel is mounted once for this whole file, so an earlier test's choice
+  // is still on it. Cleared here rather than relied on, because what is being
+  // checked is what an unanswered picker does.
+  picker().value = '';
+  sendView.stageFiles([new File(['x'], 'held.txt', { type: 'text/plain' })]);
+
+  button.fire('click');
+  await settle();
+
+  assert.deepEqual(attempted, [], 'a send ran without a destination');
+  assert.ok(list.children.length >= 1, 'the staged file was discarded anyway');
+  assert.match(sendStatus().textContent, /choose where this goes/i);
+
+  // And it sends once the question has an answer.
+  picker().value = '*';
+  button.fire('click');
+  await settle();
+  await settle();
+  assert.ok(attempted.includes('held.txt'), 'the file did not send once a destination was chosen');
 });

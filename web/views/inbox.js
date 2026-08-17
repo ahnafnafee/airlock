@@ -34,12 +34,44 @@ function preferShare(file, nav = navigator, win = window) {
     && nav.canShare?.({ files: [file] }));
 }
 
+// A file that reached the operating system has arrived, and an inbox is a list
+// of what has not. Leaving a saved transfer in it turns the list into a log that
+// only grows and that nobody can tell apart from work still outstanding.
+//
+// Declined rather than deleted, because declining is per recipient: on a
+// transfer sent to one device the server drops it once that device is done, and
+// on one sent to all of them the others still get their copy. Deleting would
+// take it from everybody the moment the first device saved it.
+//
+// A cancelled export is not an arrival. RUNG.KEEP means the file is assembled
+// and still here, which is the one outcome that has to stay in the list.
+export async function settleAfterSave(t, meta, rung, deps = {}) {
+  if (rung === RUNG.KEEP) return false;
+  const decline = deps.decline || api.decline;
+  const clean = deps.cleanLocalTransfer || cleanLocalTransfer;
+  try {
+    await decline(t.id);
+  } catch (err) {
+    // The file is saved either way. It simply stays listed until a later
+    // reconciliation, which is a stale row rather than a lost file.
+    console.warn('a saved transfer was not cleared from the inbox', err);
+    return false;
+  }
+  await clean(t, meta, false);
+  return true;
+}
+
 // Assembling and exporting, in the one place both the row's button and the
 // arrival notice reach for. One copy because the two must offer the same rung:
 // the export cascade spends the user gesture that started the call, and a second
 // implementation would drift on which rung it reaches for and where the file
 // lands. Imported here rather than at the top so the direct-transfer path stays
 // out of the boot path, exactly as the rest of this module loads it.
+// What a row inset from its own edges leaves for a strip. Restated from the
+// stylesheet because the measurement happens here, and a strip fitted to the
+// full width would overflow by exactly this much.
+const ROW_PADDING = 16;
+
 async function saveTransfer(transferId, meta = null) {
   const { assembleTransfer } = await import('../receive.js');
   // The row already decrypted this transfer's metadata to draw its name, and
@@ -374,13 +406,14 @@ registerView('inbox', 'Inbox', (panel) => {
     // notices for old transfers on every reload is noise rather than news.
     const announce = prompted === null ? [] : ready.filter((r) => !prompted.has(r.id));
     prompted = new Set(ready.map((r) => r.id));
-    for (const { id, name } of announce) {
+    for (const { id, name, meta } of announce) {
       toast('Ready to save.', {
         from: name,
         action: {
           label: 'Save',
-          run: () => saveTransfer(id, meta).catch(
-            (err) => toast(`Could not save. ${err.message}`, { from: name })),
+          run: () => saveTransfer(id, meta)
+            .then((rung) => settleAfterSave({ id }, meta, rung).then(() => refresh()))
+            .catch((err) => toast(`Could not save. ${err.message}`, { from: name })),
         },
       });
     }
@@ -404,7 +437,7 @@ registerView('inbox', 'Inbox', (panel) => {
     const allowedActions = new Set(rowActions(presentation));
     // Recorded where the decision is already made, so the arrival notice and the
     // row's own Save button can never disagree about whether a file is ready.
-    if (allowedActions.has('save')) ready.push({ id: t.id, name });
+    if (allowedActions.has('save')) ready.push({ id: t.id, name, meta });
 
     // Carried by the same record as the name, so it appears with the name rather
     // than waiting on the bytes.
@@ -471,6 +504,7 @@ registerView('inbox', 'Inbox', (panel) => {
             const rung = await saveTransfer(t.id, meta);
             detailNode.textContent = REPORT[rung];
             detailNode.className = 'data muted';
+            await settleAfterSave(t, meta, rung);
           } catch (err) {
             detailNode.textContent = `Could not save. ${err.message}`;
             detailNode.className = 'data bad';
@@ -519,7 +553,12 @@ registerView('inbox', 'Inbox', (panel) => {
       actions);
     if (total > 0) {
       const strip = renderStrip(li, total, {
-        seam: true, label: `${reach} of ${total} chunks here`,
+        seam: true,
+        label: `${reach} of ${total} chunks here`,
+        // The list is attached and the row is not, so this is the only element
+        // in reach that can say how wide a segment may be. Less the padding the
+        // row puts either side of it.
+        width: Math.max(0, list.clientWidth - ROW_PADDING * 2),
       });
       strip.setAll('pending');
       for (const i of heldAt || []) strip.set(i, 'held');

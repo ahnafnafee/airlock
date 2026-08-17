@@ -7,6 +7,12 @@ import { renderStrip } from '../strip.js';
 import { MODE_SEALED } from '../crypto.js';
 import { capabilities, onCapabilities, installCard, filesFromDrop } from '../inbound.js';
 
+// The value that means every device rather than one. It is a real choice on the
+// list and not the empty value, because empty has to keep meaning "not yet
+// answered": a Send that read them as the same thing would treat a question
+// nobody answered as permission to send to everything.
+export const EVERY_DEVICE = '*';
+
 let sendImpl = { server: uploadThroughServer };
 
 // Test seam. Production never calls this.
@@ -141,11 +147,15 @@ registerView('send', 'Send', (panel) => {
     'You can also paste a file into this window.');
   const installNote = el('p', { class: 'data muted', hidden: true });
 
-  // autocomplete off because a browser restores a select's value across a reload
-  // on its own, and a restored value is a destination nobody picked in this
-  // session. Every device is the default, and it has to survive a refresh.
+  // Nothing is chosen until someone chooses it. Where a file goes is the one
+  // decision on this screen that cannot be taken back, so it is never inherited
+  // from a previous send, from a device list that happened to reload, or from a
+  // browser restoring a select's value across a reload on its own, which is what
+  // autocomplete off is for. Every device is a choice on the list, not the
+  // absence of one.
   const recipient = el('select', { id: 'to', autocomplete: 'off' },
-    el('option', { value: '' }, 'All my devices'));
+    el('option', { value: '' }, 'Choose where this goes'),
+    el('option', { value: EVERY_DEVICE }, 'All my devices'));
   // No visible heading, because the list has to disappear when it is empty. The
   // accessible name carries what the heading would have said.
   const stagedList = el('ul', { class: 'rows staged', 'aria-label': 'Staged files' });
@@ -175,8 +185,11 @@ registerView('send', 'Send', (panel) => {
     installNote,
     el('p', { class: 'label' }, el('label', { for: 'to' }, 'To')),
     recipient,
-    stagedList,
+    // Above the list rather than below it. Twenty staged files put the only
+    // button that does anything a full screen of scrolling away, on the device
+    // where scrolling costs the most.
     sendButton,
+    stagedList,
     progress,
     ruler,
     edits,
@@ -223,6 +236,12 @@ registerView('send', 'Send', (panel) => {
   };
 
   sendButton.addEventListener('click', async () => {
+    if (!recipient.value) {
+      status.className = 'data bad';
+      status.textContent = 'Choose where this goes first.';
+      recipient.focus?.();
+      return;
+    }
     // Taken off the list before the first byte moves, so a second press cannot
     // send the same files twice and anything staged while this runs is left for
     // the next press.
@@ -267,27 +286,29 @@ registerView('send', 'Send', (panel) => {
     const reachable = devices
       .filter((d) => d.allowed && d.paired && d.node !== state.me?.node)
       .map((d) => d.node);
-    // The first option is the standing "All my devices" entry rather than a
-    // device, so the comparison starts past it.
-    const drawn = [...recipient.children].slice(1).map((o) => o.value);
+    // The first two options are the prompt and the standing "all" entry rather
+    // than devices, so the comparison starts past them.
+    const drawn = [...recipient.children].slice(2).map((o) => o.value);
     // Nothing is touched when nothing changed, so a refresh cannot close an open
     // dropdown or disturb a selection that was never in question.
     if (drawn.length === reachable.length
       && drawn.every((node, i) => node === reachable[i])) return;
 
     const chosen = recipient.value;
-    recipient.replaceChildren(el('option', { value: '' }, 'All my devices'));
+    recipient.replaceChildren(
+      el('option', { value: '' }, 'Choose where this goes'),
+      el('option', { value: EVERY_DEVICE }, 'All my devices'));
     for (const node of reachable) recipient.append(el('option', { value: node }, node));
     // The selection survives the rebuild. Resetting it because a list reloaded
     // would send the next press of Send somewhere nobody picked, which is a
     // worse fault than the staleness this refresh exists to cure.
-    recipient.value = reachable.includes(chosen) ? chosen : '';
+    recipient.value = chosen === EVERY_DEVICE || reachable.includes(chosen) ? chosen : '';
     // Losing the destination is the one case the selection cannot be kept, and
     // it is said out loud: quietly widening one device to all of them is exactly
     // the silent change the line above refuses to make.
     if (chosen && recipient.value !== chosen) {
       status.className = 'data bad';
-      status.textContent = `${chosen} can no longer be reached, so no device is chosen.`;
+      status.textContent = `${chosen} can no longer be reached, so nothing is chosen.`;
     }
   }
 
@@ -458,7 +479,8 @@ async function sendNow(files) {
   const {
     recipient, progress, ruler, edits, key, status, announcement,
   } = requireControls();
-  const to = recipient.value ? [recipient.value] : [];
+  const choice = recipient.value;
+  const to = choice === EVERY_DEVICE ? [] : [choice];
   // Read once for the whole batch, so a stray click mid-send cannot split one
   // press of Send across two destinations.
   const failures = [];

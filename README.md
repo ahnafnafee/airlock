@@ -2,256 +2,487 @@
 
 <div align="center">
 
-<img height="120" src="./docs/assets/logo.svg" alt="Airlock">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/logo-dark.png">
+  <img src="./docs/assets/logo-light.png" alt="Airlock" height="66">
+</picture>
 
-<h1>Airlock</h1>
+**Send files between your own devices. Encrypted before they leave.**
 
-End-to-end encrypted file transfer between your own devices, gated by Tailscale.<br/>
-One Go binary, one installable web app, no native clients.
+No accounts. No cloud. No size limit. No public port.
 
+[![][license-shield]][license-link]
 [![][go-shield]][go-link]
 [![][tailscale-shield]][tailscale-link]
 [![][crypto-shield]][crypto-link]
 [![][client-shield]][client-link]
-[![][deps-shield]][deps-link]
 
-[Features](#-features) · [Installation](#-installation) · [Architecture](#-architecture) · [Threat model](#-threat-model) · [Status](#-status)
+[Get started](#-get-started) · [Screenshots](#-screenshots) · [What it does](#-what-it-does) · [FAQ](#-faq) · [Security](#-security)
 
 </div>
 
-> \[!IMPORTANT]
+---
+
+Airlock runs on one of your own machines and lets your phone, laptop and desktop
+pass files to each other over [Tailscale](https://tailscale.com).
+
+Your files are locked on the sending device before anything is uploaded. The
+server holds only scrambled data. It never gets the key, so it cannot read your
+files, their names, or even their thumbnails.
+
+> \[!NOTE]
 >
-> Airlock is under active construction. The store layer is in; the HTTP layer, the web client, and deployment are being built task by task. See [Status](#-status) for exactly where it is.
+> Airlock works end to end today. It is a personal project, and [Status](#-status)
+> is honest about which platforms have been tested on real hardware.
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## ⚡ Get started
+
+### Before you begin
+
+You need two things. Both are free and take a few minutes.
+
+- [ ] **[Tailscale](https://tailscale.com/download)** installed on at least two of your devices
+- [ ] **HTTPS turned on** for your Tailscale network. One switch on the
+      [DNS page](https://login.tailscale.com/admin/dns) of your admin console
 
 <details>
-<summary><kbd>Table of contents</kbd></summary>
-
-#### TOC
-
-- [✨ Features](#-features)
-  - [`1` Sealed at rest](#1-sealed-at-rest)
-  - [`2` Verified by Tailscale](#2-verified-by-tailscale)
-  - [`3` Installs like an app](#3-installs-like-an-app)
-  - [`4` Resumable, unlimited size](#4-resumable-unlimited-size)
-  - [`5` One shared inbox](#5-one-shared-inbox)
-- [📦 Installation](#-installation)
-- [⌨️ Local Development](#️-local-development)
-- [🏗 Architecture](#-architecture)
-- [🔒 Threat model](#-threat-model)
-- [🗺 Status](#-status)
-- [🔗 Links](#-links)
+<summary><kbd>Why does it need HTTPS?</kbd></summary>
 
 <br/>
 
+Browsers only allow encryption and offline features on a secure connection.
+Without a real certificate, Airlock cannot lock your files in the browser at all.
+Tailscale hands out certificates for free, and Airlock renews them for you.
+
 </details>
 
-## ✨ Features
+### Three steps
 
-Airlock is what remains of a peer-to-peer file transfer app once you assume Tailscale. NAT traversal, transport encryption, and cryptographic device identity are already solved, so the interesting parts are the two that are left: a place to leave bytes when the other device is asleep, and a client good enough that you never think about it.
+**1. Get Airlock.** Download the file for your computer from
+[Releases](https://github.com/ahnafnafee/airlock/releases).
 
-### `1` Sealed at rest
+<details>
+<summary><kbd>Which file do I download?</kbd></summary>
 
-Files are encrypted in the browser before a single byte is uploaded. The server holds ciphertext and metadata, and that is all it can ever hold. It does not learn the filename, the MIME type, or the contents, because the key is derived from a passphrase that never leaves your devices.
+<br/>
 
-Chunks are sealed with AES-256-GCM, and each chunk's position and its file's total chunk count are bound into the authenticated data. That detail is load bearing. Independently encrypted GCM chunks without it can be reordered, truncated, or spliced between files while every individual chunk still authenticates perfectly.
-
-| The server sees | The server never sees |
+| Your computer | File |
 | --- | --- |
-| Blob id, uploading node | Filename |
-| Chunk count, ciphertext sizes | MIME type |
-| Timestamps | One byte of content |
+| Windows | `airlock_..._windows_amd64.exe` |
+| Mac (M1 or newer) | `airlock_..._darwin_arm64` |
+| Mac (Intel) | `airlock_..._darwin_amd64` |
+| Linux | `airlock_..._linux_amd64` |
+| Raspberry Pi, ARM server | `airlock_..._linux_arm64` |
 
-<div align="right">
-
-[![][back-to-top]](#readme-top)
-
-</div>
-
-### `2` Verified by Tailscale
-
-Airlock joins your tailnet as its own node through `tsnet`, rather than hiding behind a reverse proxy. One dependency buys three things at once:
-
-- A `*.ts.net` TLS certificate every device already trusts, with no warnings and no CA to install
-- A hostname that resolves only on your tailnet, through MagicDNS
-- `WhoIs()` on every single request, returning the WireGuard-verified node and user behind the connection
-
-That last one is the actual authorization primitive, and nothing outside your tailnet can forge it. Every route is gated, static assets included. There is deliberately no unauthenticated path.
-
-A `--auth=token` mode exists for a LAN without Tailscale. It is a degraded fallback and the docs say so plainly, because plain HTTP is not a secure context and half the client stops working there.
-
-<div align="right">
-
-[![][back-to-top]](#readme-top)
-
-</div>
-
-### `3` Installs like an app
-
-Because the Tailscale certificate makes the page a genuine secure context, the web client is not a compromise. It installs, it gets its own icon and window, and it can do the things people actually want from a transfer app:
-
-- **Android share sheet.** Share a photo from Gallery, pick Airlock, done. This is the affordance people use most, and it costs one manifest entry.
-- **Web Push.** A file lands and your desktop notifies you with the real filename, decrypted locally, because the push itself carries no payload to leak.
-- **Windows file handling.** Right-click a file, Open with, Airlock. Or drag it onto the window.
-- **Launch at login**, so it is simply always there.
-
-No native Android app. No native Windows app. A thin wrapper remains possible later if silent background receive ever matters, and it would reuse the protocol and the entire UI.
-
-<div align="right">
-
-[![][back-to-top]](#readme-top)
-
-</div>
-
-### `4` Resumable, unlimited size
-
-Files are cut into 8 MiB chunks, encrypted one at a time, and uploaded with idempotent writes. Ask the server which chunks it already has, send the rest. A dropped connection, a sleeping laptop, or a flaky uplink costs you the current chunk and nothing more.
-
-Downloads are handled by the service worker, which fetches, decrypts, and hands the browser a streaming response with a real `Content-Disposition`. The browser saves it natively, with its own progress bar, streaming to disk. A 20 GB file never sits in memory, on either end.
-
-<div align="right">
-
-[![][back-to-top]](#readme-top)
-
-</div>
-
-### `5` One shared inbox
-
-You do not pick a recipient. Anything you send appears on every device you own, and you pick it up wherever you happen to be sitting.
-
-This deletes the device registry, the recipient picker, per-device delivery tracking, and the "which of my eight devices was that" problem. Blobs expire on a TTL measured from their last write, so a long upload is never swept mid-flight and a finished transfer clears itself out.
-
-<div align="right">
-
-[![][back-to-top]](#readme-top)
-
-</div>
-
-## 📦 Installation
-
-Two things must be enabled in the Tailscale admin console, under Settings then Features:
-
-- **MagicDNS**, or the server's hostname does not resolve.
-- **HTTPS Certificates**, or there is no trusted certificate, therefore no secure context, therefore no install, push, share target, or download. Airlock does not work without this one.
-
-You also need a reusable auth key for the server node.
+On Mac and Linux, make it runnable first:
 
 ```bash
-go build -o airlock .
-scp airlock your-server:/usr/local/bin/
-scp deploy/airlock.service your-server:/etc/systemd/system/
+chmod +x airlock_*
 ```
 
-On the server:
+</details>
+
+**2. Run it.** Double click it, or from a terminal:
 
 ```bash
-sudo useradd --system --home /var/lib/airlock airlock
-sudo mkdir -p /var/lib/airlock && sudo chown airlock /var/lib/airlock
-sudo -u airlock AIRLOCK_TOKEN= TS_AUTHKEY=tskey-auth-... /usr/local/bin/airlock --data /var/lib/airlock
-# once the node joins the tailnet, stop it and hand over to systemd
+./airlock
+```
+
+It prints one line. That line is your address:
+
+```
+open https://your-computer.your-network.ts.net/ on any device on your tailnet
+```
+
+**3. Open that address** on your phone, your laptop, anywhere on your Tailscale
+network.
+
+The first device picks a passphrase. Every other device enters the same one.
+That passphrase is what unlocks your files, and it never leaves your devices.
+
+**That's it.** Drop in a file, pick a device, press Send.
+
+<details>
+<summary><kbd>Install it as an app</kbd></summary>
+
+<br/>
+
+Airlock installs to your home screen or desktop and gets its own icon and
+window, like a normal app.
+
+- **iPhone / iPad:** Share button, then **Add to Home Screen**
+- **Android:** menu, then **Install app**
+- **Windows / Mac desktop:** the install icon in the address bar (Chrome or Edge)
+
+Where the browser offers it, an **Install** button also appears on the Send
+screen, which saves hunting through a menu that moves between browser releases.
+
+**On iPhone and iPad, install it before entering your passphrase.** A browser tab
+and an installed app keep separate data, so a passphrase typed in the tab will not
+be there in the app.
+
+</details>
+
+<details>
+<summary><kbd>Send from the Windows right-click menu</kbd></summary>
+
+<br/>
+
+Adds **Send with Airlock** to the right-click menu for every file, with the
+Airlock icon. Choosing it opens the app with that file staged and waiting for
+you to pick a destination.
+
+**Install Airlock as an app in Chrome or Edge first.** The menu entry points at
+the launcher the browser creates when you install it, so there is nothing to
+point at until you have. Then, from the repository:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\windows\install-context-menu.ps1
+```
+
+Remove it the same way with `uninstall-context-menu.ps1`.
+
+It writes one per-user registry key and needs no administrator. Nothing is
+installed but that key: the shell hands the file path to the app, which does the
+encrypting, because a helper that uploaded on its own would need your passphrase.
+
+On Windows 11 the entry appears under **Show more options**, which is where
+classic menu entries live. Shift+F10 opens that menu directly.
+
+There is no ready-made `.reg` file to double-click, and there cannot be a
+shareable one: the launcher path contains a per-profile identifier that differs
+on every machine. Finding it is the only thing the script does that a `.reg`
+cannot.
+
+</details>
+
+<details>
+<summary><kbd>It says the port is in use</kbd></summary>
+
+<br/>
+
+Something else on that machine already uses port 443, often `tailscale serve`.
+Pick another one:
+
+```bash
+./airlock --port 9443
+```
+
+The startup line will show the new address. Nothing else changes.
+
+</details>
+
+<details>
+<summary><kbd>A device cannot find the server</kbd></summary>
+
+<br/>
+
+Almost always **Tailscale DNS** being switched off on that device.
+
+- **Phone or tablet:** open the Tailscale app, Settings, turn on **Use Tailscale DNS**
+- **Computer:** run `tailscale set --accept-dns=true`
+
+Typing the numeric address instead will not work. Airlock's certificate is issued
+for the name, so only the name connects.
+
+If the name resolves but nothing loads, your Tailscale access rules may not allow
+that device. Check the ACLs in your [admin console](https://login.tailscale.com/admin/acls).
+
+</details>
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 📸 Screenshots
+
+<div align="center">
+
+| Send | The chunk strip |
+| :---: | :---: |
+| <img src="./docs/assets/screens/send.png" alt="The Send screen with three files staged. A panel reads 3 files ready to send above green Choose files and Choose a folder buttons, a line confirms the files are sealed on this device and the server stores what it cannot read, and a row of destination chips sits above a green Send 3 files button." width="100%"> | <img src="./docs/assets/screens/send-progress.png" alt="A finished send. A green bar is divided into segments of different widths, one per piece of the file, with a byte ruler beneath it and a caption saying the file was sent and how many of its pieces the server already had." width="100%"> |
+| <sub>Drop files in, pick where they go, press one button. Nothing is chosen for you: the destination is a decision you make each time.</sub> | <sub>One segment per piece, at the width that piece really occupies. Resend a file you edited and the parts that did not change are already green, which is what deduplication looks like rather than a claim about it.</sub> |
+
+| Inbox | History |
+| :---: | :---: |
+| <img src="./docs/assets/screens/inbox.png" alt="The Inbox listing received files as cards, each with its size, when it arrived, and buttons to act on it." width="100%"> | <img src="./docs/assets/screens/history.png" alt="The History screen listing past transfers with filenames, direction and when each was cleared, ten to a page, with Newer and Older controls under the list reading 1 to 10 of 12." width="100%"> |
+| <sub>What has arrived and is waiting. Saving a file clears it from the list, and anything nobody collects clears itself.</sub> | <sub>What passed through, after the files themselves are gone.</sub> |
+
+| On a phone | Inbox on a phone | Dark mode |
+| :---: | :---: | :---: |
+| <img src="./docs/assets/screens/mobile-send.png" alt="Airlock on a phone showing the Send screen, with the drop panel, destination chips and Send button in one column above a floating bar holding Send, Inbox, History and Devices." width="100%"> | <img src="./docs/assets/screens/mobile-inbox.png" alt="Airlock on a phone showing the Inbox, with received files as cards above the floating navigation bar." width="100%"> | <img src="./docs/assets/screens/inbox-dark.png" alt="The same Inbox in dark mode, with a near-black ground and the same green accent." width="100%"> |
+| <sub>Installed to the home screen, with the switcher as a floating bar where a thumb reaches.</sub> | <sub>Every arrival is a card, and the one thing to do with it is on the card.</sub> | <sub>Airlock follows your system theme, and there is a switch in the bar if you would rather it did not.</sub> |
+
+</div>
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 📦 What it does
+
+| | |
+| --- | --- |
+| 📁 **Any size** | 50 GB video? Fine. Nothing is held in memory. |
+| 🔒 **Private** | Locked on your device. The server stores what it cannot read. |
+| ⚡ **Skips what it already has** | Send the same file twice and the second one is instant. |
+| ✏️ **Sends only what changed** | Edit part of a big file, resend, and only that part uploads. |
+| 🔁 **Survives a dropped connection** | Picks up where it stopped, not from zero. |
+| 📬 **Waits for you** | Files sit on your server until a device collects them, then clear themselves. |
+| 🔔 **Tells you** | A notification when something arrives, even with the app closed. |
+| 📱 **Works everywhere** | Installs as an app on phone, tablet and desktop. |
+
+### Why not just use...
+
+| | |
+| --- | --- |
+| **Email** | Stops at 25 MB. |
+| **Google Drive, Dropbox** | Uploads your file to a company that can read it. |
+| **AirDrop** | Apple devices only, same room. |
+| **A USB stick** | A walk across the room, and never with your phone. |
+| **Taildrop** | Genuinely good, and simpler. It has no inbox, no history, and both devices must be awake. Reach for it first for a quick one-off. |
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## ❓ FAQ
+
+<details>
+<summary><kbd>Can the server read my files?</kbd></summary>
+
+<br/>
+
+No. Your files are locked on the device sending them, before anything is
+uploaded, using a key made from your passphrase. That key is never sent anywhere.
+
+The server only ever holds scrambled data. Filenames, sizes and thumbnails are
+locked too. This stays true even if the server is a rented VPS, and even if
+somebody steals its hard drive.
+
+</details>
+
+<details>
+<summary><kbd>What if I forget my passphrase?</kbd></summary>
+
+<br/>
+
+Your files cannot be recovered. There is no reset, because nobody holds a copy of
+your key, including you after you have forgotten it. That is the trade for the
+server never being able to read anything.
+
+If it happens, delete Airlock's data folder and start again with a new
+passphrase.
+
+</details>
+
+<details>
+<summary><kbd>How long does a file wait to be collected?</kbd></summary>
+
+<br/>
+
+Ten minutes by default, then the server deletes it and the sender has to send it
+again. The point is that your own machine is not a place files pile up: it holds
+them only long enough to be picked up.
+
+If your devices are not always to hand, give it longer:
+
+```bash
+./airlock --ttl-minutes 1440   # a day
+```
+
+A file that has been saved on a device leaves the queue immediately, without
+waiting for the timer.
+
+</details>
+
+<details>
+<summary><kbd>Do I need to buy a server?</kbd></summary>
+
+<br/>
+
+No. Any computer you already own works: a desktop, an old laptop, a Raspberry Pi.
+It just needs to be switched on when you want to send something.
+
+A rented server only helps if none of your machines are reliably awake.
+
+</details>
+
+<details>
+<summary><kbd>Does it work on iPhone and Android?</kbd></summary>
+
+<br/>
+
+Yes, through the browser, and it installs to your home screen like an app.
+
+For notifications while the app is closed, **Chrome is the more reliable choice on
+Android**. Firefox on Android only receives notifications while Firefox itself is
+running.
+
+</details>
+
+<details>
+<summary><kbd>Is my file safe if someone breaks into the server?</kbd></summary>
+
+<br/>
+
+Your file contents are. An intruder gets scrambled data and cannot unlock any of
+it without your passphrase, which never reached that machine.
+
+They would see device names, file sizes and timestamps, and they could delete
+things. Worth knowing.
+
+</details>
+
+<details>
+<summary><kbd>Is it peer to peer?</kbd></summary>
+
+<br/>
+
+Not any more. There was a direct device-to-device mode and it was removed after
+measuring it: it was about four times slower than going through the server, and
+it needed both devices awake at the same moment.
+
+Tailscale already connects your devices directly. Everything Airlock sends is
+already locked before it leaves, so routing it through your own server costs
+nothing in privacy and is faster and far more reliable.
+
+</details>
+
+<details>
+<summary><kbd>Can other people on my Tailscale network see my files?</kbd></summary>
+
+<br/>
+
+They would need your passphrase to read anything. But on a shared network, lock
+it down properly:
+
+```bash
+./airlock --allow-users you@example.com --require-approval
+```
+
+New devices then wait for approval from a device you have already approved.
+
+</details>
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 🔒 Security
+
+**Short version:** your files are encrypted on your device with a key made from
+your passphrase. The server never sees that key.
+
+| What | How |
+| --- | --- |
+| Not on the internet | Only reachable inside your Tailscale network |
+| Only your devices | Tailscale proves who each device is |
+| A lost phone | Revoke it instantly, no restart needed |
+| The server, its disk, its backups | AES-256-GCM encryption |
+| Filenames and thumbnails | Encrypted too, not plain text |
+| Tampering | Every piece is verified before your file is rebuilt |
+
+### What it does not protect against
+
+- **Someone holding your unlocked phone.** They have your files.
+- **A forgotten passphrase.** Nothing can recover it.
+- **A server you do not control.** It still learns who sent how much, and when.
+
+<details>
+<summary><kbd>Technical detail</kbd></summary>
+
+<br/>
+
+Your passphrase becomes a key with PBKDF2-SHA256 at 600,000 iterations against a
+per-server salt, held in your browser's origin-private storage and never
+transmitted.
+
+Files are split with content-defined chunking, so an edit does not shift every
+later boundary, which is what makes resending a changed file cheap. Each piece
+gets an id derived from its content and your key, so your own devices agree on
+ids without anyone else being able to confirm a guess about the contents.
+
+Pieces are encrypted with AES-256-GCM. Filenames, sizes and thumbnails travel as
+separate encrypted records. Every piece is verified on the way back out, so a
+substituted or corrupted one fails loudly instead of producing a plausible wrong
+file.
+
+</details>
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## ⚙️ Options
+
+Most people need none of these.
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--port` | `443` | Use a different port |
+| `--data` | system folder | Where files are stored |
+| `--ttl-minutes` | `10` | How long an uncollected file waits before the server deletes it |
+| `--require-approval` | off | New devices must be approved first |
+| `--allow-users` | you | Which Tailscale accounts may connect |
+| `--version` | | Print the version |
+
+<details>
+<summary><kbd>Keeping it running in the background</kbd></summary>
+
+<br/>
+
+**Linux (systemd).** Airlock needs permission to fetch its certificate:
+
+```bash
+sudo tailscale set --operator=$USER
+```
+
+```ini
+# /etc/systemd/system/airlock.service
+[Unit]
+Description=Airlock
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=airlock
+ExecStart=/usr/local/bin/airlock --data /var/lib/airlock
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
 sudo systemctl enable --now airlock
 ```
 
-Airlock is then at `https://airlock.<your-tailnet>.ts.net`.
+**Windows.** Create a scheduled task that runs at logon. Data is kept in
+`%LOCALAPPDATA%\Airlock`.
 
-Open it on any device and choose a passphrase. Every other device enters the same one. It is never sent to the server: it derives an AES key that stays in that device's IndexedDB. Lose it and you lose whatever is still in the inbox, which is at most one TTL window.
+Full instructions are in [Set up a server](./docs/deployment.md). For a rented
+VPS with Docker, see [the detailed guide](./docs/deployment-advanced.md).
 
-| Flag | Default | Meaning |
-| --- | --- | --- |
-| `--auth` | `tailscale` | `tailscale` or `token` |
-| `--data` | `./data` | data directory |
-| `--hostname` | `airlock` | tsnet node name |
-| `--allow-users` | node owner | comma-separated tailnet logins |
-| `--allow-nodes` | any | comma-separated node names |
-| `--chunk-size` | 8 MiB | plaintext chunk size |
-| `--max-blob` | 50 GiB | maximum per transfer |
-| `--max-total` | 200 GiB | maximum stored at once |
-| `--ttl-hours` | 24 | inactivity before a transfer is swept |
-| `--addr` | `127.0.0.1:8080` | listen address, token mode only |
-
-<div align="right">
-
-[![][back-to-top]](#readme-top)
-
-</div>
-
-## ⌨️ Local Development
-
-Go 1.26 or later and Node 22 or later. There is no frontend build step and no bundler, so what you edit is what the browser runs.
-
-```bash
-git clone https://github.com/ahnafnafee/airlock.git
-cd airlock
-
-go vet ./...
-go test ./...
-node --test web/crypto.test.mjs
-```
-
-To run against localhost without a tailnet:
-
-```bash
-AIRLOCK_TOKEN=devtoken go run . --auth=token --data ./devdata
-```
-
-Then open `http://localhost:8080/login?t=devtoken`. Localhost counts as a secure context even over plain HTTP, so Web Crypto and the service worker both work in development.
-
-The three checks that matter most, because these are the ones whose failure looks like success:
-
-1. `node --test web/crypto.test.mjs` must reject reordered, truncated, and spliced chunks. If any of them decrypt, files can be tampered with undetectably.
-2. A chunk file on the server must be unreadable. If `cat` shows your file, encryption is not actually in the path.
-3. A non-allowlisted tailnet node must get 403 on every route, static assets included.
-
-<div align="right">
-
-[![][back-to-top]](#readme-top)
-
-</div>
-
-## 🏗 Architecture
-
-```
-  Phone                            Server                       Desktop
-  Chrome PWA                       airlock                      Chrome PWA
-      |                        (tsnet node, Go)                     |
-      |     https://airlock.<tailnet>.ts.net                        |
-      +-------------------- WireGuard / TLS ------------------------+
-                                    |
-                        data/blobs/<id>/{meta.json,0,1,2,...}
-                        ciphertext only
-```
-
-Store and forward, not peer to peer. The receiver may be asleep, so bytes wait on the server, which means both clients are pure HTTP clients. That single decision is why no native app is required.
-
-| File | Responsibility |
-| --- | --- |
-| `main.go` | Flags, listener selection, wiring, sweep loop |
-| `server.go` | HTTP handlers, identity gate, request validation |
-| `store.go` | Blob store on disk: create, chunk writes, listing, sweep |
-| `push.go` | VAPID keys, subscriptions, notification delivery |
-| `web/crypto.js` | Key derivation, chunk sealing, AAD construction |
-| `web/app.js` | UI, upload loop, inbox, setup |
-| `web/sw.js` | Decrypt-on-download, push handling, share target |
-
-Exactly two Go dependencies, `tailscale.com` and `webpush-go`. Everything else is standard library. The frontend has zero dependencies.
-
-<div align="right">
-
-[![][back-to-top]](#readme-top)
-
-</div>
-
-## 🔒 Threat model
-
-| Layer | Protects against | Mechanism |
-| --- | --- | --- |
-| Reachability | The public internet | tsnet node, MagicDNS name, no public port |
-| Identity | An unauthorized tailnet device | `WhoIs` plus a node and user allowlist |
-| Transport | Passive interception | WireGuard, plus TLS |
-| At rest | The host provider, or root on the box | AES-256-GCM in the browser, key never sent |
-
-The caller Airlock is designed against is an authenticated, allowlisted device running `curl`, not the UI. Blob ids are server-generated and the only client string that may reach a filesystem path must match `^[0-9a-f]{32}$`. Chunk indices are bounds-checked before a path is built. Request bodies are capped. Quota is reserved before bytes are accepted, and the store enforces its own write limits rather than trusting the HTTP layer to do it.
-
-Fail closed: if Tailscale cannot come up, or token mode has no token configured, the process exits non-zero. There is no path from a missing credential to an open listener.
+</details>
 
 <div align="right">
 
@@ -261,27 +492,17 @@ Fail closed: if Tailscale cannot come up, or token mode has no token configured,
 
 ## 🗺 Status
 
-Built task by task from [the implementation plan](./docs/superpowers/plans/2026-08-15-airlock.md), against [the design spec](./docs/superpowers/specs/2026-08-15-airlock-design.md).
+**Working:** sending, receiving, notifications, saving, transfer history,
+thumbnails, device approval, skipping data you already have, resending only what
+changed, and resuming after a dropped connection.
 
-| # | Task | State |
-| --- | --- | --- |
-| 1 | Blob store, write path | 🟡 In review |
-| 2 | Blob store, read and lifecycle | ⬜ Pending |
-| 3 | HTTP core, identity gate and config | ⬜ Pending |
-| 4 | HTTP blob endpoints | ⬜ Pending |
-| 5 | Wiring, flags, token mode, sweep loop | ⬜ Pending |
-| 6 | Tailscale identity, TLS and allowlist | ⬜ Pending |
-| 7 | Browser crypto module | ⬜ Pending |
-| 8 | Setup flow and upload | ⬜ Pending |
-| 9 | Service worker download | ⬜ Pending |
-| 10 | Inbox | ⬜ Pending |
-| 11 | Web Push | ⬜ Pending |
-| 12 | PWA install, share target, file handlers | ⬜ Pending |
-| 13 | Deployment | ⬜ Pending |
+**Tested on real devices:** Windows (Chrome, Edge, Firefox), Android (Chrome,
+Firefox), iPad, and a two-device network.
 
-Airlock becomes genuinely usable at task 9 and feature complete at task 12.
+**Not yet tested on hardware:** iPhone, macOS Safari, Linux desktop.
 
-**Deliberately not built:** device pairing UI, recipient picker, transfer history, thumbnails, dedup, delta sync, relays, and accounts. Resume across a full page reload is deferred; resume across network drops ships.
+**Known limit:** closing the tab mid-transfer restarts from the last confirmed
+piece rather than the exact byte.
 
 <div align="right">
 
@@ -289,13 +510,89 @@ Airlock becomes genuinely usable at task 9 and feature complete at task 12.
 
 </div>
 
+## 🛠 For developers
+
+<details>
+<summary><kbd>Building and testing</kbd></summary>
+
+<br/>
+
+```bash
+go test ./...              # server
+node --test web/*.test.mjs # client, no dependencies to install
+go build -o airlock .      # the client is embedded, so this is the whole build
+```
+
+The client is vanilla ES modules and plain CSS. **No build step, no bundler, no
+package.json, no framework, no CDN.** Every CSS or JS edit needs `go build` to
+take effect, because the client ships inside the binary.
+
+CI runs the full suite on Linux, macOS and Windows for every push.
+
+</details>
+
+<details>
+<summary><kbd>How a transfer works</kbd></summary>
+
+<br/>
+
+<p align="center">
+  <img src="./docs/assets/transfer-flow.svg" alt="A file is split, fingerprinted and locked on the sending device, uploaded to the Airlock server which holds only scrambled data and never has the key, then fetched, verified, unlocked and saved on the receiving device. All of it inside your Tailscale network." width="860">
+</p>
+
+<sub>Editable source: [`docs/assets/transfer-flow.excalidraw`](./docs/assets/transfer-flow.excalidraw), or [open it in Excalidraw](https://excalidraw.com/#json=pVlGLiJF1KEUIt47ga_yv,NEaE-6Wy31PnSi2BENSEnA).</sub>
+
+1. The file is split into pieces along its own content, so an edit does not move
+   every later boundary.
+2. Each piece is fingerprinted using your key.
+3. The server is asked which fingerprints it already has. That one question is
+   what makes deduplication, partial resends and resuming all work.
+4. Only the missing pieces are encrypted and uploaded.
+5. The encrypted name, size and thumbnail land last, and that is what triggers
+   the notification.
+
+Full detail is in the [design spec](./docs/superpowers/specs/2026-08-15-airlock-design.md).
+
+</details>
+
+<details>
+<summary><kbd>Measured performance</kbd></summary>
+
+<br/>
+
+| Phase | Throughput |
+| --- | --- |
+| Encryption | ~304 MB/s |
+| Splitting | ~1.09 GB/s |
+| Server storage | ~550 MB/s |
+| Upload, end to end | 43 to 53 MB/s |
+| Download, end to end | 66 to 109 MB/s |
+| Rebuilding the file | ~104 MB/s |
+
+Encryption is not the bottleneck, which is why there is no option to turn it off.
+Numbers are from one desktop (i9-14900K); phone measurements are still open.
+Method and caveats in [docs/benchmarks.md](./docs/benchmarks.md).
+
+</details>
+
+<div align="right">
+
+[![][back-to-top]](#readme-top)
+
+</div>
+
+## 📄 License
+
+[MIT](./LICENSE). Do what you like with it.
+
 ## 🔗 Links
 
-- [Design spec](./docs/superpowers/specs/2026-08-15-airlock-design.md) - architecture, security model, wire protocol
-- [Implementation plan](./docs/superpowers/plans/2026-08-15-airlock.md) - the 13 tasks, with their tests
-- [Tailscale HTTPS certificates](https://tailscale.com/kb/1153/enabling-https) - the prerequisite everything depends on
-- [Web Share Target](https://developer.mozilla.org/en-US/docs/Web/Manifest/share_target) - how the Android share sheet entry works
-- [File Handling API](https://developer.mozilla.org/en-US/docs/Web/API/Window/launchQueue) - how the Windows Open with entry works
+- [Set up a server](./docs/deployment.md) - the short version, for a machine you own
+- [Detailed deployment](./docs/deployment-advanced.md) - a rented VPS, Docker, day-two operations
+- [Design spec](./docs/superpowers/specs/2026-08-15-airlock-design.md) - architecture and wire protocol
+- [Benchmarks](./docs/benchmarks.md) - what was measured, and what is still open
+- [Enabling Tailscale HTTPS](https://tailscale.com/kb/1153/enabling-https) - the one prerequisite
+- [Taildrop][taildrop-link] - the simpler tool, already on your devices
 
 <div align="right">
 
@@ -307,12 +604,13 @@ Airlock becomes genuinely usable at task 9 and feature complete at task 12.
 
 [back-to-top]: https://img.shields.io/badge/-BACK_TO_TOP-151515?style=flat-square
 [client-link]: https://developer.mozilla.org/en-US/docs/Web/Progressive_web_apps
-[client-shield]: https://img.shields.io/badge/client-PWA-5b9dff?labelColor=black&style=flat-square
-[crypto-link]: #-threat-model
-[crypto-shield]: https://img.shields.io/badge/at%20rest-AES--256--GCM-44cc11?labelColor=black&style=flat-square
-[deps-link]: #-architecture
-[deps-shield]: https://img.shields.io/badge/go%20deps-2-lightgrey?labelColor=black&style=flat-square
+[client-shield]: https://img.shields.io/badge/client-PWA-8A9A93?labelColor=black&style=flat-square
+[crypto-link]: #-security
+[crypto-shield]: https://img.shields.io/badge/encryption-AES--256--GCM-4FD1A5?labelColor=black&style=flat-square
 [go-link]: https://go.dev
 [go-shield]: https://img.shields.io/badge/go-1.26-00ADD8?labelColor=black&logo=go&logoColor=white&style=flat-square
+[license-link]: ./LICENSE
+[license-shield]: https://img.shields.io/badge/license-MIT-4FD1A5?labelColor=black&style=flat-square
+[taildrop-link]: https://tailscale.com/kb/1106/taildrop
 [tailscale-link]: https://tailscale.com/kb/1244/tsnet
-[tailscale-shield]: https://img.shields.io/badge/tailscale-tsnet-242424?labelColor=black&logo=tailscale&logoColor=white&style=flat-square
+[tailscale-shield]: https://img.shields.io/badge/network-Tailscale-242424?labelColor=black&logo=tailscale&logoColor=white&style=flat-square

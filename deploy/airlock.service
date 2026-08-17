@@ -1,0 +1,53 @@
+[Unit]
+Description=Airlock encrypted transfer
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=airlock
+Group=airlock
+ExecStart=/usr/local/bin/airlock --data /var/lib/airlock
+Restart=on-failure
+RestartSec=5
+
+StateDirectory=airlock
+StateDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=/var/lib/airlock
+
+# Host mode reaches the tailscaled local API socket. Reading from that socket
+# needs nothing: it is mode 0666 and the daemon's read permission is
+# unconditional for any local uid, so no group membership is involved and none
+# should be added here. One call needs more. GetCertificate, which fetches and
+# renews the tailnet certificate, requires write permission, and write is held
+# only by root, by the daemon's own uid, and by the configured operator.
+#
+# The broad grant hands this user the whole local API:
+#
+#   sudo tailscale set --operator=airlock
+#
+# The narrow grant permits certificates and nothing else. Add to
+# /etc/default/tailscaled:
+#
+#   TS_PERMIT_CERT_UID=airlock
+#
+# then `sudo systemctl restart tailscaled`. UNVERIFIED: that narrow grant was
+# read out of the daemon's source, not run. Confirm it on your own machine
+# before relying on it, by running `tailscale cert <node>.<tailnet>.ts.net` as
+# the airlock user; if it is refused, fall back to the operator grant above.
+#
+# Embedded mode talks to no daemon and needs neither.
+
+# Binding a port below 1024 without privilege. Host mode listens on the
+# machine's tailnet address, embedded mode on its own tsnet node, and both
+# default to 443. These two lines exist only for that default. Run with
+# --port 4443, or any port above 1024, and both can be deleted.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

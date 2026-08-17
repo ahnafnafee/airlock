@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Airlock</title>
+<meta name="description" content="Send files between your own devices, sealed before they leave.">
+<!-- This server is reachable only from one tailnet and holds one person's
+     files. Nothing here should ever be indexed, and a crawler that could reach
+     it has already found something that was not meant to be public. -->
+<meta name="robots" content="noindex, nofollow">
+<link rel="icon" href="/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#FFFFFF">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#17211E">
+<!-- iOS reads these rather than the manifest when the app is added to the Home
+     Screen, and without the title it uses the page title, which is longer than
+     the space an icon label gets. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Airlock">
+<script>
+/* Read before the stylesheet so a stored choice is on the element before the
+   first paint. Inline and synchronous on purpose: a module would run after
+   layout and the wrong theme would be visible for a frame. */
+try {
+  var t = localStorage.getItem("airlock-theme");
+  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+} catch (e) { /* storage refused, so follow the system */ }
+</script>
+<link rel="stylesheet" href="/tokens.css">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<!-- The chamber equalizing. Painted over everything for one moment when a
+     passphrase is accepted, so the strip's vocabulary is taught before the
+     first transfer rather than during it. -->
+<div id="equalize" hidden aria-hidden="true"></div>
+
+<header>
+  <h1 class="wordmark">Airlock</h1>
+  <nav id="nav" aria-label="Views"></nav>
+  <!-- The right of the bar: which device this is, and the controls that belong
+       to the app rather than to any one view. It balances the mark on the left
+       so the switcher between them lands on the middle of the window. -->
+  <div class="bar-end">
+    <span id="me" class="data muted"></span>
+    <div id="tools">
+      <button type="button" id="theme" aria-label="Theme: follow the system"></button>
+      <a id="source" href="https://github.com/ahnafnafee/airlock"
+         target="_blank" rel="noopener noreferrer" aria-label="Airlock on GitHub"></a>
+    </div>
+  </div>
+</header>
+
+<section id="install" hidden>
+  <main>
+    <h2>Add to Home Screen</h2>
+    <p class="muted">
+      Airlock runs from your Home Screen on iOS. This is a Safari feature, not
+      an App Store app: no Apple developer account, no signing, no review. It is
+      the same tailnet page with an icon.
+    </p>
+    <p class="muted">
+      iOS only lets a web app receive notifications and hold storage reliably
+      once it is installed.
+    </p>
+    <ol>
+      <li>Tap the Share button in Safari's toolbar</li>
+      <li>Scroll down and tap <strong>Add to Home Screen</strong></li>
+      <li>Open Airlock from your Home Screen and come back to this step</li>
+    </ol>
+    <p class="muted">
+      Set your passphrase after installing, not before: an installed app has its
+      own private storage and cannot see anything set up in the browser tab.
+    </p>
+  </main>
+</section>
+
+<section id="insecure" hidden>
+  <main>
+    <h2>This address is not secure</h2>
+    <p class="muted">
+      Airlock seals every file in your browser before it goes anywhere, and a
+      browser only offers the sealing key on a secure origin. This page arrived
+      over plain HTTP at <span id="insecure-origin" class="data"></span>, where
+      that key cannot be created, so there is nothing safe to do here.
+    </p>
+    <p class="muted">
+      Reach this server by its tailnet name instead. Tailscale serves it over
+      HTTPS with a real certificate, which is the address Airlock prints when it
+      starts. On the machine running the server, http://localhost works too.
+    </p>
+  </main>
+</section>
+
+<section id="pairing" hidden>
+  <main>
+    <h2>Waiting for approval</h2>
+    <p class="muted">
+      Open Airlock on a device you already use and approve
+      <span id="pairing-node" class="data"></span> under Devices.
+      This screen moves on by itself.
+    </p>
+    <div id="pairing-strip" aria-hidden="true"></div>
+  </main>
+</section>
+
+<section id="unlock" hidden>
+  <main>
+    <h2 id="unlock-title">Enter the passphrase</h2>
+    <p class="muted" id="unlock-note">
+      It never leaves this device. Every device you set up uses the same one.
+    </p>
+    <form id="unlock-form">
+      <p>
+        <label class="label" for="passphrase">Passphrase</label>
+        <span class="reveal">
+          <input type="password" id="passphrase" autocomplete="current-password" required>
+          <button type="button" id="peek" aria-label="Show the passphrase" aria-pressed="false"></button>
+        </span>
+      </p>
+      <p><button class="primary" type="submit" id="unlock-go">Unlock</button></p>
+    </form>
+    <p id="unlock-error" class="bad" role="alert"></p>
+  </main>
+</section>
+
+<div id="app" hidden>
+  <main id="views"></main>
+</div>
+
+<!-- Arrivals the operating system will not announce: permission refused, or the
+     app already in front of you. Polite rather than assertive, because an
+     arrival is news and not an interruption. -->
+<div id="toasts" role="status" aria-live="polite"></div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

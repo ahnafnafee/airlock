@@ -311,10 +311,14 @@ export function listen() {
       // The sending device's name, and empty when the nudge is not about an
       // arrival. It used to read whatever the stream put in this field, which
       // was the literal "1" the server sent as a placeholder.
+      // The sending device's name, and empty when this event is a catch-up or a
+      // nudge rather than an arrival.
       const from = (event?.data || '').trim();
-      const channel = arrivalChannel(globalThis, globalThis.document, subscribed);
-      if (channel === 'toast') toast('A file arrived.', { from });
+      const channel = arrivalChannel(globalThis, globalThis.document, subscribed, from);
+      if (channel === 'toast') toast(`A file arrived from ${from}.`);
       else if (channel === 'local') showLocalNotice(from);
+      // Every one of the three re-reads what changed, whether or not it was
+      // worth announcing.
       for (const fn of listeners) fn();
     });
 
@@ -547,10 +551,11 @@ export function toast(message, { from = '', action = null, after = TOAST_MS } = 
   return node;
 }
 
-// How an arrival should be announced on this device. Three channels, and the
-// rule is that exactly one of them speaks, because two notices for one file is
-// worse than a plain one.
+// How an arrival should be announced on this device. Four answers, and the rule
+// is that exactly one channel speaks, because two notices for one file is worse
+// than a plain one.
 //
+//   none:   not an arrival, so nothing is announced.
 //   toast:  the page says it. Correct whenever the page is being looked at, and
 //           the only thing left when notifications were refused.
 //   local:  the page raises a system notification itself. This is the case that
@@ -558,7 +563,15 @@ export function toast(message, { from = '', action = null, after = TOAST_MS } = 
 //           carry it, which is every engine that has notifications without push.
 //   push:   nothing to do here. The service worker will be woken and will speak,
 //           and doing anything more would double it.
-export function arrivalChannel(scope = globalThis, doc = globalThis.document, pushes = false) {
+//
+// The stream's inbox event carries three different pieces of news: a catch-up
+// when it opens, a nudge that some transfer changed, and a file arriving. Only
+// the last names the device it came from, and only the last is worth
+// interrupting anyone about. Reading them as one is why "a file arrived" greeted
+// every page load and every delete.
+export function arrivalChannel(scope = globalThis, doc = globalThis.document,
+  pushes = false, from = '') {
+  if (!from) return 'none';
   if (doc?.visibilityState === 'visible') return 'toast';
   const granted = 'Notification' in scope && scope.Notification.permission === 'granted';
   if (!granted) return 'toast';

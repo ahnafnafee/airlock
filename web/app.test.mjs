@@ -332,31 +332,50 @@ test('what this device can do about notifications is two facts, not one', () => 
   }
 });
 
-// Exactly one channel speaks per arrival. Two notices for one file is worse than
-// a plain one, and none at all is how an arrival goes unnoticed for hours.
+// Exactly one channel speaks per arrival. Two notices for one file is worse
+// than a plain one, and none at all is how an arrival goes unnoticed for hours.
 test('an arrival is announced once, by whichever channel can reach', () => {
   const visible = { visibilityState: 'visible' };
   const hidden = { visibilityState: 'hidden' };
   const perm = (permission) => ({ Notification: { permission } });
+  const FROM = 'pixel';
 
   // Being looked at. The page says it, whatever else is available, because a
   // system banner over the window you are already reading is noise.
-  assert.equal(arrivalChannel(perm('granted'), visible, true), 'toast');
-  assert.equal(arrivalChannel(perm('denied'), visible, false), 'toast');
+  assert.equal(arrivalChannel(perm('granted'), visible, true, FROM), 'toast');
+  assert.equal(arrivalChannel(perm('denied'), visible, false, FROM), 'toast');
 
   // Subscribed and out of sight: the worker will be woken and will speak. Doing
   // anything here would double it.
-  assert.equal(arrivalChannel(perm('granted'), hidden, true), 'push');
+  assert.equal(arrivalChannel(perm('granted'), hidden, true, FROM), 'push');
 
   // The case that was silent. Permission granted, window not in front, and no
   // push to carry it, which is every engine that has notifications without push.
-  assert.equal(arrivalChannel(perm('granted'), hidden, false), 'local');
+  assert.equal(arrivalChannel(perm('granted'), hidden, false, FROM), 'local');
 
   // Refused, so nothing outside the page can speak. The notice waits in the page
   // rather than being dropped.
-  assert.equal(arrivalChannel(perm('denied'), hidden, true), 'toast');
-  assert.equal(arrivalChannel({}, hidden, true), 'toast');
+  assert.equal(arrivalChannel(perm('denied'), hidden, true, FROM), 'toast');
+  assert.equal(arrivalChannel({}, hidden, true, FROM), 'toast');
 });
+
+// The stream's inbox event carries three different pieces of news: a catch-up
+// when it opens, a nudge that some transfer changed, and a file arriving. Only
+// the last names a sender. Treating them as one greeted every page load and
+// every delete with "a file arrived", which teaches a person to ignore the one
+// notice that means something.
+test('only an event that names a sender is an arrival', () => {
+  const visible = { visibilityState: 'visible' };
+  const granted = { Notification: { permission: 'granted' } };
+
+  assert.equal(arrivalChannel(granted, visible, false, 'pixel'), 'toast');
+  assert.equal(arrivalChannel(granted, visible, false, ''), 'none');
+  assert.equal(arrivalChannel(granted, visible, false), 'none');
+  // And no channel speaks for one, whatever the device could otherwise do.
+  assert.equal(arrivalChannel(granted, { visibilityState: 'hidden' }, true, ''), 'none');
+  assert.equal(arrivalChannel({}, { visibilityState: 'hidden' }, false, ''), 'none');
+});
+
 
 
 // Three states, and "system" is the absence of a choice rather than a third

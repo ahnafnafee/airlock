@@ -13,8 +13,8 @@
 <link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="manifest" href="/manifest.webmanifest">
 <meta name="color-scheme" content="light dark">
-<meta name="theme-color" media="(prefers-color-scheme: light)" content="#F4F7F5">
-<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0A0F0D">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#FFFFFF">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#17211E">
 <!-- iOS reads these rather than the manifest when the app is added to the Home
      Screen, and without the title it uses the page title, which is longer than
      the space an icon label gets. -->
@@ -41,6 +41,7 @@ try {
 
 <header>
   <h1 class="wordmark">Airlock</h1>
+  <nav id="nav" aria-label="Views"></nav>
   <span id="me" class="data muted"></span>
   <!-- Controls that belong to the app rather than to any one view. On a wide
        screen they sit at the foot of the rail; on a narrow one they ride in the
@@ -124,7 +125,6 @@ try {
 
 <div id="app" hidden>
   <main id="views"></main>
-  <nav id="nav" aria-label="Views"></nav>
 </div>
 
 <!-- Arrivals the operating system will not announce: permission refused, or the

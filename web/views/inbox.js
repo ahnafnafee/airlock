@@ -332,7 +332,11 @@ function renderPushOffer(host) {
 registerView('inbox', 'Inbox', (panel) => {
   const list = el('ul', { class: 'rows' });
   const ask = el('p', { class: 'muted notice', hidden: true });
-  panel.append(el('h2', {}, 'Inbox'), ask, list);
+  panel.append(
+    el('h2', {}, 'Inbox'),
+    el('p', { class: 'muted' }, 'Waiting on your server. Saving a file clears it.'),
+    ask,
+    list);
   renderPushOffer(ask);
 
   // Which refresh owns the list. Rows are built before anything on screen is

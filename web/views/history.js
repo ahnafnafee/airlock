@@ -68,7 +68,11 @@ export function pageOf(total, page, size = PAGE) {
 registerView('history', 'History', (panel) => {
   const list = el('ul', { class: 'rows' });
   const pager = el('div', { class: 'pager', hidden: true });
-  panel.append(el('h2', {}, 'History'), list, pager);
+  panel.append(
+    el('h2', {}, 'History'),
+    el('p', { class: 'muted' }, 'What passed through, after the files themselves are gone.'),
+    list,
+    pager);
   // Which page is on screen, and everything read for it. Held so paging costs
   // no request: the history is a snapshot of what has already ended.
   let showing = [];

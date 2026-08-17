@@ -9,6 +9,15 @@ import { inboundTo, needsInstallGate, setBadge } from './ios.js';
 export const state = { mk: null, config: null, me: null };
 
 const views = new Map();
+// The badge element on each view's switcher button, by view name.
+const counters = new Map();
+
+// How many are waiting on a view. Empty rather than zero, because a badge
+// showing nothing is a badge that should not be there.
+export function setViewCount(name, n) {
+  const at = counters.get(name);
+  if (at) at.textContent = n > 0 ? String(n) : '';
+}
 const $ = (id) => document.getElementById(id);
 
 // A tiny element helper, because building nodes beats innerHTML when the text
@@ -34,11 +43,15 @@ export function registerView(name, title, mount) {
   $('views').append(panel);
   views.set(name, { title, mount, panel, mounted: false });
 
+  // The count rides on the button rather than beside it, so a view that holds
+  // something waiting says so from wherever you are.
+  const count = el('span', { class: 'count' });
   const button = el('button', {
     type: 'button',
     onclick: () => showView(name),
-  }, title);
+  }, title, count);
   button.dataset.view = name;
+  counters.set(name, count);
   $('nav').append(button);
 }
 
@@ -141,6 +154,9 @@ async function equalize() {
 function enterApp() {
   $('unlock').hidden = true;
   $('app').hidden = false;
+  // The switcher is meaningless before this point and the bar carries it on
+  // every screen, including the ones that come before a passphrase exists.
+  document.body.dataset.app = 'on';
   // Before the first view is shown, so a drag already under way when the app
   // opens is the one that draws the drop zone. These listeners only record what
   // this browser turns out to be able to do; the send view attaches its own to
@@ -187,7 +203,11 @@ function enterApp() {
 // disagree about what is waiting.
 async function refreshBadge() {
   try {
-    await setBadge(inboundTo(await api.inbox(), state.me?.node).length);
+    const waiting = inboundTo(await api.inbox(), state.me?.node).length;
+    // The same count in both places it belongs: on the app's own icon, and on
+    // the switcher button for the view that holds them.
+    setViewCount('inbox', waiting);
+    await setBadge(waiting);
   } catch (err) {
     console.warn('the badge was not updated', err);
   }

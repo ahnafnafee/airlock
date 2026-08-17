@@ -1,122 +1,172 @@
-/* Airlock's palette, shape and type, in one place.
+/* Airlock's palette, type, shape and motion, in one place.
  *
- * Light is defined on bare :root and dark is layered over it, so a viewer whose
- * system setting is "no preference" gets a complete palette either way. Three
- * states have to work: an explicit choice stamps data-theme on the root, and the
- * default stamps nothing, in which case only prefers-color-scheme separates the
- * two. Every color therefore has its value on :root and is only redefined in the
- * dark blocks, never the other way around, because a color whose one definition
- * lives inside a media query has no value at all when that query does not match.
+ * Light is defined on bare :root and dark layers over it in two places: a
+ * guarded prefers-color-scheme block for the system default, and a data-theme
+ * block so an explicit choice wins in both directions. Every color has its value
+ * on :root and is only redefined in the dark blocks, never the other way round,
+ * because a color whose one definition sits inside a media query has no value at
+ * all when that query does not match.
  */
+
+/* Latin subsets, served from the binary. The design specifies Sora and IBM Plex
+   Mono from Google Fonts, which this cannot do: a font fetched from a CDN is a
+   request to somebody else's server from a page whose whole claim is that there
+   is not one, and it would not paint at all on a device that is offline. These
+   are the same faces, subset to latin and embedded with the rest of the client,
+   at 128 KB for six of them. */
+@font-face {
+  font-family: "Sora";
+  src: url("/fonts/Sora-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Sora";
+  src: url("/fonts/Sora-600.woff2") format("woff2");
+  font-weight: 600;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Sora";
+  src: url("/fonts/Sora-700.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Sora";
+  src: url("/fonts/Sora-800.woff2") format("woff2");
+  font-weight: 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/fonts/IBMPlexMono-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/fonts/IBMPlexMono-500.woff2") format("woff2");
+  font-weight: 500;
+  font-display: swap;
+}
 
 :root {
   color-scheme: light;
 
-  /* Surfaces, from the page backwards. Ground is what the window is painted
-     with, surface is what sits on it, and raised is a surface on a surface. */
-  --ground: #F4F7F5;
+  --ground: #F8FBFA;
   --surface: #FFFFFF;
-  --raised: #F8FAF9;
-  --rail: #FFFFFF;
+  --raised: #F1F5F3;
+  --bar: #FFFFFF;
+  --track: #EBF1EE;
 
-  --line: #E2E9E4;
-  --line-strong: #CFDAD3;
+  --line: #EDF2F0;
+  --line-strong: #E3EAE7;
+  --line-hard: #DCE6E2;
 
-  --ink: #0C1512;
-  --ink-soft: #48584F;
-  --ink-faint: #6B7B72;
+  --ink: #17201D;
+  --ink-soft: #5F6F69;
+  --ink-faint: #93A39D;
 
-  /* One green, and it means Airlock. The signal colors below borrow from it
-     rather than competing with it. */
-  --green: #16A34A;
-  --green-hot: #15803D;
-  --green-wash: #E8F6ED;
-  --on-green: #FFFFFF;
+  --accent: #2BC49A;
+  --accent-hot: #1FAE87;
+  --accent-deep: #0E7A5D;
+  --on-accent: #083326;
+  --tint: #E5F6F0;
+  --tint-line: #7FDCC0;
 
-  /* Each carries exactly one meaning, everywhere, forever. Amber is in transit
-     and nothing else, green is held or sealed and nothing else, red is a
-     failure and nothing else. */
-  --transit: #D97706;
-  --sealed: #16A34A;
-  --breach: #DC2626;
+  --transit: #D9932F;
+  --sealed: #0E7A5D;
+  --breach: #D95E4D;
+  --breach-tint: #FAEAE7;
 
-  --shadow: 0 1px 2px rgb(12 21 18 / 6%), 0 8px 24px rgb(12 21 18 / 6%);
-  --shadow-lift: 0 2px 6px rgb(12 21 18 / 8%), 0 16px 40px rgb(12 21 18 / 10%);
+  --shadow-sm: 0 1px 2px rgb(23 32 29 / 4%);
+  --shadow: 0 1px 2px rgb(23 32 29 / 4%), 0 10px 30px rgb(23 32 29 / 5%);
+  --shadow-lift: 0 2px 6px rgb(23 32 29 / 5%), 0 18px 50px rgb(23 32 29 / 8%);
+  --shadow-accent: 0 2px 10px rgb(43 196 154 / 35%);
+  --shadow-pill: 0 1px 3px rgb(23 32 29 / 10%);
 }
 
-/* The system default. Guarded so an explicit light choice still wins here. */
+/* The system default, guarded so an explicit light choice still wins. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
 
-    --ground: #0A0F0D;
-    --surface: #111814;
-    --raised: #16201B;
-    --rail: #0D1310;
+    --ground: #101614;
+    --surface: #151D1A;
+    --raised: #1A2320;
+    --bar: #17211E;
+    --track: #202B26;
 
-    --line: #1E2A24;
-    --line-strong: #2C3A32;
+    --line: #212B27;
+    --line-strong: #243029;
+    --line-hard: #26312C;
 
-    --ink: #E9F1EC;
-    --ink-soft: #A3B2AA;
-    --ink-faint: #7D8C84;
+    --ink: #ECF2EF;
+    --ink-soft: #92A49D;
+    --ink-faint: #64766E;
 
-    --green: #22C55E;
-    --green-hot: #16A34A;
-    --green-wash: #14291D;
-    --on-green: #06120B;
+    --accent: #2BC49A;
+    --accent-hot: #4ED9B2;
+    --accent-deep: #4ED9B2;
+    --on-accent: #063024;
+    --tint: #16302A;
+    --tint-line: #3A4A43;
 
-    --transit: #F59E0B;
-    --sealed: #22C55E;
-    --breach: #F87171;
+    --transit: #E0A855;
+    --sealed: #4ED9B2;
+    --breach: #E8806F;
+    --breach-tint: #2E1D1A;
 
-    --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 8px 24px rgb(0 0 0 / 30%);
-    --shadow-lift: 0 2px 6px rgb(0 0 0 / 45%), 0 16px 40px rgb(0 0 0 / 40%);
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 30%);
+    --shadow: 0 1px 2px rgb(0 0 0 / 35%), 0 10px 30px rgb(0 0 0 / 30%);
+    --shadow-lift: 0 2px 6px rgb(0 0 0 / 40%), 0 18px 50px rgb(0 0 0 / 38%);
+    --shadow-accent: 0 2px 10px rgb(43 196 154 / 22%);
+    --shadow-pill: 0 1px 3px rgb(0 0 0 / 40%);
   }
 }
 
-/* An explicit dark choice, which has to win over the light default whatever the
-   system says. Same values as above; the selector is the difference. */
+/* An explicit dark choice, which has to beat the light default whatever the
+   system says. */
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --ground: #0A0F0D;
-  --surface: #111814;
-  --raised: #16201B;
-  --rail: #0D1310;
+  --ground: #101614;
+  --surface: #151D1A;
+  --raised: #1A2320;
+  --bar: #17211E;
+  --track: #202B26;
 
-  --line: #1E2A24;
-  --line-strong: #2C3A32;
+  --line: #212B27;
+  --line-strong: #243029;
+  --line-hard: #26312C;
 
-  --ink: #E9F1EC;
-  --ink-soft: #A3B2AA;
-  --ink-faint: #7D8C84;
+  --ink: #ECF2EF;
+  --ink-soft: #92A49D;
+  --ink-faint: #64766E;
 
-  --green: #22C55E;
-  --green-hot: #16A34A;
-  --green-wash: #14291D;
-  --on-green: #06120B;
+  --accent: #2BC49A;
+  --accent-hot: #4ED9B2;
+  --accent-deep: #4ED9B2;
+  --on-accent: #063024;
+  --tint: #16302A;
+  --tint-line: #3A4A43;
 
-  --transit: #F59E0B;
-  --sealed: #22C55E;
-  --breach: #F87171;
+  --transit: #E0A855;
+  --sealed: #4ED9B2;
+  --breach: #E8806F;
+  --breach-tint: #2E1D1A;
 
-  --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 8px 24px rgb(0 0 0 / 30%);
-  --shadow-lift: 0 2px 6px rgb(0 0 0 / 45%), 0 16px 40px rgb(0 0 0 / 40%);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 30%);
+  --shadow: 0 1px 2px rgb(0 0 0 / 35%), 0 10px 30px rgb(0 0 0 / 30%);
+  --shadow-lift: 0 2px 6px rgb(0 0 0 / 40%), 0 18px 50px rgb(0 0 0 / 38%);
+  --shadow-accent: 0 2px 10px rgb(43 196 154 / 22%);
+  --shadow-pill: 0 1px 3px rgb(0 0 0 / 40%);
 }
 
 :root {
-  /* Type. The display face carries the headings and the wordmark; the mono face
-     carries anything a person might read character by character, which here is
-     device names, addresses and byte counts. */
-  --display: "Inter Display", "Inter", "Segoe UI Variable Display", "Segoe UI",
-             system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
-  --sans: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
-          "Helvetica Neue", Arial, sans-serif;
-  --mono: "Cascadia Mono", "SF Mono", "SFMono-Regular", Consolas, ui-monospace, monospace;
-
-  /* Line icons, inlined so they paint with no request and masked so they take
-     whatever color they sit on, in either theme. */
+  --icon-upload-art: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%230E7A5D%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpolyline%20points%3D%2216%2C16%2012%2C12%208%2C16%22%2F%3E%3Cline%20x1%3D%2212%22%20y1%3D%2212%22%20x2%3D%2212%22%20y2%3D%2221%22%2F%3E%3Cpath%20d%3D%22M20.39%2018.39A5%205%200%200%200%2018%209h-1.26A8%208%200%201%200%203%2016.3%22%2F%3E%3C%2Fsvg%3E");
+  --icon-mark: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23000%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%229.2%22%2F%3E%3Cline%20x1%3D%226.5%22%20y1%3D%2212%22%20x2%3D%2214.5%22%20y2%3D%2212%22%20stroke-width%3D%222%22%2F%3E%3Cpolyline%20points%3D%2211.5%2C8.5%2015%2C12%2011.5%2C15.5%22%20stroke-width%3D%222%22%2F%3E%3C%2Fsvg%3E");
   --icon-upload: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M6.5%2018.5a4.5%204.5%200%200%201-.6-8.96A6%206%200%200%201%2017.7%208.6a4.2%204.2%200%200%201%20.6%208.35%22%2F%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M12%2020v-8m0%200-3%203m3-3%203%203%22%2F%3E%3C%2Fsvg%3E");
   --icon-lock: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20x%3D%224.5%22%20y%3D%2210.5%22%20width%3D%2215%22%20height%3D%229.5%22%20rx%3D%222.2%22%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%2F%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M8%2010.5V7.6a4%204%200%200%201%208%200v2.9%22%2F%3E%3C%2Fsvg%3E");
   --icon-send: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M20.5%203.5%203.6%2010.2c-.7.3-.7%201.3%200%201.5l6.6%202.1%202.1%206.6c.2.7%201.2.7%201.5%200z%22%2F%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M20.5%203.5%2010.2%2013.8%22%2F%3E%3C%2Fsvg%3E");
@@ -126,38 +176,35 @@
   --icon-sun: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%224.2%22%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%2F%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M12%202.6v2.2M12%2019.2v2.2M2.6%2012h2.2M19.2%2012h2.2M5.4%205.4l1.6%201.6M17%2017l1.6%201.6M18.6%205.4%2017%207M7%2017l-1.6%201.6%22%2F%3E%3C%2Fsvg%3E");
   --icon-moon: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M20%2013.4A8.4%208.4%200%200%201%2010.6%204a8.4%208.4%200%201%200%209.4%209.4%22%2F%3E%3C%2Fsvg%3E");
   --icon-auto: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%228.6%22%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%2F%3E%3Cpath%20d%3D%22M12%203.4a8.6%208.6%200%200%201%200%2017.2z%22%20fill%3D%22%23000%22%2F%3E%3C%2Fsvg%3E");
-
   --icon-github: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20fill%3D%22%23000%22%20d%3D%22M12%201.7a10.3%2010.3%200%200%200-3.26%2020.07c.52.1.71-.22.71-.5v-1.75c-2.87.62-3.48-1.38-3.48-1.38-.47-1.2-1.15-1.52-1.15-1.52-.94-.64.07-.63.07-.63%201.04.07%201.58%201.07%201.58%201.07.92%201.58%202.42%201.12%203.01.86.09-.67.36-1.13.65-1.39-2.29-.26-4.7-1.15-4.7-5.1%200-1.13.4-2.05%201.06-2.77-.11-.26-.46-1.31.1-2.73%200%200%20.87-.28%202.85%201.06a9.9%209.9%200%200%201%205.19%200c1.98-1.34%202.85-1.06%202.85-1.06.56%201.42.21%202.47.1%202.73.66.72%201.06%201.64%201.06%202.77%200%203.96-2.42%204.83-4.72%205.09.37.32.7.95.7%201.92v2.85c0%20.28.19.61.72.5A10.3%2010.3%200%200%200%2012%201.7z%22%2F%3E%3C%2Fsvg%3E");
 
-  --wordmark: 17px;
-  --title: clamp(1.75rem, 3.4vw, 2.375rem);
-  --prose: 15px;
+  --display: "Sora", "Segoe UI Variable Display", "Segoe UI", system-ui,
+             -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --sans: var(--display);
+  /* Numbers and addresses: byte counts, device names, tailnet addresses,
+     anything read a character at a time rather than as a word. */
+  --mono: "IBM Plex Mono", "Cascadia Mono", "SF Mono", Consolas, ui-monospace, monospace;
+
+  --title: clamp(1.55rem, 3vw, 2rem);
+  --prose: 14px;
   --data: 12.5px;
-  --label: 12px;
+  --label: 11px;
 
-  /* Shape. Square corners read as machinery; these read as software, which is
-     what this is. One step per role so nothing is arbitrary. */
-  --r-sm: 8px;
-  --r-md: 10px;
-  --r-lg: 14px;
+  --track-title: -0.6px;
+  --track-label: 1.5px;
+
+  /* A pill is the shape of anything that can be pressed. Cards are 18, the
+     chamber is 22, the shell is 24. */
   --r-pill: 999px;
+  --r-seg: 6px;
+  --r-sm: 12px;
+  --r-md: 18px;
+  --r-lg: 22px;
+  --r-xl: 24px;
 
-  --track-title: -0.022em;
-  --track-mark: -0.02em;
-  --track-label: 0.02em;
-
-  /* A card's inset. The chunk strip spans a row edge to edge by cancelling it,
-     so the two have to be the same value and not two that agree today. */
-  --row-pad: 16px;
-
-  --rail-w: 232px;
-  /* The rail's head. The nav starts here, so it is one value and not two that
-     have to be kept in agreement by hand. */
-  --rail-head: 86px;
-  /* The rail's foot, which holds the controls that belong to the app rather
-     than to any one view. The nav stops here. */
-  --rail-foot: 60px;
-  --content: 1120px;
-  --strip: clamp(44px, 5.5vw, 64px);
-  --strip-seam: 3px;
+  --bar-h: 64px;
+  --content: 760px;
+  --row-pad: 18px;
+  --strip: clamp(40px, 5vw, 56px);
+  --strip-seam: 8px;
 }

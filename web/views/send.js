@@ -127,10 +127,12 @@ registerView('send', 'Send', (panel) => {
   // says what the chamber is for, and it is always here, unlike the drop line
   // above which appears only on an engine that has proved it accepts a drag.
   const hatch = el('p', { class: 'hatch' }, 'Nothing staged yet');
+  // The two choices sit side by side on one line: they are alternatives, and
+  // stacking them made the second read as a lesser afterthought of the first.
   const drop = el('div', { id: 'drop' },
     hatch,
-    el('div', {}, dropLine, choose),
-    folderButton,
+    el('div', {}, dropLine),
+    el('div', { class: 'row' }, choose, folderButton),
     picker, folder);
 
   // Both are receipts, so both start hidden on every browser and stay hidden
@@ -180,6 +182,7 @@ registerView('send', 'Send', (panel) => {
 
   panel.append(
     el('h2', {}, 'Send'),
+    el('p', { class: 'muted' }, 'Files are sealed on this device before they leave.'),
     drop,
     seal,
     pasteHint,

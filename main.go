@@ -27,6 +27,7 @@ import (
 //go:embed web/staging.js web/stage-worker.js web/receive.js
 //go:embed web/sealpool.js web/seal-worker.js
 //go:embed web/assemble.js web/assemble-worker.js web/export.js web/inbound.js web/ios.js
+//go:embed web/fonts
 //go:embed web/manifest.webmanifest web/icon.svg web/icon-192.png web/icon-512.png web/icon-maskable.png web/icon-badge.png
 var webFS embed.FS
 

@@ -51,7 +51,7 @@ type ServerConfig struct {
 	Ident     IdentityFunc
 	DataDir   string
 	CDC       CDCParams
-	TTLHours  int
+	TTL       time.Duration
 	Salt      string
 	Static    fs.FS
 	// The UDP port this server answers STUN on, or zero when it does not. The
@@ -266,13 +266,13 @@ func (s *Server) whoami(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
-		"auth":     s.cfg.Auth,
-		"salt":     s.cfg.Salt,
-		"cdc":      s.cfg.CDC,
-		"ttlHours": s.cfg.TTLHours,
-		"vapidKey": s.cfg.Push.PublicKey(),
-		"stunPort": s.cfg.StunPort,
-		"check":    nil,
+		"auth":       s.cfg.Auth,
+		"salt":       s.cfg.Salt,
+		"cdc":        s.cfg.CDC,
+		"ttlMinutes": int(s.cfg.TTL / time.Minute),
+		"vapidKey":   s.cfg.Push.PublicKey(),
+		"stunPort":   s.cfg.StunPort,
+		"check":      nil,
 	}
 	if b, err := os.ReadFile(filepath.Join(s.cfg.DataDir, "check.bin")); err == nil {
 		resp["check"] = base64.StdEncoding.EncodeToString(b)

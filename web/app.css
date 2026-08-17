@@ -825,6 +825,16 @@ button.primary + .staged { margin-top: 18px; }
   mask: var(--icon-lock) center / contain no-repeat;
 }
 
+/* The page controls sit under the list they page through, with the count
+   between them so the two buttons are never mistaken for the whole control. */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-top: 16px;
+}
+
 [hidden] { display: none !important; }
 
 @media (min-width: 900px) {

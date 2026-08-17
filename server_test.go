@@ -51,11 +51,11 @@ func newTestServerWithLimits(t *testing.T, allow bool, maxRecord int, maxTotal i
 		Ident: func(*http.Request) (Identity, bool) {
 			return Identity{Node: "pixel", User: "owner@example.com"}, allow
 		},
-		DataDir:  dir,
-		CDC:      CDCParams{Min: 8, Normal: 16, Max: 64, MaskS: 0x3f, MaskL: 0x1f},
-		TTLHours: 24,
-		Salt:     "c2FsdHNhbHRzYWx0c2FsdA==",
-		Static:   static,
+		DataDir: dir,
+		CDC:     CDCParams{Min: 8, Normal: 16, Max: 64, MaskS: 0x3f, MaskL: 0x1f},
+		TTL:     24 * time.Hour,
+		Salt:    "c2FsdHNhbHRzYWx0c2FsdA==",
+		Static:  static,
 	})
 	return srv, devices
 }

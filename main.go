@@ -45,7 +45,7 @@ var (
 	maxTotalBytes   = flag.Int64("max-total", 200<<30, "maximum bytes stored across all chunks")
 	maxChunksPer    = flag.Int("max-chunks-per-transfer", 200000, "maximum chunks in one transfer")
 	maxRecordBytes  = flag.Int("max-record", 4<<20, "maximum bytes per sealed record")
-	ttlHours        = flag.Int("ttl-hours", 24, "hours of inactivity before a transfer is swept")
+	ttlMinutes      = flag.Int("ttl-minutes", 10, "minutes of inactivity before an uncollected transfer is swept")
 	requireApproval = flag.Bool("require-approval", false, "hold new devices until an approved device admits them")
 	vapidSubject    = flag.String("vapid-subject", "mailto:airlock@invalid", "VAPID subject")
 	allowUsers      = flag.String("allow-users", "", "comma-separated tailnet logins allowed; empty means the server node's own owner")
@@ -256,7 +256,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	transfers, err := NewTransfers(*dataDir, chunks, time.Duration(*ttlHours)*time.Hour, *maxChunksPer, *maxRecordBytes)
+	ttl := time.Duration(*ttlMinutes) * time.Minute
+	transfers, err := NewTransfers(*dataDir, chunks, ttl, *maxChunksPer, *maxRecordBytes)
 	if err != nil {
 		return err
 	}
@@ -268,7 +269,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	pusher, err := NewPusher(*dataDir, *vapidSubject, time.Duration(*ttlHours)*time.Hour)
+	pusher, err := NewPusher(*dataDir, *vapidSubject, ttl)
 	if err != nil {
 		return err
 	}
@@ -301,10 +302,10 @@ func run() error {
 	root.Handle("/", NewServer(ServerConfig{
 		Chunks: chunks, Transfers: transfers, Devices: devices, Push: pusher,
 		Events: events, Ident: ident, DataDir: *dataDir, CDC: cdcDefaults,
-		TTLHours: *ttlHours, Salt: salt, Static: static, Auth: *authMode,
+		TTL: ttl, Salt: salt, Static: static, Auth: *authMode,
 	}))
 
-	go sweepLoop(transfers)
+	go sweepLoop(transfers, ttl)
 	log.Printf("airlock up: auth=%s addr=%s", *authMode, ln.Addr())
 	srv := &http.Server{
 		Handler: root,
@@ -399,8 +400,24 @@ func sweepOnce(transfers *Transfers) (int, int, error) {
 	return gone, orphans, err
 }
 
-func sweepLoop(transfers *Transfers) {
-	t := time.NewTicker(time.Hour)
+// A sweep no more than a quarter of the way through a transfer's life, so what
+// expires is collected soon after it does. An hourly sweep against a ten minute
+// life would leave an expired transfer listed for most of an hour, which is a
+// promise about how long a file lives that the product would not be keeping.
+// Floored so a very short life cannot turn this into a busy loop.
+func sweepInterval(ttl time.Duration) time.Duration {
+	every := ttl / 4
+	if every < 30*time.Second {
+		every = 30 * time.Second
+	}
+	if every > time.Hour {
+		every = time.Hour
+	}
+	return every
+}
+
+func sweepLoop(transfers *Transfers, ttl time.Duration) {
+	t := time.NewTicker(sweepInterval(ttl))
 	defer t.Stop()
 	for range t.C {
 		gone, orphans, err := sweepOnce(transfers)

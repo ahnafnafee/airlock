@@ -174,7 +174,7 @@ that device. Check the ACLs in your [admin console](https://login.tailscale.com/
 | ⚡ **Skips what it already has** | Send the same file twice and the second one is instant. |
 | ✏️ **Sends only what changed** | Edit part of a big file, resend, and only that part uploads. |
 | 🔁 **Survives a dropped connection** | Picks up where it stopped, not from zero. |
-| 📬 **Waits for you** | Files sit safely until you pick them up, even days later. |
+| 📬 **Waits for you** | Files sit on your server until a device collects them, then clear themselves. |
 | 🔔 **Tells you** | A notification when something arrives, even with the app closed. |
 | 📱 **Works everywhere** | Installs as an app on phone, tablet and desktop. |
 
@@ -221,6 +221,26 @@ server never being able to read anything.
 
 If it happens, delete Airlock's data folder and start again with a new
 passphrase.
+
+</details>
+
+<details>
+<summary><kbd>How long does a file wait to be collected?</kbd></summary>
+
+<br/>
+
+Ten minutes by default, then the server deletes it and the sender has to send it
+again. The point is that your own machine is not a place files pile up: it holds
+them only long enough to be picked up.
+
+If your devices are not always to hand, give it longer:
+
+```bash
+./airlock --ttl-minutes 1440   # a day
+```
+
+A file that has been saved on a device leaves the queue immediately, without
+waiting for the timer.
 
 </details>
 
@@ -354,7 +374,7 @@ Most people need none of these.
 | --- | --- | --- |
 | `--port` | `443` | Use a different port |
 | `--data` | system folder | Where files are stored |
-| `--ttl-hours` | `24` | How long an uncollected file waits |
+| `--ttl-minutes` | `10` | How long an uncollected file waits before the server deletes it |
 | `--require-approval` | off | New devices must be approved first |
 | `--allow-users` | you | Which Tailscale accounts may connect |
 | `--version` | | Print the version |

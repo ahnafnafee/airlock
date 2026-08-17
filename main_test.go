@@ -251,3 +251,29 @@ func TestIsLoopback(t *testing.T) {
 		}
 	}
 }
+
+// A sweep is what makes the advertised lifetime true. Sweeping hourly against a
+// ten minute life would leave an expired transfer listed for most of an hour,
+// which is the product quietly not keeping the promise its own flag makes.
+func TestSweepRunsOftenEnoughToKeepTheAdvertisedLifetime(t *testing.T) {
+	for _, ttl := range []time.Duration{
+		10 * time.Minute, time.Hour, 24 * time.Hour, 5 * time.Minute,
+	} {
+		every := sweepInterval(ttl)
+		if every > ttl/2 {
+			t.Errorf("a %s life is swept every %s, so it can outlive itself by half again", ttl, every)
+		}
+		if every < 30*time.Second {
+			t.Errorf("a %s life sweeps every %s, which is a busy loop", ttl, every)
+		}
+		if every > time.Hour {
+			t.Errorf("a %s life sweeps every %s, which is longer than any sweep needs to wait", ttl, every)
+		}
+	}
+
+	// A life shorter than the floor still sweeps at the floor rather than
+	// spinning, which costs accuracy on a setting nobody should be using.
+	if got := sweepInterval(time.Second); got != 30*time.Second {
+		t.Errorf("a one second life sweeps every %s, want the 30s floor", got)
+	}
+}

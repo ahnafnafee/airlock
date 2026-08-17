@@ -51,9 +51,28 @@ async function nameOf(t) {
   }
 }
 
+// How many rows one page holds. Every row costs a decryption, so a long history
+// on a phone is both a wall of text and a wall of work; this is what keeps
+// opening the view cheap however much has passed through it.
+export const PAGE = 25;
+
+// Which slice of a list a page number covers, and how many pages there are.
+// Exported because the arithmetic is the behaviour: an off-by-one here shows up
+// as a row nobody can reach.
+export function pageOf(total, page, size = PAGE) {
+  const pages = Math.max(1, Math.ceil(total / size));
+  const at = Math.min(Math.max(1, page), pages);
+  return { page: at, pages, from: (at - 1) * size, to: Math.min(total, at * size) };
+}
+
 registerView('history', 'History', (panel) => {
   const list = el('ul', { class: 'rows' });
-  panel.append(el('h2', {}, 'History'), list);
+  const pager = el('div', { class: 'pager', hidden: true });
+  panel.append(el('h2', {}, 'History'), list, pager);
+  // Which page is on screen, and everything read for it. Held so paging costs
+  // no request: the history is a snapshot of what has already ended.
+  let showing = [];
+  let page = 1;
   load();
   onInbox(() => load());
 
@@ -68,14 +87,26 @@ registerView('history', 'History', (panel) => {
         el('li', { class: 'bad' }, `The history did not load. ${err.message}`));
       return;
     }
-    list.replaceChildren();
+    showing = tombstones;
+    // A reload that shortens the list must not leave the view on a page that no
+    // longer exists, which pageOf settles by clamping.
+    page = pageOf(showing.length, page).page;
+    await paint();
+  }
 
-    if (tombstones.length === 0) {
+  async function paint() {
+    list.replaceChildren();
+    pager.replaceChildren();
+    pager.hidden = true;
+
+    if (showing.length === 0) {
       list.append(el('li', { class: 'muted' }, 'Nothing has expired yet.'));
       return;
     }
 
-    for (const t of tombstones) {
+    const at = pageOf(showing.length, page);
+    page = at.page;
+    for (const t of showing.slice(at.from, at.to)) {
       const direction = t.sender === state.me.node ? 'sent' : `from ${t.sender}`;
       list.append(el('li', {},
         // The text block absorbs the row's free space so a long filename
@@ -84,5 +115,19 @@ registerView('history', 'History', (panel) => {
           el('div', { class: 'name' }, await nameOf(t)),
           el('div', { class: 'data muted' }, `${direction} · cleared ${ago(t.endedAt)}`))));
     }
+
+    if (at.pages === 1) return;
+    const step = (to, label) => {
+      const button = el('button', { class: 'ghost', type: 'button' }, label);
+      if (to < 1 || to > at.pages) button.disabled = true;
+      else button.addEventListener('click', () => { page = to; paint(); });
+      return button;
+    };
+    pager.hidden = false;
+    pager.append(
+      step(at.page - 1, 'Newer'),
+      el('span', { class: 'data muted' },
+        `${at.from + 1} to ${at.to} of ${showing.length}`),
+      step(at.page + 1, 'Older'));
   }
 });

@@ -46,7 +46,16 @@ jobs:
           # Refuse to go backwards or sideways. Publishing a version at or below
           # the newest one already out means whoever downloads "latest" gets
           # something older than the release they just read about.
-          latest="$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name' 2>/dev/null || true)"
+          # A repository with nothing published answers 404 here, and gh prints
+          # that error body on stdout rather than stderr, so the exit status is
+          # the only trustworthy signal. Discarding it left the 404 JSON sitting
+          # in $latest, and every version compared as "not greater than" a blob
+          # of JSON. Anything other than a clean answer reads as nothing
+          # published, which is what an empty repository means anyway.
+          latest=""
+          if answer="$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name' 2>/dev/null)"; then
+            latest="$answer"
+          fi
           if [ -z "$latest" ] || [ "$latest" = "null" ]; then
             echo "No published release yet, so ${version} is the first."
           else

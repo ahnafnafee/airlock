@@ -46,7 +46,8 @@ function stubDocument() {
 
 stubDocument();
 const {
-  bitsSet, cleanLocalTransfer, elsewhereText, progressBitmap, readRow,
+  bitsSet, cleanLocalTransfer, elsewhereText, handedOver, nextSaveName, preferShare,
+  progressBitmap, readRow,
   reconcileLocalTransfers, rowActions, settleAfterSave, terminateTransfer,
 } = await import('./views/inbox.js');
 const { RUNG } = await import('./export.js');
@@ -359,4 +360,132 @@ test('the elsewhere line names every device and only this transfer', () => {
 
 test('a transfer nobody else is saving has nothing to say', () => {
   assert.equal(elsewhereText(ID, new Map()), '');
+});
+
+// Two questions that look like one. Whether a row may be cleared is about what
+// this app can prove; whether the button warns before saving again is about what
+// probably happened. A browser download is unwitnessed, so it may not clear the
+// row, but it did put a file on disk and pressing Save again makes a second copy
+// the browser names "file (2)". Collapsing these into one set gets one of the
+// two behaviours wrong whichever set you pick.
+test('an unwitnessed download still counts as having handed the file over', () => {
+  assert.equal(handedOver(RUNG.DOWNLOAD), true, 'a download did put a file somewhere');
+  assert.equal(settleAfterSaveClears(RUNG.DOWNLOAD), false, 'but it cannot prove it');
+
+  for (const rung of [RUNG.SAVE_PICKER, RUNG.SHARE]) {
+    assert.equal(handedOver(rung), true);
+    assert.equal(settleAfterSaveClears(rung), true, `${rung} resolves against a real outcome`);
+  }
+
+  // A declined export is the one outcome that left the file exactly where it
+  // was, so the next press is a first attempt rather than a second copy.
+  assert.equal(handedOver(RUNG.KEEP), false);
+  assert.equal(settleAfterSaveClears(RUNG.KEEP), false);
+});
+
+// Reads the same rule settleAfterSave applies, without a server or a transfer.
+function settleAfterSaveClears(rung) {
+  return [RUNG.SAVE_PICKER, RUNG.SHARE].includes(rung);
+}
+
+// Which rung a platform takes decides who names the file, and the two name a
+// duplicate differently. Chrome's downloader inserts before the extension, as
+// "file (2).apk". A share target on Android is named by the storage layer, which
+// appends to the whole display name and gives "file.apk (2)", clobbering the
+// extension. The share sheet is right only where there is nothing better.
+test('the share sheet is preferred on iOS and nowhere else', () => {
+  const file = { name: 'x.apk' };
+  const canShare = { canShare: () => true, userAgent: 'x' };
+  const installed = { matchMedia: () => ({ matches: true }), navigator: {} };
+
+  const iphone = { ...canShare, userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)' };
+  assert.equal(preferShare(file, iphone, installed), true, 'iOS has no better rung');
+
+  // Same shape in every other respect, and still the wrong answer, because an
+  // Android download is visible and correctly named.
+  const android = { ...canShare, userAgent: 'Mozilla/5.0 (Linux; Android 15; Pixel 10 Pro)' };
+  assert.equal(preferShare(file, android, installed), false);
+
+  // A browser with a real save picker never needed the share sheet either.
+  const desktop = { matchMedia: () => ({ matches: true }), navigator: {}, showSaveFilePicker() {} };
+  assert.equal(preferShare(file, iphone, desktop), false);
+
+  // In a tab rather than an installed window there is browser chrome, so a
+  // download is visible and the anchor is fine.
+  const tab = { matchMedia: () => ({ matches: false }), navigator: {} };
+  assert.equal(preferShare(file, iphone, tab), false);
+});
+
+function kvPair(initial = undefined) {
+  let value = initial;
+  return {
+    get value() { return value; },
+    kvGet: async () => value,
+    kvPut: async (_k, v) => { value = v; },
+  };
+}
+
+// The platform puts a copy number after the whole display name, which stops an
+// .apk from being an .apk. Numbering it here means the platform is handed a name
+// it does not already have, so it writes what it was asked to.
+test('a repeated save numbers the name itself, before the extension', async () => {
+  const kv = kvPair();
+  const first = await nextSaveName('player2-production.apk', kv);
+  assert.equal(first.name, 'player2-production.apk', 'the first save is just the name');
+  await first.commit();
+
+  const second = await nextSaveName('player2-production.apk', kv);
+  assert.equal(second.name, 'player2-production (2).apk');
+  await second.commit();
+
+  const third = await nextSaveName('player2-production.apk', kv);
+  assert.equal(third.name, 'player2-production (3).apk');
+});
+
+// A number burned by an export nobody completed would leave the next save
+// reading (3) when nothing was ever written as (2).
+test('a save that never happened does not burn a number', async () => {
+  const kv = kvPair();
+  const first = await nextSaveName('holiday.mp4', kv);
+  await first.commit();
+
+  // Offered, then cancelled: no commit.
+  const cancelled = await nextSaveName('holiday.mp4', kv);
+  assert.equal(cancelled.name, 'holiday (2).mp4');
+
+  const retry = await nextSaveName('holiday.mp4', kv);
+  assert.equal(retry.name, 'holiday (2).mp4', 'the same number is offered again');
+});
+
+test('each name is counted separately', async () => {
+  const kv = kvPair();
+  await (await nextSaveName('a.txt', kv)).commit();
+  await (await nextSaveName('a.txt', kv)).commit();
+  assert.equal((await nextSaveName('a.txt', kv)).name, 'a (3).txt');
+  assert.equal((await nextSaveName('b.txt', kv)).name, 'b.txt', 'another name starts fresh');
+});
+
+// The record is a convenience. A store that will not open must not be able to
+// stop a file being saved.
+test('an unreadable numbering record still saves the file', async () => {
+  const broken = {
+    kvGet: async () => { throw new Error('storage is gone'); },
+    kvPut: async () => { throw new Error('storage is gone'); },
+  };
+  const plan = await nextSaveName('report.pdf', broken);
+  assert.equal(plan.name, 'report.pdf', 'it falls back to the plain name');
+  await plan.commit();
+});
+
+// Two saves in flight at once must not let the slower one write back the lower
+// number it read before the other finished.
+test('concurrent saves never move the count backwards', async () => {
+  const kv = kvPair();
+  const a = await nextSaveName('x.bin', kv);
+  await a.commit();
+  const b = await nextSaveName('x.bin', kv);
+  const c = await nextSaveName('x.bin', kv);
+  await c.commit();
+  await b.commit();
+  assert.equal((await nextSaveName('x.bin', kv)).name, 'x (3).bin');
 });

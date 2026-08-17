@@ -87,15 +87,18 @@ func (e *Events) Disconnect(node string) {
 // The send happens under the same lock the release closure takes, which is what
 // keeps a subscription that ends mid-publish from being sent to after its
 // channel is closed.
+// The sender rides along so a recipient's notice can name the device the file
+// came from. It is excluded from delivery and carried in the message, which are
+// two different uses of the same value.
 func (e *Events) Publish(recipients []string, sender string) {
-	e.publish(recipients, sender, "inbox")
+	e.publish(recipients, sender, "inbox:"+sender)
 }
 
 // Nudge tells every affected party to re-read transfer state. Unlike Publish,
 // it deliberately includes the actor: another tab on that same device may be
 // showing the inbox or queue that just changed.
 func (e *Events) Nudge(recipients []string) {
-	e.publish(recipients, "", "inbox")
+	e.publish(recipients, "", "inbox:")
 }
 
 func (e *Events) publish(recipients []string, excluded, message string) {

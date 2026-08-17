@@ -199,7 +199,10 @@ p { text-wrap: pretty; }
   font-weight: 600;
 }
 
-#drop > button:hover { border-color: var(--green); }
+#drop > button:hover {
+  border-color: var(--green);
+  color: var(--green);
+}
 
 /* The claim this product rests on, stated where it becomes true. Green is a
    mark here and not the sentence: the color means sealed, and spending it on a
@@ -255,8 +258,11 @@ button.primary::before {
   mask: var(--icon-lock) center / contain no-repeat;
 }
 
+/* The filled button only. #drop button:hover also matched the outline button
+   beside it, which turned it solid green under dark text the moment a pointer
+   crossed it. */
 button.primary:hover:not(:disabled),
-#drop button:hover { background: var(--green-hot); }
+#drop > div button:hover { background: var(--green-hot); }
 
 button:disabled {
   opacity: 0.48;

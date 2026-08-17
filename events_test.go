@@ -85,7 +85,7 @@ func TestNudgeIncludesEveryAffectedNode(t *testing.T) {
 
 	e.Nudge([]string{"pixel", "desktop"})
 	for node, ch := range map[string]<-chan string{"pixel": pixel, "desktop": desktop} {
-		if got, ok := recv(t, ch); !ok || got != "inbox" {
+		if got, ok := recv(t, ch); !ok || !strings.HasPrefix(got, "inbox") {
 			t.Fatalf("%s stream got %q, ok=%v; want inbox", node, got, ok)
 		}
 	}
@@ -175,7 +175,9 @@ func TestFirstEventsConnectionCatchesUpAcrossResponseSetup(t *testing.T) {
 	s.ServeHTTP(w, r)
 
 	body := w.Body.String()
-	if !strings.Contains(body, "event: inbox\ndata: 1\n\n") {
+	// The catch-up names no sender: whatever is listed was already there before
+	// this stream existed, so it is not an arrival to announce.
+	if !strings.Contains(body, "event: inbox\ndata: \n\n") {
 		t.Fatalf("first stream did not catch up the inbox: %q", body)
 	}
 	if !strings.Contains(body, "event: devices\ndata: 1\n\n") {

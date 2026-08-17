@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -619,7 +620,9 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	// connection closed, which is exactly never.
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprint(w, "event: inbox\ndata: 1\n\n")
+	// The catch-up a fresh stream opens with is not an arrival, so it names no
+	// sender: whatever is listed was already there before this stream existed.
+	fmt.Fprint(w, "event: inbox\ndata: \n\n")
 	flusher.Flush()
 
 	// A periodic comment keeps intermediaries from reaping an idle stream and
@@ -638,7 +641,12 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			if msg == "devices" {
 				fmt.Fprint(w, "event: devices\ndata: 1\n\n")
 			} else {
-				fmt.Fprint(w, "event: inbox\ndata: 1\n\n")
+				// The data field is the sending device's name, and empty when
+				// the nudge is not about an arrival. A device name cannot
+				// contain a newline, so it cannot break the framing this field
+				// rests on.
+				sender, _ := strings.CutPrefix(msg, "inbox:")
+				fmt.Fprintf(w, "event: inbox\ndata: %s\n\n", sender)
 			}
 			flusher.Flush()
 		case <-ping.C:

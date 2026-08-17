@@ -772,7 +772,7 @@ func TestDeleteNudgesTheCallerAndSender(t *testing.T) {
 		t.Fatalf("delete = %d, want 204", code)
 	}
 	for party, ch := range map[string]<-chan string{"caller": desktop, "sender": pixel} {
-		if got, ok := recv(t, ch); !ok || got != "inbox" {
+		if got, ok := recv(t, ch); !ok || !strings.HasPrefix(got, "inbox") {
 			t.Fatalf("%s stream got %q, ok=%v; want inbox", party, got, ok)
 		}
 	}
@@ -831,7 +831,7 @@ func TestTerminalMutationStillSucceedsWhenChunkReclamationFails(t *testing.T) {
 			if _, err := s.cfg.Transfers.Get(id); !errors.Is(err, ErrNotFound) {
 				t.Fatalf("transfer survived its terminal mutation: %v", err)
 			}
-			if got, ok := recv(t, events); !ok || got != "inbox" {
+			if got, ok := recv(t, events); !ok || !strings.HasPrefix(got, "inbox") {
 				t.Fatalf("lifecycle stream got %q, ok=%v; want inbox", got, ok)
 			}
 		})
@@ -1237,7 +1237,7 @@ func TestDeclineNudgesEveryAffectedParty(t *testing.T) {
 		t.Fatalf("decline = %d, want 204", code)
 	}
 	for _, party := range []string{"pixel", "desktop", "laptop"} {
-		if got, ok := recv(t, streams[party]); !ok || got != "inbox" {
+		if got, ok := recv(t, streams[party]); !ok || !strings.HasPrefix(got, "inbox") {
 			t.Fatalf("%s stream got %q, ok=%v; want inbox", party, got, ok)
 		}
 	}
@@ -1398,7 +1398,7 @@ func TestDirectTransferAnnouncesWithoutTheServerHoldingChunks(t *testing.T) {
 
 	select {
 	case got := <-events:
-		if got != "inbox" {
+		if !strings.HasPrefix(got, "inbox") {
 			t.Fatalf("announced %q, want an inbox event", got)
 		}
 	case <-time.After(2 * time.Second):

@@ -288,7 +288,10 @@ export function listen() {
     // rather than the file: the filename lives inside the metadata record and
     // opening it is the inbox's job, not this handler's.
     source.addEventListener('inbox', (event) => {
-      const from = event?.data || '';
+      // The sending device's name, and empty when the nudge is not about an
+      // arrival. It used to read whatever the stream put in this field, which
+      // was the literal "1" the server sent as a placeholder.
+      const from = (event?.data || '').trim();
       const channel = arrivalChannel(globalThis, globalThis.document, subscribed);
       if (channel === 'toast') toast('A file arrived.', { from });
       else if (channel === 'local') showLocalNotice(from);

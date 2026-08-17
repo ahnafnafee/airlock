@@ -126,8 +126,9 @@ registerView('send', 'Send', (panel) => {
   // an empty one read as a panel that had failed to load. This is the line that
   // says what the chamber is for, and it is always here, unlike the drop line
   // above which appears only on an engine that has proved it accepts a drag.
+  const hatch = el('p', { class: 'hatch' }, 'Nothing staged yet');
   const drop = el('div', { id: 'drop' },
-    el('p', { class: 'hatch' }, 'Nothing staged yet'),
+    hatch,
     el('div', {}, dropLine, choose),
     folderButton,
     picker, folder);
@@ -233,6 +234,11 @@ registerView('send', 'Send', (panel) => {
     });
     sendButton.disabled = staged.length === 0;
     sendButton.textContent = staged.length > 1 ? `Send ${staged.length} files` : 'Send';
+    // The chamber says what is in it. It read "Nothing staged yet" over a list
+    // of staged files, which is the one sentence on the screen contradicted by
+    // the screen itself.
+    hatch.textContent = staged.length === 0 ? 'Nothing staged yet'
+      : `${staged.length} ${staged.length === 1 ? 'file' : 'files'} ready to send`;
   };
 
   sendButton.addEventListener('click', async () => {

@@ -441,6 +441,12 @@ registerView('inbox', 'Inbox', (panel) => {
       : null;
 
     const actions = el('div', { class: 'actions' });
+    // Every row offers the same three words, so a screen reader announces "Save,
+    // Decline, Delete" over and over with nothing to say which file is which.
+    // The visible label stays short because the name is already above it; the
+    // accessible name carries the file, because a control read out of its row
+    // has no name above it.
+    const about = (verb) => `${verb} ${name}`;
     const terminalAction = async (verb, mutate) => {
       let outcome;
       try {
@@ -466,7 +472,7 @@ registerView('inbox', 'Inbox', (panel) => {
       // a browser is cannot be detected. Assembling first makes the outcome
       // reportable and the action repeatable.
       const save = el('button', {
-        class: 'ghost', type: 'button',
+        class: 'ghost', type: 'button', 'aria-label': about('Save'),
         onclick: async () => {
           // A save runs for as long as the file is large, and a second one
           // started underneath it would decrypt the same chunks twice.
@@ -500,12 +506,12 @@ registerView('inbox', 'Inbox', (panel) => {
     // wherever the notification was dismissed.
     if (allowedActions.has('decline')) {
       actions.append(el('button', {
-        class: 'ghost', type: 'button',
+        class: 'ghost', type: 'button', 'aria-label': about('Decline'),
         onclick: () => terminalAction('decline', () => api.decline(t.id)),
       }, 'Decline'));
     }
     actions.append(el('button', {
-      class: 'ghost', type: 'button',
+      class: 'ghost', type: 'button', 'aria-label': about('Delete'),
       onclick: () => terminalAction('delete', () => api.deleteTransfer(t.id)),
     }, 'Delete'));
 

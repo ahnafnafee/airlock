@@ -78,6 +78,33 @@ async function record(name) {
 const mark = (name) => markCapability(name).catch(
   (err) => console.warn(`the ${name} receipt was not recorded`, err));
 
+// The browser's offer to install, held until someone asks for it. Single use:
+// the browser issues a fresh one if it is declined.
+let waiting = null;
+
+// Whether this device can be installed right now, which is a stronger claim than
+// the recorded receipt: the receipt survives a reload and the offer does not.
+export const installOffered = () => waiting !== null;
+
+// Spend the offer. Must be called from inside a click, which is the browser's
+// own rule for it. Returns whether the install went ahead, so the caller can
+// say what happened rather than leaving a button that looks broken.
+export async function offerInstall() {
+  const offer = waiting;
+  if (!offer) return false;
+  waiting = null;
+  offer.prompt();
+  try {
+    const { outcome } = await offer.userChoice;
+    // Declined is not an error and not permanent. The browser offers again on a
+    // later visit, and until then the note stands without its button.
+    return outcome === 'accepted';
+  } catch (err) {
+    console.warn('the install prompt did not complete', err);
+    return false;
+  }
+}
+
 export function observeCapabilities({ doc = document, win = window } = {}) {
   // Paste: attached unconditionally and left for a real delivery to prove.
   // Firefox on Android does not implement clipboardData.files at all, so it
@@ -94,7 +121,18 @@ export function observeCapabilities({ doc = document, win = window } = {}) {
 
   // The only honest install signal. It fires in Chromium and never in Firefox or
   // Safari, so an install card cannot appear where installing buys nothing.
-  win.addEventListener('beforeinstallprompt', () => mark('installable'));
+  //
+  // The event is kept rather than only counted, because it is the install: a
+  // browser hands this over once and the app can spend it whenever a person
+  // asks. Nothing calls preventDefault, so whatever the browser wanted to offer
+  // on its own is still offered. This is the path that does not depend on
+  // finding the right entry in a menu that moves between releases.
+  win.addEventListener('beforeinstallprompt', (event) => {
+    waiting = event;
+    mark('installable');
+  });
+  // Installed from anywhere, including the browser's own control, spends it.
+  win.addEventListener('appinstalled', () => { waiting = null; });
 
   // Present in Chromium on the desktop and absent from Chrome on Android, which
   // is the distinction that decides whether an install may promise Open with.

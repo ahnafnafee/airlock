@@ -5,7 +5,9 @@ import { api } from '../api.js';
 import { uploadThroughServer } from '../upload.js';
 import { renderStrip } from '../strip.js';
 import { MODE_SEALED } from '../crypto.js';
-import { capabilities, onCapabilities, installCard, filesFromDrop } from '../inbound.js';
+import {
+  capabilities, onCapabilities, installCard, installOffered, filesFromDrop,
+} from '../inbound.js';
 
 // The value that means every device rather than one. It is a real choice on the
 // list and not the empty value, because empty has to keep meaning "not yet
@@ -141,6 +143,20 @@ registerView('send', 'Send', (panel) => {
 
   const pasteHint = el('p', { class: 'data muted', hidden: true },
     'You can also paste a file into this window.');
+  // The note says what installing buys and the button does it. Chrome moves its
+  // own install entry around between releases and hides it outright on some
+  // builds, so the app carries the control rather than describing where to find
+  // one. Hidden unless the browser has actually offered: a button that cannot
+  // install is worse than no button.
+  const installGo = el('button', {
+    class: 'ghost', type: 'button', hidden: true,
+    onclick: async () => {
+      installGo.disabled = true;
+      const { offerInstall } = await import('../inbound.js');
+      if (!await offerInstall()) installGo.hidden = true;
+      installGo.disabled = false;
+    },
+  }, 'Install');
   const installNote = el('p', { class: 'data muted', hidden: true });
 
   // Every destination visible at once, rather than one behind a dropdown. A
@@ -193,6 +209,7 @@ registerView('send', 'Send', (panel) => {
     seal,
     pasteHint,
     installNote,
+    installGo,
     el('p', { class: 'label' }, 'To'),
     recipient,
     // Above the list rather than below it. Twenty staged files put the only
@@ -470,6 +487,9 @@ registerView('send', 'Send', (panel) => {
     const card = installCard(caps);
     installNote.hidden = card === null;
     installNote.textContent = card || '';
+    // The receipt outlives the offer: a device that was installable last visit
+    // says so on this one, and only a live offer can act.
+    installGo.hidden = card === null || !installOffered();
   };
   onCapabilities(paintInbound);
   capabilities().then(paintInbound).catch(() => {});

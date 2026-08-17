@@ -157,11 +157,6 @@ function enterApp() {
   // The switcher is meaningless before this point and the bar carries it on
   // every screen, including the ones that come before a passphrase exists.
   document.body.dataset.app = 'on';
-  // Before the first view is shown, so a drag already under way when the app
-  // opens is the one that draws the drop zone. These listeners only record what
-  // this browser turns out to be able to do; the send view attaches its own to
-  // act on it.
-  observeCapabilities();
   const first = location.hash.slice(1);
   showView(views.has(first) ? first : views.keys().next().value);
   // The hash is a view's address, so it has to be read as well as written.
@@ -713,6 +708,11 @@ async function boot() {
   // well, and a person who cannot get past those should still be able to read
   // them.
   wireTheme();
+  // Also before the gates. A browser offers to install once, a few hundred
+  // milliseconds after the page loads, and an offer nobody was listening for is
+  // gone: attaching this after a passphrase is typed is attaching it minutes
+  // too late.
+  observeCapabilities();
   if (!secureEnough()) {
     const where = $('insecure-origin');
     if (where) where.textContent = location.origin;

@@ -29,6 +29,7 @@ import (
 //go:embed web/assemble.js web/assemble-worker.js web/export.js web/inbound.js web/ios.js
 //go:embed web/fonts
 //go:embed web/manifest.webmanifest web/icon-mark.png web/wordmark-light.png web/wordmark-dark.png web/icon-192.png web/icon-512.png web/icon-maskable.png web/icon-badge.png
+//go:embed web/screenshot-wide.png web/screenshot-narrow.png
 var webFS embed.FS
 
 // Set at build time with -X main.version. A build made any other way says so

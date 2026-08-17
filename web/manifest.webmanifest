@@ -2,6 +2,7 @@
   "name": "Airlock",
   "short_name": "Airlock",
   "description": "Encrypted file transfer between your own devices",
+  "id": "/",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
@@ -11,6 +12,22 @@
     { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
     { "src": "/icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "screenshots": [
+    {
+      "src": "/screenshot-wide.png",
+      "sizes": "2880x1800",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Files staged to send, with the destination chosen and the note that they are sealed on this device"
+    },
+    {
+      "src": "/screenshot-narrow.png",
+      "sizes": "1236x2700",
+      "type": "image/png",
+      "form_factor": "narrow",
+      "label": "Airlock on a phone, with files staged to send above the Send, Inbox, History and Devices bar"
+    }
   ],
   "share_target": {
     "action": "/share",

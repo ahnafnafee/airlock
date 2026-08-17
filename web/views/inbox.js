@@ -108,19 +108,39 @@ export function progressBitmap(done, total) {
 // to fail a save, so every error here is swallowed. The server refuses updates
 // that arrive too fast; this keeps them from being sent in the first place, so
 // the common case costs no request rather than a refused one.
-function progressPublisher(transferId, put = api.putProgress, now = () => Date.now()) {
+export function progressPublisher(transferId, put = api.putProgress, now = () => Date.now()) {
   let last = 0;
-  return (done, total) => {
-    if (!total) return;
-    // The last chunk always reports, whatever the clock says, or the final
-    // state another device is left looking at is whatever the last tick
-    // happened to catch.
-    const finished = done >= total;
-    if (!finished && now() - last < 1000) return;
-    last = now();
-    Promise.resolve()
-      .then(() => put(transferId, progressBitmap(done, total)))
-      .catch(() => {});
+  let chunks = 0;
+  const send = (bitmap) => {
+    Promise.resolve().then(() => put(transferId, bitmap)).catch(() => {});
+  };
+  return {
+    report(done, total) {
+      if (!total) return;
+      chunks = total;
+      // The last chunk always reports, whatever the clock says, or the final
+      // state another device is left looking at is whatever the last tick
+      // happened to catch.
+      const finished = done >= total;
+      if (!finished && now() - last < 1000) return;
+      last = now();
+      send(progressBitmap(done, total));
+    },
+    // A save that stopped part way leaves nothing another device can use: a
+    // retry truncates the output and starts from the first chunk, so the bytes
+    // it had counted are gone. Without this the last figure it managed to
+    // publish stands forever, and a row goes on reporting a file as most of the
+    // way there when nothing is coming.
+    //
+    // Zero rather than a deletion, because the endpoint's contract is a bitmap
+    // whose length matches the chunk list, and a device that has nothing is
+    // exactly what all-zero says. Nothing is sent if no figure was ever
+    // published; there would be nothing to take back.
+    withdraw() {
+      if (!chunks) return;
+      last = 0;
+      send(progressBitmap(0, chunks));
+    },
   };
 }
 
@@ -138,9 +158,14 @@ export const bitsSet = (bytes) => {
 // every row on every nudge, and a figure that died with its element would blank
 // itself each time somebody else's save happened to arrive.
 const elsewhere = new Map();
-// The element showing that line, and the chunk count it is measured against,
-// per transfer on screen. Rebuilt with the rows.
+// The element showing that line, per transfer on screen. Rebuilt with the rows.
 const elsewhereShown = new Map();
+// What each transfer's figures are measured against. Kept apart from the
+// elements on purpose: an event about a transfer whose row is not currently
+// drawn, because another view is open, must still be recorded rather than
+// dropped, or switching to the inbox would show nothing until the next tick of
+// somebody else's save.
+const elsewhereChunks = new Map();
 
 const elsewhereKey = (id, node) => `${id}:${node}`;
 
@@ -160,22 +185,22 @@ export function elsewhereText(id, at = elsewhere) {
 }
 
 function paintElsewhere(id) {
-  const shown = elsewhereShown.get(id);
-  if (!shown) return;
+  const el = elsewhereShown.get(id);
+  if (!el) return;
   const text = elsewhereText(id);
-  shown.el.textContent = text;
-  shown.el.hidden = text === '';
+  el.textContent = text;
+  el.hidden = text === '';
 }
 
 // Read one device's progress on one transfer. The stream said only that it
 // changed; the figure comes from the endpoint that scopes it to the people
 // entitled to the transfer, so a device that cannot see it learns nothing.
 async function readElsewhere(id, node, get = api.getProgress) {
-  const shown = elsewhereShown.get(id);
-  if (!shown?.chunks) return;
+  const chunks = elsewhereChunks.get(id);
+  if (!chunks) return;
   try {
     const bitmap = new Uint8Array(await get(id, node));
-    const percent = Math.min(100, Math.floor((bitsSet(bitmap) * 100) / shown.chunks));
+    const percent = Math.min(100, Math.floor((bitsSet(bitmap) * 100) / chunks));
     elsewhere.set(elsewhereKey(id, node), percent);
     paintElsewhere(id);
   } catch {
@@ -194,6 +219,11 @@ async function saveTransfer(transferId, meta = null, onPercent = null) {
   await transfersActive(1);
   try {
     return await runSave(transferId, meta, onPercent, assembleTransfer, publish);
+  } catch (err) {
+    // Ended without finishing, so whatever figure the other devices are showing
+    // is now a claim about a file that is not arriving.
+    publish.withdraw();
+    throw err;
   } finally {
     await transfersActive(-1);
   }
@@ -208,10 +238,18 @@ async function runSave(transferId, meta, onPercent, assembleTransfer, publish) {
     meta,
     onPercent: (percent, done, total) => {
       onPercent?.(percent);
-      publish(done, total);
+      publish.report(done, total);
     },
   });
-  return exportFile(file, { preferShare: preferShare(file) });
+  const rung = await exportFile(file, { preferShare: preferShare(file) });
+  // Only where the file actually reached somewhere, which is the same evidence
+  // settleAfterSave clears the row on. A cancelled export and a hand-off with
+  // no receipt both leave the person still deciding, and a completion sound
+  // would tell them it was over.
+  if (SAVED.has(rung)) {
+    import('../chime.js').then(({ chime }) => chime('saved')).catch(() => {});
+  }
+  return rung;
 }
 
 function humanSize(bytes) {
@@ -545,6 +583,9 @@ registerView('inbox', 'Inbox', (panel) => {
     for (const key of [...elsewhere.keys()]) {
       if (!listed.has(key.slice(0, key.indexOf(':')))) elsewhere.delete(key);
     }
+    for (const id of [...elsewhereChunks.keys()]) {
+      if (!listed.has(id)) elsewhereChunks.delete(id);
+    }
     for (const t of transfers) {
       rows.push(await row(t, minted, ready));
     }
@@ -617,9 +658,17 @@ registerView('inbox', 'Inbox', (panel) => {
     // rather than part of the detail, because the detail belongs to this device
     // and the two change for entirely unrelated reasons.
     const elsewhereNode = el('div', { class: 'data muted', hidden: true });
-    elsewhereShown.set(t.id, { el: elsewhereNode, chunks: t.chunkCount });
-    // Painted immediately from anything already known, so a row that repaints
-    // mid-save comes back with the figure rather than blank until the next tick.
+    elsewhereShown.set(t.id, elsewhereNode);
+    elsewhereChunks.set(t.id, t.chunkCount);
+    // Seeded from what the server already knows, not just from events yet to
+    // arrive. A save that finished before this page was opened, or while
+    // another view was on screen, has no event coming, and without this the row
+    // would stay silent about a file that has already landed elsewhere.
+    for (const [node, count] of Object.entries(t.saved || {})) {
+      if (!t.chunkCount) continue;
+      elsewhere.set(elsewhereKey(t.id, node),
+        Math.min(100, Math.floor((count * 100) / t.chunkCount)));
+    }
     paintElsewhere(t.id);
 
     const actions = el('div', { class: 'actions' });

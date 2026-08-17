@@ -21,7 +21,30 @@ globalThis.document = {
 globalThis.addEventListener = () => {};
 globalThis.location = { hash: '' };
 
-const { PAGE, pageOf } = await import('./views/history.js');
+const { PAGE, pageOf, took } = await import('./views/history.js');
+
+// A row that says how long a send took is the only place the numbers behind a
+// "why was that slow" question are ever visible, so the reading has to stay
+// honest at both ends of the range.
+test('a duration reads at a resolution worth acting on', () => {
+  assert.equal(took(0), '0.0s');
+  assert.equal(took(3240), '3.2s');
+  assert.equal(took(9949), '9.9s');
+  // Tenths stop mattering once a send is long enough to walk away from.
+  assert.equal(took(10000), '10s');
+  assert.equal(took(42600), '43s');
+  assert.equal(took(60000), '1m 00s');
+  assert.equal(took(125400), '2m 05s');
+});
+
+// A transfer sent before the sender recorded timings, or a record that would not
+// open, has no duration. The row must drop it rather than claim it took no time.
+test('a missing or nonsense duration is absent, not zero', () => {
+  assert.equal(took(null), null);
+  assert.equal(took(undefined), null);
+  assert.equal(took(NaN), null);
+  assert.equal(took(-1), null);
+});
 
 // The arithmetic is the behaviour. An off-by-one here is a row nobody can reach.
 test('a page covers the slice it names, and the last one is short', () => {

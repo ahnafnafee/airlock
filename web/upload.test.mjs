@@ -302,9 +302,15 @@ test('an empty file sends its sealed records without inventing a chunk', async (
   assert.deepEqual(api.calls.records.map((x) => x.kind), ['chunklist', 'meta']);
   assert.equal(result.total, 0);
   assert.equal(result.sent, 0);
-  assert.deepEqual(await sealedMeta(api), {
+  const { sentMs, ...described } = await sealedMeta(api);
+  assert.deepEqual(described, {
     name: 'empty.txt', size: 0, mime: 'application/octet-stream',
   });
+  // Separated out because it is the one field that cannot be asserted by value.
+  // It still has to be there and still has to be a duration: History reads it,
+  // and a string or a negative number would render as a nonsense row.
+  assert.equal(typeof sentMs, 'number');
+  assert.ok(sentMs >= 0);
 });
 
 test('progress reports how many chunks are on the wire', async () => {

@@ -157,6 +157,11 @@ async function begin(file, opts) {
 export async function uploadThroughServer(file, opts) {
   const { mk, mode, cdc, api, onProgress = () => {} } = opts;
 
+  // Before the first read, so what is recorded is the send the person watched:
+  // naming every chunk is part of the wait even though it happens before the
+  // transfer exists. The server's own clock cannot see this half, because the
+  // transfer is not created until the first pass has finished.
+  const started = Date.now();
   const { ids, sizes, id, missing } = await begin(file, opts);
   try {
     const wanted = new Set(missing);
@@ -222,7 +227,7 @@ export async function uploadThroughServer(file, opts) {
 
     // Metadata is the announcement trigger. Publish it only after every held
     // chunk and supporting record is ready, so the first Inbox repaint can save.
-    await uploadRecords(api, mk, mode, id, file, ids.map((x) => x.h));
+    await uploadRecords(api, mk, mode, id, file, ids.map((x) => x.h), started);
 
     return progress;
   } catch (err) {
@@ -235,11 +240,17 @@ export async function uploadThroughServer(file, opts) {
   }
 }
 
-async function uploadRecords(api, mk, mode, id, file, hashes) {
+async function uploadRecords(api, mk, mode, id, file, hashes, started) {
   const meta = await sealRecord(mk, mode, DOMAIN.META, id, enc(JSON.stringify({
     name: file.name,
     size: file.size,
     mime: file.type || 'application/octet-stream',
+    // How long the send took, sealed with the name rather than kept beside it.
+    // The server could time this itself and would then hold a per-transfer
+    // record of who was uploading when, which is exactly the kind of thing this
+    // product exists not to hand it. A reader who can open the name can already
+    // see everything this adds.
+    sentMs: Date.now() - started,
   })));
   const list = await sealRecord(mk, mode, DOMAIN.LIST, id, packHashes(hashes));
 

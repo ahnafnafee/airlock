@@ -17,6 +17,16 @@ import { openChunk } from './crypto.js';
 const ASSEMBLED = 'assembled';
 const TRANSFER_ID = /^[0-9a-f]{32}$/;
 
+// How many chunk reads are in the air at once. A chunk the server holds is a
+// round trip away, and fetching them one at a time pays that latency once per
+// chunk with the link otherwise idle: the floor for a thousand-chunk file is a
+// thousand round trips no matter how fast the wire is. That cost is invisible
+// when the server is on the same LAN and dominates the save the moment it is
+// not. Four matches the uploader's concurrency, so a save and a send buffer the
+// same worst case, and peak memory here stays at this many maximum-sized chunks
+// plus the one being decrypted.
+export const READAHEAD = 4;
+
 async function assembledDir(root) {
   const base = root || await navigator.storage.getDirectory();
   return base.getDirectoryHandle(ASSEMBLED, { create: true });
@@ -198,20 +208,31 @@ export async function assemble(transferId, meta, {
   try {
     access.truncate(0);
     let at = 0;
-    // A server-held chunk may be one tailnet round trip away. Start the next
-    // read before opening and writing the current chunk so network latency is
-    // no longer strictly serialized with that work. One read ahead keeps memory
-    // bounded to the current and next maximum-sized chunks.
+    // A server-held chunk may be one round trip away, so several reads are kept
+    // in the air at once and the output is written from them in order. A window
+    // rather than a single read ahead: one read ahead overlaps the latency with
+    // this chunk's decrypt and write, which takes microseconds, so the link
+    // still sits idle for a whole round trip per chunk.
     const read = (i) => {
       if (i >= hashes.length) return null;
       const pending = Promise.resolve().then(() => stage.get(i));
+      // A read that fails several chunks before the loop reaches it has nothing
+      // awaiting it yet, and would surface as an unhandled rejection rather
+      // than as the failure the await below is about to rethrow.
       pending.catch(() => {});
       return pending;
     };
-    let ahead = read(0);
+    const queue = [];
+    let next = 0;
+    const fill = () => {
+      while (queue.length < READAHEAD && next < hashes.length) queue.push(read(next++));
+    };
+    fill();
     for (let i = 0; i < hashes.length; i++) {
-      const pending = ahead;
-      ahead = read(i + 1);
+      const pending = queue.shift();
+      // Topped up before awaiting, so the window stays full while this chunk is
+      // decrypted and written rather than refilling only once it has landed.
+      fill();
       const sealed = await pending;
       // Throws if the chunk was substituted or corrupted, so a damaged transfer
       // fails here rather than producing a plausible wrong file.

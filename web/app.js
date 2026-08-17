@@ -397,6 +397,69 @@ async function subscribePush() {
   }
 }
 
+// Named rather than taken as a default argument value, because evaluating
+// `localStorage` where there is none throws before any try block around the call
+// can catch it, and this module is imported by tests that run outside a browser.
+const themeStore = () => globalThis.localStorage || null;
+const themeRoot = () => globalThis.document?.documentElement || { dataset: {} };
+
+// The three answers a person can give about appearance, in the order the button
+// cycles them. "system" is first because following the device is the right
+// default and the one most people never move off.
+export const THEMES = ['system', 'light', 'dark'];
+
+const THEME_LABEL = {
+  system: 'Theme: follow the system',
+  light: 'Theme: light',
+  dark: 'Theme: dark',
+};
+
+// What comes after this one. Exported because the order is the behaviour, and a
+// test that restates it would pass against any order at all.
+export function nextTheme(current) {
+  const at = THEMES.indexOf(current);
+  return THEMES[(at + 1) % THEMES.length];
+}
+
+// "system" is the absence of a choice rather than a third value to record, so it
+// clears the attribute and lets prefers-color-scheme decide. Anything stored
+// that is not a theme is treated as no choice, because a value from another
+// version of this app must not leave the interface in a state with no name.
+export function applyTheme(choice, root = themeRoot(), store = themeStore()) {
+  const theme = THEMES.includes(choice) ? choice : 'system';
+  if (theme === 'system') delete root.dataset.theme;
+  else root.dataset.theme = theme;
+  try {
+    if (theme === 'system') store?.removeItem('airlock-theme');
+    else store?.setItem('airlock-theme', theme);
+  } catch {
+    // Storage refused, so the choice lasts for this page and no longer. Worth
+    // less than refusing to change the theme at all.
+  }
+  return theme;
+}
+
+export function storedTheme(store = themeStore()) {
+  try {
+    const saved = store?.getItem('airlock-theme');
+    return THEMES.includes(saved) ? saved : 'system';
+  } catch {
+    return 'system';
+  }
+}
+
+function wireTheme() {
+  const button = globalThis.document?.getElementById?.('theme');
+  if (!button) return;
+  let choice = storedTheme();
+  const paint = () => { button.setAttribute('aria-label', THEME_LABEL[choice]); };
+  paint();
+  button.addEventListener('click', () => {
+    choice = applyTheme(nextTheme(choice));
+    paint();
+  });
+}
+
 // How long a notice stays up. Long enough to read a filename without looking for
 // it, short enough that a run of arrivals does not build a wall.
 export const TOAST_MS = 6000;
@@ -589,6 +652,11 @@ export function secureEnough(scope = globalThis) {
 }
 
 async function boot() {
+  // First, and before every gate below. The toggle lives in the header, which is
+  // the one element on screen during the insecure-origin and install screens as
+  // well, and a person who cannot get past those should still be able to read
+  // them.
+  wireTheme();
   if (!secureEnough()) {
     const where = $('insecure-origin');
     if (where) where.textContent = location.origin;

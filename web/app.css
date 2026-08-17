@@ -2,34 +2,34 @@
 
 html {
   min-height: 100%;
-  background: var(--hull);
+  background: var(--ground);
 }
 
 body {
   min-height: 100vh;
   margin: 0;
-  background: var(--hull);
-  color: var(--pressure);
+  background: var(--ground);
+  color: var(--ink);
   font: var(--prose)/1.55 var(--sans);
   -webkit-font-smoothing: antialiased;
   -webkit-text-size-adjust: 100%;
 }
 
-a { color: var(--seal); }
-a:hover { color: #7FE0C0; }
+a { color: var(--green); }
+a:hover { color: var(--green-hot); }
 
 .label {
-  color: var(--faint);
-  font: 600 var(--stencil)/1.25 var(--sans);
-  letter-spacing: var(--track-stencil);
+  color: var(--ink-faint);
+  font: 600 var(--label)/1.25 var(--sans);
+  letter-spacing: var(--track-label);
 }
 
 .data {
-  font: 500 var(--data)/1.5 var(--utility);
+  font: 500 var(--data)/1.5 var(--mono);
 }
 
 .data.key { font-weight: 700; }
-.muted { color: var(--vapor); }
+.muted { color: var(--ink-soft); }
 .bad { color: var(--breach); }
 
 /* An offer the reader may take or ignore. It sits inside the chamber rather than
@@ -39,14 +39,13 @@ a:hover { color: #7FE0C0; }
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
-  margin: 0 0 18px;
-  padding: 12px 14px;
-  background: var(--chamber);
-  /* Seam, not sodium: the signal colors each carry one meaning across the whole
-     app, and an offer is neither in transit nor sealed nor a failure. */
-  border-left: 2px solid var(--control-seam);
+  margin: 0 0 20px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
 }
-.sealed { color: var(--seal); }
+.sealed { color: var(--sealed); }
 
 header {
   display: flex;
@@ -58,8 +57,8 @@ header {
     calc(16px + env(safe-area-inset-right, 0px))
     14px
     calc(16px + env(safe-area-inset-left, 0px));
-  border-bottom: 1px solid var(--seam);
-  background: var(--chamber);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
 }
 
 .wordmark {
@@ -67,7 +66,7 @@ header {
   align-items: center;
   gap: 11px;
   margin: 0;
-  color: var(--pressure);
+  color: var(--ink);
   font: 800 var(--wordmark)/1 var(--display);
   letter-spacing: var(--track-mark);
   text-transform: uppercase;
@@ -90,7 +89,7 @@ header {
   min-width: 0;
   margin-left: auto;
   overflow: hidden;
-  color: var(--faint);
+  color: var(--ink-faint);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -119,9 +118,9 @@ body > section main { max-width: 632px; }
 
 h2 {
   margin: 0 0 clamp(20px, 2.6vw, 30px);
-  color: var(--pressure);
-  font: 800 var(--panel)/1 var(--display);
-  letter-spacing: var(--track-panel);
+  color: var(--ink);
+  font: 800 var(--title)/1 var(--display);
+  letter-spacing: var(--track-title);
   text-wrap: pretty;
 }
 
@@ -129,75 +128,78 @@ p { text-wrap: pretty; }
 
 /* The drop target is a pressure chamber, not a dashed upload widget. */
 #drop {
-  padding: clamp(28px, 5vw, 62px) clamp(18px, 3vw, 40px);
-  border: 1px solid var(--control-seam);
-  background: var(--chamber);
-  color: var(--pressure);
+  padding: clamp(30px, 5vw, 54px) clamp(18px, 3vw, 40px);
+  /* Dashed, because the border is saying "put something here" rather than
+     drawing an edge. */
+  border: 1.5px dashed var(--line-strong);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  color: var(--ink);
   text-align: center;
-  transition: border-color 120ms ease, background 120ms ease;
+  transition: border-color 140ms ease, background 140ms ease;
 }
 
 #drop.over {
-  border-color: var(--sodium);
-  background: var(--hull-active);
+  border-color: var(--green);
+  background: var(--green-wash);
 }
 
-/* The empty chamber, drawn as the segments a file becomes. A blank rectangle
-   here read as a missing element rather than as a vessel waiting to be filled,
-   so the bar now shows the chunk strip's own vocabulary before there is a
-   transfer to show it on. */
+/* The action, drawn. An empty chamber previously showed a bar of segments,
+   which is the vocabulary of a transfer in progress and meant nothing before
+   one existed. This says what the box is for instead. Masked rather than drawn
+   as an image so it takes the accent color in either theme, and inlined so it
+   paints with no request. */
 #drop::before {
   content: "";
   display: block;
-  width: 100%;
-  max-width: 520px;
-  height: 34px;
-  margin: 0 auto 20px;
-  border: 1px solid var(--seam);
-  background:
-    repeating-linear-gradient(
-      to right,
-      var(--hull) 0 26px,
-      var(--seam) 26px 29px);
-  opacity: 0.6;
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 16px;
+  background: var(--green);
+  -webkit-mask: var(--icon-upload) center / contain no-repeat;
+  mask: var(--icon-upload) center / contain no-repeat;
 }
 
 .hatch {
   margin: 0 0 4px;
-  color: var(--pressure);
+  color: var(--ink);
   font: 700 clamp(1.25rem, 2.4vw, 1.6rem)/1.25 var(--display);
-  letter-spacing: var(--track-panel);
+  letter-spacing: var(--track-title);
 }
 
 /* The line under the headline. It was set in display type, which put two
    competing headlines in the chamber and read as a layout fault rather than as
    an instruction and its alternative. */
 #drop > div {
-  color: var(--vapor);
+  color: var(--ink-soft);
   font: 500 var(--prose)/1.5 var(--sans);
 }
 
 #drop button {
-  min-height: 48px;
-  margin: 22px auto 0;
-  padding: 14px 24px;
+  min-height: 44px;
+  margin: 18px auto 0;
+  padding: 12px 22px;
   border: 0;
-  background: var(--pressure);
-  color: var(--hull);
-  font: 700 15px/1.2 var(--sans);
+  border-radius: var(--r-sm);
+  background: var(--green);
+  color: var(--on-green);
+  font: 650 14.5px/1.2 var(--sans);
   cursor: pointer;
+  transition: background 120ms ease;
 }
 
 #drop > div button { display: block; }
 
 #drop > button {
   min-height: 44px;
-  margin-top: 8px;
-  border: 1px solid var(--control-seam);
-  background: transparent;
-  color: var(--pressure);
+  margin-top: 10px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
   font-weight: 600;
 }
+
+#drop > button:hover { border-color: var(--green); }
 
 /* The claim this product rests on, stated where it becomes true. Green is a
    mark here and not the sentence: the color means sealed, and spending it on a
@@ -208,7 +210,7 @@ p { text-wrap: pretty; }
   justify-content: center;
   gap: 9px;
   margin: 11px 0 22px;
-  color: var(--vapor);
+  color: var(--ink-soft);
   font: 500 13.5px/1.55 var(--sans);
   letter-spacing: 0;
 }
@@ -219,21 +221,40 @@ p { text-wrap: pretty; }
   height: 11px;
   flex: none;
   margin-top: 5px;
-  background: var(--seal);
+  background: var(--sealed);
 }
 
+/* The one action on a screen that commits something. It is the accent, and it
+   carries the mark that says what committing means here. */
 button.primary {
-  min-height: 50px;
-  padding: 15px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 48px;
+  padding: 14px 24px;
   border: 0;
-  background: var(--pressure);
-  color: var(--hull);
-  font: 700 15px/1.2 var(--sans);
+  border-radius: var(--r-sm);
+  background: var(--green);
+  color: var(--on-green);
+  font: 650 15px/1.2 var(--sans);
   cursor: pointer;
+  transition: background 120ms ease;
+}
+
+button.primary::before {
+  content: "";
+  width: 15px;
+  height: 15px;
+  flex: none;
+  background: currentColor;
+  -webkit-mask: var(--icon-lock) center / contain no-repeat;
+  mask: var(--icon-lock) center / contain no-repeat;
 }
 
 button.primary:hover:not(:disabled),
-#drop button:hover { background: #FFFFFF; }
+#drop button:hover { background: var(--green-hot); }
 
 button:disabled {
   opacity: 0.48;
@@ -241,24 +262,30 @@ button:disabled {
 }
 
 .ghost {
-  min-height: 44px;
-  padding: 11px 16px;
-  border: 1px solid var(--control-seam);
-  background: transparent;
-  color: var(--pressure);
+  min-height: 40px;
+  padding: 9px 15px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink);
   font: 600 13.5px/1.2 var(--sans);
   cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease;
 }
 
-.ghost:hover { border-color: var(--pressure); }
+.ghost:hover {
+  border-color: var(--green);
+  color: var(--green);
+}
 
 .choice {
   display: flex;
   align-items: flex-start;
   gap: 12px;
   padding: 16px;
-  border: 1px solid var(--seam);
-  background: var(--chamber);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
   cursor: pointer;
 }
 
@@ -267,7 +294,7 @@ button:disabled {
   height: 17px;
   flex: none;
   margin: 3px 0 0;
-  accent-color: var(--seal);
+  accent-color: var(--sealed);
 }
 
 .choice .data {
@@ -281,25 +308,71 @@ select {
   width: 100%;
   min-height: 50px;
   padding: 13px 15px;
-  border: 1px solid var(--control-seam);
-  border-radius: 0;
-  background: var(--hull);
-  color: var(--pressure);
-  font: 500 15px/1.2 var(--utility);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font: 500 15px/1.2 var(--mono);
+  transition: border-color 120ms ease;
 }
 
-select { background-color: var(--chamber); }
+input[type="password"]:hover,
+input[type="text"]:hover,
+select:hover { border-color: var(--green); }
 
 :focus-visible {
-  outline: 2px solid var(--pressure);
+  outline: 2px solid var(--green);
   outline-offset: 2px;
+}
+
+/* Three states, one control: follow the system, force light, force dark. It sits
+   in the header because that is the one element every screen has, including the
+   ones before a passphrase exists. */
+#theme {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+#theme:hover {
+  border-color: var(--green);
+  color: var(--green);
+}
+
+#theme::before {
+  content: "";
+  width: 17px;
+  height: 17px;
+  background: currentColor;
+  -webkit-mask: var(--icon-auto) center / contain no-repeat;
+  mask: var(--icon-auto) center / contain no-repeat;
+}
+
+:root[data-theme="light"] #theme::before {
+  -webkit-mask-image: var(--icon-sun);
+  mask-image: var(--icon-sun);
+}
+
+:root[data-theme="dark"] #theme::before {
+  -webkit-mask-image: var(--icon-moon);
+  mask-image: var(--icon-moon);
 }
 
 #unlock-form {
   margin-top: 28px;
   padding: clamp(18px, 2.4vw, 26px);
-  border: 1px solid var(--seam);
-  background: var(--chamber);
+  border: 1px solid var(--line);
+  background: var(--surface);
 }
 
 #unlock-form p { margin: 0 0 14px; }
@@ -310,8 +383,8 @@ select { background-color: var(--chamber); }
 #pairing-strip {
   margin-top: 28px;
   padding: 4px;
-  border: 1px solid var(--seam);
-  background: var(--chamber);
+  border: 1px solid var(--line);
+  background: var(--surface);
 }
 
 #pairing-strip > .strip {
@@ -333,15 +406,15 @@ select { background-color: var(--chamber); }
   align-items: center;
   gap: 16px;
   padding: 18px 20px;
-  border: 1px solid var(--seam);
-  background: var(--chamber);
+  border: 1px solid var(--line);
+  background: var(--surface);
   counter-increment: install-step;
 }
 
 #install li::before {
   content: counter(install-step);
   flex: none;
-  color: var(--vapor);
+  color: var(--ink-soft);
   font: 800 26px/1 var(--display);
 }
 
@@ -350,33 +423,50 @@ nav {
   z-index: 20;
   inset: auto 0 0;
   display: flex;
-  border-top: 1px solid var(--seam);
-  background: var(--chamber);
+  border-top: 1px solid var(--line);
+  background: var(--surface);
   padding-right: env(safe-area-inset-right, 0px);
   padding-bottom: env(safe-area-inset-bottom, 0px);
   padding-left: env(safe-area-inset-left, 0px);
 }
 
 nav button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   min-width: 0;
-  min-height: 54px;
+  min-height: 56px;
   flex: 1;
-  padding: 14px 4px;
+  padding: 9px 4px;
   border: 0;
-  border-top: 3px solid transparent;
   background: transparent;
-  color: var(--vapor);
-  font: 600 13px/1.2 var(--sans);
+  color: var(--ink-soft);
+  font: 600 11.5px/1.2 var(--sans);
   cursor: pointer;
 }
 
-nav button:hover { color: var(--pressure); }
-
-nav button[aria-current="page"] {
-  border-top-color: var(--pressure);
-  background: var(--hull-active);
-  color: var(--pressure);
+/* Each view's own mark, so the bar can be read at a glance rather than word by
+   word. The name is set from a data attribute the shell already carries. */
+nav button::before {
+  content: "";
+  width: 20px;
+  height: 20px;
+  flex: none;
+  background: currentColor;
+  -webkit-mask: var(--icon) center / contain no-repeat;
+  mask: var(--icon) center / contain no-repeat;
 }
+
+nav button[data-view="send"] { --icon: var(--icon-send); }
+nav button[data-view="inbox"] { --icon: var(--icon-inbox); }
+nav button[data-view="history"] { --icon: var(--icon-history); }
+nav button[data-view="devices"] { --icon: var(--icon-devices); }
+
+nav button:hover { color: var(--ink); }
+
+nav button[aria-current="page"] { color: var(--green); }
 
 .sr-only {
   position: absolute;
@@ -400,8 +490,8 @@ nav button[aria-current="page"] {
   height: var(--strip);
   margin: 18px 0 8px;
   padding: 4px;
-  border: 1px solid var(--seam);
-  background: var(--hull);
+  border: 1px solid var(--line);
+  background: var(--ground);
 }
 
 /* A segment holds its own ground rather than collapsing: below about four
@@ -413,19 +503,19 @@ nav button[aria-current="page"] {
 .seg {
   min-width: var(--seg-min, 3px);
   flex: 1 1 0;
-  background: var(--seam);
+  background: var(--line);
 }
 
 .seg.held {
   background: transparent;
-  box-shadow: inset 0 0 0 1.5px var(--seal);
+  box-shadow: inset 0 0 0 1.5px var(--sealed);
   animation: pressure-in 120ms ease both;
 }
 
-.seg.stored { background: var(--seal); }
+.seg.stored { background: var(--sealed); }
 
 .seg.sending {
-  background: linear-gradient(to top, var(--sodium) 0 64%, var(--seam) 64% 100%);
+  background: linear-gradient(to top, var(--transit) 0 64%, var(--line) 64% 100%);
   animation: pressure 1.9s ease-in-out infinite;
 }
 
@@ -442,8 +532,8 @@ nav button[aria-current="page"] {
   justify-content: space-between;
   margin-top: 8px;
   padding: 0 1px;
-  color: var(--faint);
-  font: 500 var(--stencil)/1.2 var(--data-face, var(--display));
+  color: var(--ink-faint);
+  font: 500 var(--label)/1.2 var(--data-face, var(--display));
 }
 
 .ruler > span { white-space: nowrap; }
@@ -465,13 +555,13 @@ nav button[aria-current="page"] {
 .marks .mark i {
   width: 2px;
   height: 12px;
-  background: var(--seal);
+  background: var(--sealed);
 }
 
 .marks .mark em {
   margin-top: 4px;
-  color: var(--seal);
-  font: 600 var(--stencil)/1.2 var(--sans);
+  color: var(--sealed);
+  font: 600 var(--label)/1.2 var(--sans);
   font-style: normal;
   white-space: nowrap;
 }
@@ -482,8 +572,8 @@ nav button[aria-current="page"] {
   align-items: center;
   gap: 10px 20px;
   margin-top: 16px;
-  color: var(--vapor);
-  font: 500 var(--stencil)/1.4 var(--sans);
+  color: var(--ink-soft);
+  font: 500 var(--label)/1.4 var(--sans);
 }
 
 .legend > span { display: flex; align-items: center; gap: 8px; }
@@ -492,12 +582,12 @@ nav button[aria-current="page"] {
   width: 14px;
   height: 14px;
   flex: none;
-  background: var(--seam);
+  background: var(--line);
 }
 
-.legend i.sending { background: var(--sodium); }
-.legend i.stored { background: var(--seal); }
-.legend i.held { background: transparent; box-shadow: inset 0 0 0 1.5px var(--seal); }
+.legend i.sending { background: var(--transit); }
+.legend i.stored { background: var(--sealed); }
+.legend i.held { background: transparent; box-shadow: inset 0 0 0 1.5px var(--sealed); }
 
 .strip.seam {
   height: var(--strip-seam);
@@ -509,11 +599,11 @@ nav button[aria-current="page"] {
   background: transparent;
 }
 
-.strip.seam .seg { background: var(--seam); }
+.strip.seam .seg { background: var(--line); }
 .strip.seam .seg.held { background: transparent; }
-.strip.seam .seg.stored { background: var(--seal); }
+.strip.seam .seg.stored { background: var(--sealed); }
 .strip.seam .seg.sending {
-  background: var(--sodium);
+  background: var(--transit);
   animation: pressure 1.9s ease-in-out infinite;
 }
 
@@ -533,7 +623,7 @@ nav button[aria-current="page"] {
   inset: 0;
   display: flex;
   align-items: center;
-  background: var(--hull);
+  background: var(--ground);
   transition: opacity 180ms ease;
 }
 
@@ -545,19 +635,21 @@ nav button[aria-current="page"] {
   border: 0;
 }
 
-#equalize .seg { background: var(--seam); box-shadow: none; }
+#equalize .seg { background: var(--line); box-shadow: none; }
 #equalize.running .seg { animation: equalize 300ms ease both; }
 #equalize.done { opacity: 0; pointer-events: none; }
 
 @keyframes equalize {
-  from { background: var(--seam); transform: scaleY(1); }
-  to { background: var(--seal); transform: scaleY(1); }
+  from { background: var(--line); transform: scaleY(1); }
+  to { background: var(--sealed); transform: scaleY(1); }
 }
 
 .rows {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   margin: 0;
   padding: 0;
-  border-top: 1px solid var(--seam);
   list-style: none;
 }
 
@@ -568,23 +660,23 @@ nav button[aria-current="page"] {
   justify-content: space-between;
   gap: 12px 18px;
   min-width: 0;
-  padding: 18px 4px;
-  border-bottom: 1px solid var(--seam);
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
 }
 
-.rows li:has(.strip.seam) {
-  padding-bottom: 0;
-  border-bottom: 0;
-}
+.rows li:has(.strip.seam) { padding-bottom: 14px; }
 
 .rows li:has(.strip.seam) .strip.seam { margin-top: 14px; }
 
+/* An empty list is a statement, not a row. */
 .rows li:only-child.muted,
 .rows li:only-child.bad {
-  padding: clamp(28px, 5vw, 54px) clamp(18px, 3vw, 32px);
-  border-right: 1px solid var(--seam);
-  border-left: 1px solid var(--seam);
-  background: var(--chamber);
+  justify-content: center;
+  padding: clamp(34px, 6vw, 62px) clamp(18px, 3vw, 32px);
+  border-style: dashed;
+  text-align: center;
 }
 
 .rowtext {
@@ -594,7 +686,7 @@ nav button[aria-current="page"] {
 
 .name {
   overflow: hidden;
-  color: var(--pressure);
+  color: var(--ink);
   font: 700 19px/1.2 var(--display);
   letter-spacing: -0.024em;
   text-overflow: ellipsis;
@@ -604,12 +696,12 @@ nav button[aria-current="page"] {
 .rowtext > .data { margin-top: 5px; }
 
 .thumb {
-  width: 60px;
-  height: 60px;
+  width: 52px;
+  height: 52px;
   flex: none;
-  border: 1px solid var(--seam);
-  border-radius: 0;
-  background: var(--chamber);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--raised);
   object-fit: cover;
 }
 
@@ -648,8 +740,8 @@ nav button[aria-current="page"] {
   align-items: stretch;
   align-content: flex-start;
   padding: clamp(16px, 2vw, 22px);
-  border: 1px solid var(--seam);
-  background: var(--chamber);
+  border: 1px solid var(--line);
+  background: var(--surface);
 }
 
 [data-view="devices"] .rowtext { flex-basis: 100%; }
@@ -672,23 +764,23 @@ nav button[aria-current="page"] {
     position: fixed;
     z-index: 19;
     inset: 0 auto 0 0;
-    width: var(--rail);
-    border-right: 1px solid var(--seam);
-    background: var(--chamber);
+    width: var(--rail-w);
+    border-right: 1px solid var(--line);
+    background: var(--surface);
   }
 
   header {
     position: fixed;
     z-index: 21;
     inset: 0 auto auto 0;
-    width: var(--rail);
+    width: var(--rail-w);
     min-height: 82px;
     flex-direction: column;
     align-items: flex-start;
     justify-content: center;
     gap: 8px;
     padding: 18px 18px 18px calc(18px + env(safe-area-inset-left, 0px));
-    border-right: 1px solid var(--seam);
+    border-right: 1px solid var(--line);
     border-bottom: 0;
   }
 
@@ -699,40 +791,46 @@ nav button[aria-current="page"] {
   }
 
   #app,
-  body > section { margin-left: var(--rail); }
+  body > section { margin-left: var(--rail-w); }
 
   #views { padding: clamp(34px, 3.4vw, 42px) clamp(24px, 3vw, 40px) 72px; }
 
   nav {
     inset: 82px auto 0 0;
-    width: var(--rail);
+    width: var(--rail-w);
     flex-direction: column;
     justify-content: flex-start;
     border-top: 0;
-    border-right: 1px solid var(--seam);
+    border-right: 1px solid var(--line);
     padding: 0 0 0 env(safe-area-inset-left, 0px);
   }
 
   nav button {
-    min-height: 48px;
+    min-height: 44px;
     flex: 0;
-    padding: 14px 18px 14px 15px;
-    border-top: 0;
-    border-left: 3px solid transparent;
-    font-size: 15px;
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 12px;
+    margin: 0 12px 3px;
+    padding: 11px 14px;
+    border-radius: var(--r-sm);
+    font-size: 14px;
     text-align: left;
   }
 
+  nav button:hover { background: var(--raised); }
+
+  /* The active view is a filled pill rather than a marked edge, which is what
+     lets it read as the place you are rather than as a decorated list item. */
   nav button[aria-current="page"] {
-    border-top-color: transparent;
-    border-left-color: var(--pressure);
+    background: var(--green-wash);
+    color: var(--green);
   }
 }
 
 @media (max-width: 520px) {
   .wordmark { font-size: 19px; }
   #me { max-width: 44vw; }
-  nav button { font-size: 11.5px; }
   .actions { width: 100%; }
   .actions .ghost { flex: 1 1 auto; }
   [data-view="devices"] .actions { width: auto; }
@@ -781,7 +879,7 @@ nav button[aria-current="page"] {
   .strip.seam .seg.sending,
   #equalize.running .seg { animation: none; }
 
-  #equalize.running .seg { background: var(--seal); }
+  #equalize.running .seg { background: var(--sealed); }
 }
 
 /* Arrival notices. Anchored to the bottom because the nav lives there on a
@@ -805,13 +903,13 @@ nav button[aria-current="page"] {
   display: flex;
   align-items: baseline;
   gap: 10px;
-  padding: 12px 16px;
-  background: var(--hull-active);
-  border: 1px solid var(--seam);
-  border-left: 2px solid var(--seal);
-  color: var(--pressure);
+  padding: 13px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--ink);
   font-size: var(--prose);
-  box-shadow: 0 8px 28px rgb(0 0 0 / 45%);
+  box-shadow: var(--shadow-lift);
   animation: toast-in 160ms ease-out;
 }
 
@@ -837,18 +935,18 @@ nav button[aria-current="page"] {
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--vapor);
+  color: var(--ink-soft);
   font: 400 19px/1 var(--sans);
   cursor: pointer;
   pointer-events: auto;
 }
 
-.toast .dismiss:hover { color: var(--pressure); }
+.toast .dismiss:hover { color: var(--ink); }
 
 .toast .from {
-  font-family: var(--utility);
+  font-family: var(--mono);
   font-size: var(--data);
-  color: var(--vapor);
+  color: var(--ink-soft);
 }
 
 @keyframes toast-in {

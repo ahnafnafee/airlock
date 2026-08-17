@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  ensurePaired, arrivalChannel, listen, notifyStatus, onDevices, onInbox, pushCapable, retryDelay,
-  secureEnough,
-  state, __setStreamImpl, RETRY_BASE_MS, RETRY_CAP_MS,
+  applyTheme, arrivalChannel, ensurePaired, listen, nextTheme, notifyStatus, onDevices,
+  onInbox, pushCapable, retryDelay, secureEnough, state, storedTheme,
+  __setStreamImpl, RETRY_BASE_MS, RETRY_CAP_MS,
 } from './app.js';
 
 // EventSource readyState, per the HTML standard. Restated here rather than
@@ -358,3 +358,55 @@ test('an arrival is announced once, by whichever channel can reach', () => {
   assert.equal(arrivalChannel({}, hidden, true), 'toast');
 });
 
+
+// Three states, and "system" is the absence of a choice rather than a third
+// value: it clears the attribute so prefers-color-scheme decides, which is what
+// lets a device that follows sunset keep following it.
+test('the theme cycles through follow, light and dark', () => {
+  assert.equal(nextTheme('system'), 'light');
+  assert.equal(nextTheme('light'), 'dark');
+  assert.equal(nextTheme('dark'), 'system');
+  // A value from another version of the app must not leave the interface in a
+  // state with no name.
+  assert.equal(nextTheme('chartreuse'), 'system');
+});
+
+test('following the system is recorded as nothing at all', () => {
+  const root = { dataset: {} };
+  const store = new Map();
+  const fake = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, v),
+    removeItem: (k) => store.delete(k),
+  };
+
+  assert.equal(applyTheme('dark', root, fake), 'dark');
+  assert.equal(root.dataset.theme, 'dark');
+  assert.equal(fake.getItem('airlock-theme'), 'dark');
+  assert.equal(storedTheme(fake), 'dark');
+
+  // Back to following the system: the attribute goes, and so does the record.
+  // Leaving either behind is how a device stops responding to its own setting.
+  assert.equal(applyTheme('system', root, fake), 'system');
+  assert.equal('theme' in root.dataset, false);
+  assert.equal(fake.getItem('airlock-theme'), null);
+  assert.equal(storedTheme(fake), 'system');
+
+  // An unknown stored value reads as no choice rather than as itself.
+  fake.setItem('airlock-theme', 'chartreuse');
+  assert.equal(storedTheme(fake), 'system');
+});
+
+// Storage can refuse, and a theme that will not last the session is still worth
+// more than a button that does nothing.
+test('a refused storage still changes the theme', () => {
+  const root = { dataset: {} };
+  const refuses = {
+    getItem: () => { throw new Error('denied'); },
+    setItem: () => { throw new Error('denied'); },
+    removeItem: () => { throw new Error('denied'); },
+  };
+  assert.equal(applyTheme('light', root, refuses), 'light');
+  assert.equal(root.dataset.theme, 'light');
+  assert.equal(storedTheme(refuses), 'system');
+});

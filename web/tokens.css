@@ -1,41 +1,151 @@
+/* Airlock's palette, shape and type, in one place.
+ *
+ * Light is defined on bare :root and dark is layered over it, so a viewer whose
+ * system setting is "no preference" gets a complete palette either way. Three
+ * states have to work: an explicit choice stamps data-theme on the root, and the
+ * default stamps nothing, in which case only prefers-color-scheme separates the
+ * two. Every color therefore has its value on :root and is only redefined in the
+ * dark blocks, never the other way around, because a color whose one definition
+ * lives inside a media query has no value at all when that query does not match.
+ */
+
 :root {
+  color-scheme: light;
+
+  /* Surfaces, from the page backwards. Ground is what the window is painted
+     with, surface is what sits on it, and raised is a surface on a surface. */
+  --ground: #F4F7F5;
+  --surface: #FFFFFF;
+  --raised: #F8FAF9;
+  --rail: #FFFFFF;
+
+  --line: #E2E9E4;
+  --line-strong: #CFDAD3;
+
+  --ink: #0C1512;
+  --ink-soft: #48584F;
+  --ink-faint: #6B7B72;
+
+  /* One green, and it means Airlock. The signal colors below borrow from it
+     rather than competing with it. */
+  --green: #16A34A;
+  --green-hot: #15803D;
+  --green-wash: #E8F6ED;
+  --on-green: #FFFFFF;
+
+  /* Each carries exactly one meaning, everywhere, forever. Amber is in transit
+     and nothing else, green is held or sealed and nothing else, red is a
+     failure and nothing else. */
+  --transit: #D97706;
+  --sealed: #16A34A;
+  --breach: #DC2626;
+
+  --shadow: 0 1px 2px rgb(12 21 18 / 6%), 0 8px 24px rgb(12 21 18 / 6%);
+  --shadow-lift: 0 2px 6px rgb(12 21 18 / 8%), 0 16px 40px rgb(12 21 18 / 10%);
+}
+
+/* The system default. Guarded so an explicit light choice still wins here. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --ground: #0A0F0D;
+    --surface: #111814;
+    --raised: #16201B;
+    --rail: #0D1310;
+
+    --line: #1E2A24;
+    --line-strong: #2C3A32;
+
+    --ink: #E9F1EC;
+    --ink-soft: #A3B2AA;
+    --ink-faint: #7D8C84;
+
+    --green: #22C55E;
+    --green-hot: #16A34A;
+    --green-wash: #14291D;
+    --on-green: #06120B;
+
+    --transit: #F59E0B;
+    --sealed: #22C55E;
+    --breach: #F87171;
+
+    --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 8px 24px rgb(0 0 0 / 30%);
+    --shadow-lift: 0 2px 6px rgb(0 0 0 / 45%), 0 16px 40px rgb(0 0 0 / 40%);
+  }
+}
+
+/* An explicit dark choice, which has to win over the light default whatever the
+   system says. Same values as above; the selector is the difference. */
+:root[data-theme="dark"] {
   color-scheme: dark;
-  /* Pressure vessel palette, taken directly from the Airlock reference. */
-  --hull: #14181C;
-  --chamber: #1C2228;
-  --hull-active: #232A31;
-  --seam: #2E3841;
-  --seam-strong: #4A5560;
-  --control-seam: #5F7080;
-  --pressure: #E8EDF2;
-  --vapor: #93A1AC;
-  --faint: #8593A0;
 
-  /* Signal colors keep one meaning each across every view. */
-  --sodium: #F0A83C;
-  --seal: #4FD1A5;
-  --breach: #E8654F;
+  --ground: #0A0F0D;
+  --surface: #111814;
+  --raised: #16201B;
+  --rail: #0D1310;
 
-  /* The reference uses Anybody and Familjen Grotesk. Airlock must also paint
-     without a network request, so installed condensed grotesks lead these
-     stacks and fall back to the platform UI face. */
-  --display: "Aptos Display", "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system,
-             "Helvetica Neue", Arial, sans-serif;
-  --sans: "Aptos", "Segoe UI", "Helvetica Neue", Arial, system-ui, sans-serif;
-  --utility: "Cascadia Mono", "SFMono-Regular", Consolas, ui-monospace, monospace;
+  --line: #1E2A24;
+  --line-strong: #2C3A32;
 
-  --stencil: 12.5px;
+  --ink: #E9F1EC;
+  --ink-soft: #A3B2AA;
+  --ink-faint: #7D8C84;
+
+  --green: #22C55E;
+  --green-hot: #16A34A;
+  --green-wash: #14291D;
+  --on-green: #06120B;
+
+  --transit: #F59E0B;
+  --sealed: #22C55E;
+  --breach: #F87171;
+
+  --shadow: 0 1px 2px rgb(0 0 0 / 40%), 0 8px 24px rgb(0 0 0 / 30%);
+  --shadow-lift: 0 2px 6px rgb(0 0 0 / 45%), 0 16px 40px rgb(0 0 0 / 40%);
+}
+
+:root {
+  /* Type. The display face carries the headings and the wordmark; the mono face
+     carries anything a person might read character by character, which here is
+     device names, addresses and byte counts. */
+  --display: "Inter Display", "Inter", "Segoe UI Variable Display", "Segoe UI",
+             system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --sans: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+          "Helvetica Neue", Arial, sans-serif;
+  --mono: "Cascadia Mono", "SF Mono", "SFMono-Regular", Consolas, ui-monospace, monospace;
+
+  /* Line icons, inlined so they paint with no request and masked so they take
+     whatever color they sit on, in either theme. */
+  --icon-upload: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M6.5%2018.5a4.5%204.5%200%200%201-.6-8.96A6%206%200%200%201%2017.7%208.6a4.2%204.2%200%200%201%20.6%208.35%22%2F%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M12%2020v-8m0%200-3%203m3-3%203%203%22%2F%3E%3C%2Fsvg%3E");
+  --icon-lock: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20x%3D%224.5%22%20y%3D%2210.5%22%20width%3D%2215%22%20height%3D%229.5%22%20rx%3D%222.2%22%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%2F%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M8%2010.5V7.6a4%204%200%200%201%208%200v2.9%22%2F%3E%3C%2Fsvg%3E");
+  --icon-send: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M20.5%203.5%203.6%2010.2c-.7.3-.7%201.3%200%201.5l6.6%202.1%202.1%206.6c.2.7%201.2.7%201.5%200z%22%2F%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M20.5%203.5%2010.2%2013.8%22%2F%3E%3C%2Fsvg%3E");
+  --icon-inbox: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20x%3D%223.2%22%20y%3D%225%22%20width%3D%2217.6%22%20height%3D%2214%22%20rx%3D%222.4%22%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%2F%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M3.2%2013.5h4l1.4%202.3h6.8l1.4-2.3h4%22%2F%3E%3C%2Fsvg%3E");
+  --icon-history: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%228.6%22%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%2F%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M12%207v5.2l3.3%202%22%2F%3E%3C%2Fsvg%3E");
+  --icon-devices: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20x%3D%223%22%20y%3D%225%22%20width%3D%2212.5%22%20height%3D%2210%22%20rx%3D%221.8%22%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%2F%3E%3Crect%20x%3D%2216.2%22%20y%3D%229.5%22%20width%3D%225%22%20height%3D%2210%22%20rx%3D%221.6%22%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%2F%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M6.5%2018.5h5%22%2F%3E%3C%2Fsvg%3E");
+  --icon-sun: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%224.2%22%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%2F%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M12%202.6v2.2M12%2019.2v2.2M2.6%2012h2.2M19.2%2012h2.2M5.4%205.4l1.6%201.6M17%2017l1.6%201.6M18.6%205.4%2017%207M7%2017l-1.6%201.6%22%2F%3E%3C%2Fsvg%3E");
+  --icon-moon: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%20d%3D%22M20%2013.4A8.4%208.4%200%200%201%2010.6%204a8.4%208.4%200%201%200%209.4%209.4%22%2F%3E%3C%2Fsvg%3E");
+  --icon-auto: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%228.6%22%20stroke%3D%22%23000%22%20stroke-width%3D%221.9%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20fill%3D%22none%22%2F%3E%3Cpath%20d%3D%22M12%203.4a8.6%208.6%200%200%201%200%2017.2z%22%20fill%3D%22%23000%22%2F%3E%3C%2Fsvg%3E");
+
+  --wordmark: 17px;
+  --title: clamp(1.75rem, 3.4vw, 2.375rem);
+  --prose: 15px;
   --data: 12.5px;
-  --prose: 15.5px;
-  --panel: clamp(2rem, 4.6vw, 3.125rem);
-  --wordmark: 21px;
+  --label: 12px;
 
-  --track-stencil: 0.02em;
-  --track-panel: -0.022em;
+  /* Shape. Square corners read as machinery; these read as software, which is
+     what this is. One step per role so nothing is arbitrary. */
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+
+  --track-title: -0.022em;
   --track-mark: -0.02em;
+  --track-label: 0.02em;
 
-  --rail: 212px;
-  --content: 1180px;
-  --strip: clamp(46px, 6vw, 72px);
+  --rail-w: 232px;
+  --content: 1120px;
+  --strip: clamp(44px, 5.5vw, 64px);
   --strip-seam: 3px;
 }

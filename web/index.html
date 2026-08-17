@@ -9,7 +9,7 @@
      files. Nothing here should ever be indexed, and a crawler that could reach
      it has already found something that was not meant to be public. -->
 <meta name="robots" content="noindex, nofollow">
-<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/icon-192.png" type="image/png">
 <link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="manifest" href="/manifest.webmanifest">
 <meta name="color-scheme" content="light dark">
@@ -42,14 +42,16 @@ try {
 <header>
   <h1 class="wordmark">Airlock</h1>
   <nav id="nav" aria-label="Views"></nav>
-  <span id="me" class="data muted"></span>
-  <!-- Controls that belong to the app rather than to any one view. On a wide
-       screen they sit at the foot of the rail; on a narrow one they ride in the
-       header, which is the only chrome a phone has. -->
-  <div id="tools">
-    <button type="button" id="theme" aria-label="Theme: follow the system"></button>
-    <a id="source" href="https://github.com/ahnafnafee/airlock"
-       target="_blank" rel="noopener noreferrer" aria-label="Airlock on GitHub"></a>
+  <!-- The right of the bar: which device this is, and the controls that belong
+       to the app rather than to any one view. It balances the mark on the left
+       so the switcher between them lands on the middle of the window. -->
+  <div class="bar-end">
+    <span id="me" class="data muted"></span>
+    <div id="tools">
+      <button type="button" id="theme" aria-label="Theme: follow the system"></button>
+      <a id="source" href="https://github.com/ahnafnafee/airlock"
+         target="_blank" rel="noopener noreferrer" aria-label="Airlock on GitHub"></a>
+    </div>
   </div>
 </header>
 

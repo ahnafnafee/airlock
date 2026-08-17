@@ -59,5 +59,5 @@ test('an empty history is one empty page rather than none', () => {
 
 test('a list shorter than a page is one page', () => {
   assert.deepEqual(pageOf(7, 1, 25), { page: 1, pages: 1, from: 0, to: 7 });
-  assert.ok(PAGE > 0);
+  assert.equal(PAGE, 10, 'a page holds ten rows');
 });

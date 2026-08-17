@@ -14,7 +14,13 @@ class Stub {
     this.dataset = {};
     this.observers = [];
     this.handlers = new Map();
-    this.classList = { add: () => {}, remove: () => {} };
+    this.classes = new Set();
+    this.classList = {
+      add: (c) => this.classes.add(c),
+      remove: (c) => this.classes.delete(c),
+      toggle: (c, on) => (on ? this.classes.add(c) : this.classes.delete(c)),
+      contains: (c) => this.classes.has(c),
+    };
   }
 
   // Elements only, so a label's text node never counts as an option or a row.
@@ -37,7 +43,8 @@ class Stub {
   }
 
   // A select answers with the option it has selected, and assigning selects the
-  // option that matches. An option answers with its own attribute.
+  // option that matches. Everything else, including the chip group, answers with
+  // whatever was written to it.
   get value() {
     if (this.tagName !== 'SELECT') return this.own ?? this.attributes.get('value') ?? '';
     const chosen = this.children.find((o) => o.selected);
@@ -52,6 +59,13 @@ class Stub {
       if (o.selected) done = true;
     }
   }
+
+  prepend(...nodes) { this.childNodes.unshift(...nodes); }
+
+  // Only ever asked for the first chip, to move focus onto the group.
+  querySelector() { return this.children[0] || null; }
+
+  focus() {}
 
   setAttribute(name, v) {
     // el only ever writes this attribute to mean hidden, so it routes through
@@ -191,6 +205,11 @@ api.devices = async () => {
   return roster;
 };
 
+// Which of the roster is reachable right now. The picker asks separately,
+// because presence changes on its own schedule.
+let present = [];
+api.presence = async () => present;
+
 const device = (node, allowed = true) => ({
   node, allowed, paired: true, addr: '100.0.0.1', user: 'owner', lastSeen: new Date().toISOString(),
 });
@@ -231,11 +250,15 @@ test('send controls are named and terminal state has a quiet live region', async
   showView('send');
   await settle();
   const recipient = find(sendPanel, (n) => n.getAttribute('id') === 'to');
-  const label = find(sendPanel, (n) => n.getAttribute('for') === 'to');
   const live = find(sendPanel, (n) => n.getAttribute('role') === 'status');
   const progress = find(sendPanel, (n) => n.getAttribute('aria-live') === 'off');
   assert.ok(recipient);
-  assert.equal(textOf(label), 'To');
+  // A group of buttons rather than one control, so it names itself instead of
+  // being named by a label pointing at it.
+  assert.equal(recipient.getAttribute('role'), 'radiogroup');
+  assert.equal(recipient.getAttribute('aria-label'), 'Send to');
+  assert.ok(recipient.children.every((c) => c.getAttribute('role') === 'radio'),
+    'every destination is a radio, so one is chosen at a time');
   assert.equal(live.getAttribute('aria-live'), 'polite');
   assert.equal(live.getAttribute('aria-atomic'), 'true');
   assert.ok(progress, 'per-chunk copy is not a chatty live region');
@@ -252,7 +275,7 @@ async function revisit(name) {
 
 const picker = () => find(sendPanel, (n) => n.getAttribute('id') === 'to');
 const sendStatus = () => find(sendPanel, (n) => n.getAttribute('id') === 'send-status');
-const offered = () => picker().children.map((o) => o.value);
+const offered = () => picker().children.map((c) => c.dataset.node);
 const deviceRows = () => find(devicesPanel, (n) => n.tagName === 'UL').children;
 // The node name each row is about, without the trailing "(this device)".
 // A row that carries no name is not a device row, so its own text stands in and
@@ -303,7 +326,7 @@ test('the send picker offers only paired approved devices except this one', asyn
   await settle();
   // This device is not a destination. Neither a blocked device nor one that has
   // not acquired the master key can read what it is sent.
-  assert.deepEqual(offered(), ['', '*', 'tablet']);
+  assert.deepEqual(offered(), ['*', 'tablet']);
 });
 
 test('the send view cannot create an unreadable plaintext transfer', () => {
@@ -315,7 +338,7 @@ test('a device approved after the view mounted becomes selectable', async () => 
   // laptop, and the laptop's picker never learns the phone exists.
   roster = [device('laptop'), device('tablet'), device('phone')];
   await revisit('send');
-  assert.deepEqual(offered(), ['', '*', 'tablet', 'phone']);
+  assert.deepEqual(offered(), ['*', 'tablet', 'phone']);
 });
 
 test('a chosen recipient survives a refresh that changes the list', async () => {
@@ -325,7 +348,7 @@ test('a chosen recipient survives a refresh that changes the list', async () => 
   roster = [device('laptop'), device('tablet'), device('phone'), device('watch')];
   await revisit('send');
 
-  assert.deepEqual(offered(), ['', '*', 'tablet', 'phone', 'watch']);
+  assert.deepEqual(offered(), ['*', 'tablet', 'phone', 'watch']);
   // Resetting this because a list reloaded would leave the next press of Send
   // pointing somewhere nobody chose.
   assert.equal(picker().value, 'phone');
@@ -364,7 +387,7 @@ test('the send picker refreshes when the window comes back to the front', async 
   showView('send');
   doc.fire('visibilitychange');
   await settle();
-  assert.deepEqual(offered(), ['', '*', 'tablet', 'phone', 'printer']);
+  assert.deepEqual(offered(), ['*', 'tablet', 'phone', 'printer']);
 });
 
 test('a device approved after the devices view mounted appears in the list', async () => {
@@ -500,4 +523,15 @@ test('nothing sends until a destination has been chosen', async () => {
   await settle();
   await settle();
   assert.ok(attempted.includes('held.txt'), 'the file did not send once a destination was chosen');
+});
+
+// A tailnet with one device on it is where everybody starts, and the standing
+// "all my devices" destination has to be offered there too. An empty group and
+// an empty roster compare equal, so the first paint cannot be treated as a
+// no-op the way every later one is.
+test('the standing destination is offered before any other device exists', async () => {
+  roster = [device('laptop')];
+  present = [];
+  await revisit('send');
+  assert.deepEqual(offered(), ['*'], 'only this device is registered, so only "all" is offered');
 });

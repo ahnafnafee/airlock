@@ -150,15 +150,18 @@ registerView('send', 'Send', (panel) => {
     'You can also paste a file into this window.');
   const installNote = el('p', { class: 'data muted', hidden: true });
 
-  // Nothing is chosen until someone chooses it. Where a file goes is the one
-  // decision on this screen that cannot be taken back, so it is never inherited
-  // from a previous send, from a device list that happened to reload, or from a
-  // browser restoring a select's value across a reload on its own, which is what
-  // autocomplete off is for. Every device is a choice on the list, not the
-  // absence of one.
-  const recipient = el('select', { id: 'to', autocomplete: 'off' },
-    el('option', { value: '' }, 'Choose where this goes'),
-    el('option', { value: EVERY_DEVICE }, 'All my devices'));
+  // Every destination visible at once, rather than one behind a dropdown. A
+  // personal tailnet holds a handful of devices, and hiding them made the single
+  // decision on this screen cost two gestures instead of one.
+  //
+  // Nothing is chosen until someone chooses it. Where a file goes cannot be
+  // taken back, so it is never inherited from a previous send or from a device
+  // list that happened to reload. The value lives on the element rather than in
+  // a variable so the rest of this view reads it exactly as it read the select.
+  const recipient = el('div', {
+    id: 'to', class: 'chips', role: 'radiogroup', 'aria-label': 'Send to',
+  });
+  recipient.value = '';
   // No visible heading, because the list has to disappear when it is empty. The
   // accessible name carries what the heading would have said.
   const stagedList = el('ul', { class: 'rows staged', 'aria-label': 'Staged files' });
@@ -187,7 +190,7 @@ registerView('send', 'Send', (panel) => {
     seal,
     pasteHint,
     installNote,
-    el('p', { class: 'label' }, el('label', { for: 'to' }, 'To')),
+    el('p', { class: 'label' }, 'To'),
     recipient,
     // Above the list rather than below it. Twenty staged files put the only
     // button that does anything a full screen of scrolling away, on the device
@@ -248,7 +251,7 @@ registerView('send', 'Send', (panel) => {
     if (!recipient.value) {
       status.className = 'data bad';
       status.textContent = 'Choose where this goes first.';
-      recipient.focus?.();
+      recipient.querySelector('.chip')?.focus?.();
       return;
     }
     // Taken off the list before the first byte moves, so a second press cannot
@@ -285,39 +288,70 @@ registerView('send', 'Send', (panel) => {
       console.warn('the recipient list was not refreshed', err);
       return;
     }
+    // Who is reachable right now, which is a different question from who is
+    // approved. Asked separately because it changes on its own schedule, and a
+    // failure here costs the dots rather than the list.
+    let online = [];
+    try {
+      online = await api.presence();
+    } catch (err) {
+      console.warn('presence was not read, so no device is marked online', err);
+    }
     if (mine !== generation) return;
-    paintRecipients(devices);
+    paintRecipients(devices, new Set(online));
   }
 
   // A device that cannot read what it is sent is not a destination, and neither
   // is this device: a transfer addressed to yourself has nowhere to go.
-  function paintRecipients(devices) {
-    const reachable = devices
-      .filter((d) => d.allowed && d.paired && d.node !== state.me?.node)
-      .map((d) => d.node);
-    // The first two options are the prompt and the standing "all" entry rather
-    // than devices, so the comparison starts past them.
-    const drawn = [...recipient.children].slice(2).map((o) => o.value);
-    // Nothing is touched when nothing changed, so a refresh cannot close an open
-    // dropdown or disturb a selection that was never in question.
-    if (drawn.length === reachable.length
+  function paintRecipients(devices, online = new Set()) {
+    const usable = devices.filter((d) => d.allowed && d.paired && d.node !== state.me?.node);
+    const reachable = usable.map((d) => d.node);
+    // The first chip is the standing "all" entry rather than a device, so the
+    // comparison starts past it.
+    const drawn = [...recipient.children].slice(1).map((c) => c.dataset.node);
+    // Nothing is touched when nothing changed, so a refresh cannot disturb a
+    // selection that was never in question. The first paint is never a no-op:
+    // with no other devices yet, an empty group and an empty roster compare
+    // equal and the standing "all" chip would never be drawn at all.
+    if (recipient.children.length
+      && drawn.length === reachable.length
       && drawn.every((node, i) => node === reachable[i])) return;
 
     const chosen = recipient.value;
-    recipient.replaceChildren(
-      el('option', { value: '' }, 'Choose where this goes'),
-      el('option', { value: EVERY_DEVICE }, 'All my devices'));
-    for (const node of reachable) recipient.append(el('option', { value: node }, node));
-    // The selection survives the rebuild. Resetting it because a list reloaded
-    // would send the next press of Send somewhere nobody picked, which is a
-    // worse fault than the staleness this refresh exists to cure.
-    recipient.value = chosen === EVERY_DEVICE || reachable.includes(chosen) ? chosen : '';
-    // Losing the destination is the one case the selection cannot be kept, and
-    // it is said out loud: quietly widening one device to all of them is exactly
-    // the silent change the line above refuses to make.
+    const chip = (node, label, live) => {
+      const b = el('button', {
+        type: 'button', class: 'chip', role: 'radio', 'aria-checked': 'false',
+      }, label);
+      b.dataset.node = node;
+      // Presence, from the same list the picker is built from. It says which of
+      // these will take the file now rather than when it next wakes up.
+      if (live !== null) b.prepend(el('i', { class: live ? 'on' : 'off', 'aria-hidden': 'true' }));
+      b.addEventListener('click', () => select(node));
+      return b;
+    };
+    recipient.replaceChildren(chip(EVERY_DEVICE, 'All my devices', null));
+    for (const d of usable) recipient.append(chip(d.node, d.node, online.has(d.node)));
+
+    // The selection survives the rebuild. Dropping it because a list reloaded
+    // would leave the next press of Send pointing nowhere, which is a worse
+    // fault than the staleness this refresh exists to cure.
+    select(chosen === EVERY_DEVICE || reachable.includes(chosen) ? chosen : '');
+    // Losing the destination is the one case it cannot be kept, and it is said
+    // out loud rather than quietly widening one device to all of them.
     if (chosen && recipient.value !== chosen) {
       status.className = 'data bad';
       status.textContent = `${chosen} can no longer be reached, so nothing is chosen.`;
+    }
+  }
+
+  // One chosen at a time, and the element carries the answer so every other
+  // reader of this view is unchanged by the control having become chips.
+  function select(node) {
+    recipient.value = node || '';
+    for (const c of recipient.children) {
+      const on = Boolean(node) && c.dataset.node === node;
+      c.classList.toggle('picked', on);
+      c.setAttribute('aria-checked', on ? 'true' : 'false');
     }
   }
 

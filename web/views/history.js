@@ -53,8 +53,9 @@ async function nameOf(t) {
 
 // How many rows one page holds. Every row costs a decryption, so a long history
 // on a phone is both a wall of text and a wall of work; this is what keeps
-// opening the view cheap however much has passed through it.
-export const PAGE = 25;
+// opening the view cheap however much has passed through it. Ten fits a phone
+// without scrolling past the point where the pager is reachable.
+export const PAGE = 10;
 
 // Which slice of a list a page number covers, and how many pages there are.
 // Exported because the arithmetic is the behaviour: an off-by-one here shows up

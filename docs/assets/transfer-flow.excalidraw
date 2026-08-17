@@ -1,0 +1,21 @@
+{"type":"excalidraw","version":2,"source":"airlock","elements":[
+{"type":"text","id":"ti","x":250,"y":20,"text":"How a transfer works","fontSize":26,"strokeColor":"#1e1e1e"},
+{"type":"text","id":"sub","x":215,"y":56,"text":"Locked on the sending device. The server never gets the key.","fontSize":15,"strokeColor":"#757575"},
+{"type":"rectangle","id":"z","x":20,"y":100,"width":760,"height":300,"backgroundColor":"#dbe4ff","fillStyle":"solid","strokeColor":"#4a9eed","strokeWidth":1,"roundness":{"type":3},"opacity":30},
+{"type":"text","id":"zl","x":36,"y":110,"text":"Your Tailscale network, which proves who every device is","fontSize":15,"strokeColor":"#2563eb"},
+{"type":"rectangle","id":"snd","x":50,"y":170,"width":190,"height":100,"backgroundColor":"#a5d8ff","fillStyle":"solid","strokeColor":"#4a9eed","strokeWidth":2,"roundness":{"type":3},"label":{"text":"Sending device","fontSize":18}},
+{"type":"text","id":"sn1","x":56,"y":282,"text":"1. split into pieces","fontSize":15,"strokeColor":"#2563eb"},
+{"type":"text","id":"sn2","x":56,"y":304,"text":"2. fingerprint each one","fontSize":15,"strokeColor":"#2563eb"},
+{"type":"text","id":"sn3","x":56,"y":326,"text":"3. lock with your key","fontSize":15,"strokeColor":"#2563eb"},
+{"type":"arrow","id":"a1","x":245,"y":205,"width":100,"height":0,"points":[[0,0],[100,0]],"strokeColor":"#22c55e","strokeWidth":2,"endArrowhead":"arrow","label":{"text":"upload","fontSize":15}},
+{"type":"rectangle","id":"srv","x":350,"y":160,"width":190,"height":120,"backgroundColor":"#ffd8a8","fillStyle":"solid","strokeColor":"#f59e0b","strokeWidth":2,"roundness":{"type":3},"label":{"text":"Airlock server","fontSize":18}},
+{"type":"text","id":"sv1","x":356,"y":292,"text":"holds scrambled data","fontSize":15,"strokeColor":"#9a5030"},
+{"type":"text","id":"sv2","x":356,"y":314,"text":"and opaque ids","fontSize":15,"strokeColor":"#9a5030"},
+{"type":"text","id":"sv3","x":356,"y":336,"text":"never has the key","fontSize":15,"strokeColor":"#ef4444"},
+{"type":"arrow","id":"a2","x":545,"y":205,"width":100,"height":0,"points":[[0,0],[100,0]],"strokeColor":"#22c55e","strokeWidth":2,"endArrowhead":"arrow","label":{"text":"fetch","fontSize":15}},
+{"type":"rectangle","id":"rcv","x":650,"y":170,"width":190,"height":100,"backgroundColor":"#b2f2bb","fillStyle":"solid","strokeColor":"#22c55e","strokeWidth":2,"roundness":{"type":3},"label":{"text":"Receiving device","fontSize":18}},
+{"type":"text","id":"rc1","x":656,"y":282,"text":"4. verify every piece","fontSize":15,"strokeColor":"#15803d"},
+{"type":"text","id":"rc2","x":656,"y":304,"text":"5. unlock with your key","fontSize":15,"strokeColor":"#15803d"},
+{"type":"text","id":"rc3","x":656,"y":326,"text":"6. save the file","fontSize":15,"strokeColor":"#15803d"},
+{"type":"rectangle","id":"nt","x":180,"y":420,"width":480,"height":58,"backgroundColor":"#fff3bf","fillStyle":"solid","strokeColor":"#f59e0b","strokeWidth":1,"roundness":{"type":3},"opacity":60,"label":{"text":"The server is asked which fingerprints it already has.\nThat one question is dedup, delta sync and resume.","fontSize":15}}
+],"appState":{"viewBackgroundColor":"#ffffff","gridSize":null}}

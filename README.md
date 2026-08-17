@@ -415,8 +415,8 @@ sudo systemctl enable --now airlock
 **Windows.** Create a scheduled task that runs at logon. Data is kept in
 `%LOCALAPPDATA%\Airlock`.
 
-A full walkthrough for a rented server plus a phone is in
-[docs/deployment.md](./docs/deployment.md).
+Full instructions are in [Set up a server](./docs/deployment.md). For a rented
+VPS with Docker, see [the detailed guide](./docs/deployment-advanced.md).
 
 </details>
 
@@ -472,21 +472,11 @@ CI runs the full suite on Linux, macOS and Windows for every push.
 
 <br/>
 
-```
-┌──────────────┐     encrypted pieces + encrypted records     ┌──────────────┐
-│  Sending     │ ──────────────────────────────────────────▶  │  Airlock     │
-│  device      │                                              │  server      │
-│              │   split · fingerprint · lock · upload new    │              │
-└──────────────┘                                              │  scrambled   │
-                                                              │  data only   │
-┌──────────────┐        fetch · verify · unlock · save        │  no key      │
-│  Receiving   │ ◀──────────────────────────────────────────  │              │
-│  device      │                                              └──────────────┘
-└──────────────┘                                                     ▲
-                                                                     │
-                                                   Tailscale proves ─┘
-                                                   every caller
-```
+<p align="center">
+  <img src="./docs/assets/transfer-flow.svg" alt="A file is split, fingerprinted and locked on the sending device, uploaded to the Airlock server which holds only scrambled data and never has the key, then fetched, verified, unlocked and saved on the receiving device. All of it inside your Tailscale network." width="860">
+</p>
+
+<sub>Editable source: [`docs/assets/transfer-flow.excalidraw`](./docs/assets/transfer-flow.excalidraw), or [open it in Excalidraw](https://excalidraw.com/#json=pVlGLiJF1KEUIt47ga_yv,NEaE-6Wy31PnSi2BENSEnA).</sub>
 
 1. The file is split into pieces along its own content, so an edit does not move
    every later boundary.
@@ -533,7 +523,8 @@ Method and caveats in [docs/benchmarks.md](./docs/benchmarks.md).
 
 ## 🔗 Links
 
-- [Deployment guide](./docs/deployment.md) - a rented server and a phone, end to end
+- [Set up a server](./docs/deployment.md) - the short version, for a machine you own
+- [Detailed deployment](./docs/deployment-advanced.md) - a rented VPS, Docker, day-two operations
 - [Design spec](./docs/superpowers/specs/2026-08-15-airlock-design.md) - architecture and wire protocol
 - [Benchmarks](./docs/benchmarks.md) - what was measured, and what is still open
 - [Enabling Tailscale HTTPS](https://tailscale.com/kb/1153/enabling-https) - the one prerequisite

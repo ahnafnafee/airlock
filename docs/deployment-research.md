@@ -252,7 +252,7 @@ data. Tailscale likewise documents that losing container state makes every
 restart register a new node. ([Docker: volumes](https://docs.docker.com/engine/storage/volumes/),
 [Tailscale: Docker state](https://tailscale.com/docs/features/containers/docker/docker-params#ts_state_dir))
 
-The [operator guide](deployment.md) distinguishes `docker compose down` from
+The [operator guide](deployment-advanced.md) distinguishes `docker compose down` from
 `docker compose down -v`: the latter removes named volumes and would erase the
 Airlock salt, registry, queue, and embedded node identity. Take a stopped,
 restorable volume snapshot before upgrades rather than relying on an image or

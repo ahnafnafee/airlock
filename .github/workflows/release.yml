@@ -13,8 +13,68 @@ permissions:
   contents: write
 
 jobs:
+  # Resolved and checked once, before anything is built. The version is used by
+  # the filename, the ldflags and the release tag, and three copies of the same
+  # "which event was this" logic is how they come to disagree.
+  version:
+    name: Resolve the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${INPUT_TAG}"
+          else
+            version="${GITHUB_REF_NAME}"
+          fi
+
+          # The name ends up in a filename and a URL, so it is checked rather
+          # than trusted. A branch name reaching this by accident would produce
+          # an artifact called airlock_feat/something_linux_amd64.
+          if ! printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::'$version' is not a version. Expected vMAJOR.MINOR.PATCH, for example v0.1.0."
+            exit 1
+          fi
+
+          # Refuse to go backwards or sideways. Publishing a version at or below
+          # the newest one already out means whoever downloads "latest" gets
+          # something older than the release they just read about.
+          latest="$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name' 2>/dev/null || true)"
+          if [ -z "$latest" ] || [ "$latest" = "null" ]; then
+            echo "No published release yet, so ${version} is the first."
+          else
+            echo "Newest published release is ${latest}."
+            if [ "$version" = "$latest" ]; then
+              echo "::error::${version} is already published."
+              exit 1
+            fi
+            highest="$( { echo "${version#v}"; echo "${latest#v}"; } | sort -V | tail -n1 )"
+            if [ "$highest" != "${version#v}" ]; then
+              echo "::error::${version} is not greater than the published ${latest}."
+              exit 1
+            fi
+          fi
+
+          # sort -V orders a prerelease after its own release, which semver does
+          # not, so v1.0.0-rc1 cannot follow v1.0.0 through this check. Say so
+          # rather than let the comparison quietly mean something else.
+          case "$version" in
+            *-*) echo "::notice::${version} is a prerelease. Ordering against other prereleases is by sort -V, not by semver." ;;
+          esac
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Publishing ${version}."
+
   build:
     name: ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: version
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -53,14 +113,12 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           # Reproducible across runners: no cgo, no host paths in the binary.
           CGO_ENABLED: "0"
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          version="${GITHUB_REF_NAME}"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            version="${{ inputs.tag }}"
-          fi
-          name="airlock_${version}_${GOOS}_${GOARCH}${{ matrix.ext }}"
+          set -euo pipefail
+          name="airlock_${VERSION}_${GOOS}_${GOARCH}${{ matrix.ext }}"
           mkdir -p dist
-          go build -trimpath -ldflags "-s -w -X main.version=${version}" -o "dist/${name}" .
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "dist/${name}" .
           cd dist
           sha256sum "${name}" > "${name}.sha256"
           ls -la
@@ -74,7 +132,7 @@ jobs:
 
   publish:
     name: Publish the release
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -99,7 +157,7 @@ jobs:
       # it. The commit list is appended below it by generate_release_notes.
       - name: Write the release notes
         env:
-          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          TAG: ${{ needs.version.outputs.version }}
           REPO: ${{ github.repository }}
         run: |
           cat > NOTES.md <<EOF
@@ -150,7 +208,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          tag_name: ${{ needs.version.outputs.version }}
           draft: false
           body_path: NOTES.md
           generate_release_notes: true

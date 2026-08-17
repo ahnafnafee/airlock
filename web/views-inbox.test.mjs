@@ -46,7 +46,8 @@ function stubDocument() {
 
 stubDocument();
 const {
-  bitsSet, cleanLocalTransfer, elsewhereText, handedOver, preferShare, progressBitmap, readRow,
+  bitsSet, cleanLocalTransfer, elsewhereText, handedOver, nextSaveName, preferShare,
+  progressBitmap, readRow,
   reconcileLocalTransfers, rowActions, settleAfterSave, terminateTransfer,
 } = await import('./views/inbox.js');
 const { RUNG } = await import('./export.js');
@@ -413,4 +414,78 @@ test('the share sheet is preferred on iOS and nowhere else', () => {
   // download is visible and the anchor is fine.
   const tab = { matchMedia: () => ({ matches: false }), navigator: {} };
   assert.equal(preferShare(file, iphone, tab), false);
+});
+
+function kvPair(initial = undefined) {
+  let value = initial;
+  return {
+    get value() { return value; },
+    kvGet: async () => value,
+    kvPut: async (_k, v) => { value = v; },
+  };
+}
+
+// The platform puts a copy number after the whole display name, which stops an
+// .apk from being an .apk. Numbering it here means the platform is handed a name
+// it does not already have, so it writes what it was asked to.
+test('a repeated save numbers the name itself, before the extension', async () => {
+  const kv = kvPair();
+  const first = await nextSaveName('player2-production.apk', kv);
+  assert.equal(first.name, 'player2-production.apk', 'the first save is just the name');
+  await first.commit();
+
+  const second = await nextSaveName('player2-production.apk', kv);
+  assert.equal(second.name, 'player2-production (2).apk');
+  await second.commit();
+
+  const third = await nextSaveName('player2-production.apk', kv);
+  assert.equal(third.name, 'player2-production (3).apk');
+});
+
+// A number burned by an export nobody completed would leave the next save
+// reading (3) when nothing was ever written as (2).
+test('a save that never happened does not burn a number', async () => {
+  const kv = kvPair();
+  const first = await nextSaveName('holiday.mp4', kv);
+  await first.commit();
+
+  // Offered, then cancelled: no commit.
+  const cancelled = await nextSaveName('holiday.mp4', kv);
+  assert.equal(cancelled.name, 'holiday (2).mp4');
+
+  const retry = await nextSaveName('holiday.mp4', kv);
+  assert.equal(retry.name, 'holiday (2).mp4', 'the same number is offered again');
+});
+
+test('each name is counted separately', async () => {
+  const kv = kvPair();
+  await (await nextSaveName('a.txt', kv)).commit();
+  await (await nextSaveName('a.txt', kv)).commit();
+  assert.equal((await nextSaveName('a.txt', kv)).name, 'a (3).txt');
+  assert.equal((await nextSaveName('b.txt', kv)).name, 'b.txt', 'another name starts fresh');
+});
+
+// The record is a convenience. A store that will not open must not be able to
+// stop a file being saved.
+test('an unreadable numbering record still saves the file', async () => {
+  const broken = {
+    kvGet: async () => { throw new Error('storage is gone'); },
+    kvPut: async () => { throw new Error('storage is gone'); },
+  };
+  const plan = await nextSaveName('report.pdf', broken);
+  assert.equal(plan.name, 'report.pdf', 'it falls back to the plain name');
+  await plan.commit();
+});
+
+// Two saves in flight at once must not let the slower one write back the lower
+// number it read before the other finished.
+test('concurrent saves never move the count backwards', async () => {
+  const kv = kvPair();
+  const a = await nextSaveName('x.bin', kv);
+  await a.commit();
+  const b = await nextSaveName('x.bin', kv);
+  const c = await nextSaveName('x.bin', kv);
+  await c.commit();
+  await b.commit();
+  assert.equal((await nextSaveName('x.bin', kv)).name, 'x (3).bin');
 });

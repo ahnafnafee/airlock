@@ -34,3 +34,26 @@ function asciiFallback(name) {
   if (cleaned === '' || /^\.+$/.test(cleaned)) return 'download';
   return cleaned;
 }
+
+// Where a copy number belongs in a filename.
+//
+// A platform asked to save a name it already has will disambiguate for us, and
+// Android appends to the whole display name: "app.apk" becomes "app.apk (2)".
+// That is not a cosmetic difference. The result no longer ends in .apk, so
+// nothing that decides what a file is by its extension recognises it any more,
+// and an installer that would have opened the first copy will not open the
+// second. Placing the number before the extension keeps the file the kind of
+// file it was.
+//
+// The split is at the last dot, which is what every file manager does. It makes
+// "archive.tar.gz" into "archive.tar (2).gz" rather than "archive (2).tar.gz",
+// and that is the conventional answer rather than a mistake.
+export function numberedName(name, n) {
+  const original = String(name ?? '');
+  if (!Number.isInteger(n) || n <= 1) return original;
+  const dot = original.lastIndexOf('.');
+  // A dot at the front is a hidden file's whole name rather than an extension,
+  // so ".bashrc" numbers as ".bashrc (2)" and never as " (2).bashrc".
+  if (dot <= 0) return `${original} (${n})`;
+  return `${original.slice(0, dot)} (${n})${original.slice(dot)}`;
+}

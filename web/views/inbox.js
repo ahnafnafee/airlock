@@ -2,7 +2,8 @@ import { registerView, state, el, onInbox, onProgress, notifyStatus, pushCapable
 import { api } from '../api.js';
 import { renderStrip } from '../strip.js';
 import { RUNG, exportFile } from '../export.js';
-import { DOMAIN, MODE_SEALED, openRecord, modeOf, b64decode } from '../crypto.js';
+import { DOMAIN, MODE_SEALED, openRecord, modeOf, b64decode, kvGet, kvPut } from '../crypto.js';
+import { numberedName } from '../naming.js';
 import { isIOS, isStandalone } from '../ios.js';
 
 // What a row says once a save lands. None of these is a failure: the bytes are
@@ -231,6 +232,54 @@ async function readElsewhere(id, node, get = api.getProgress) {
   }
 }
 
+// What this device has already put somewhere, by name and by how many times.
+const EXPORTED = 'exported-names';
+
+// The name to hand the platform for the next save of this file.
+//
+// Asked to write a name it already has, a platform disambiguates for us, and
+// Android does it by appending to the whole display name: "app.apk (2)", which
+// no longer ends in .apk and is no longer recognised as one. Numbering the name
+// before handing it over means the platform is given something it does not
+// already have, so it writes what it was asked to and the extension survives.
+//
+// This is a record of what this app has saved, not of what is on disk. A page
+// cannot see the downloads folder. So a file the person has since deleted is
+// still counted, which offers a higher number than strictly needed. That is the
+// safe direction to be wrong in: the alternative is offering a name something
+// else already holds, which is the collision this exists to avoid.
+//
+// The count moves only once a save has actually reached somewhere, so a
+// cancelled export does not burn a number and leave the next save reading (3)
+// when nothing was ever written as (2).
+export async function nextSaveName(name, deps = {}) {
+  const get = deps.kvGet || kvGet;
+  const put = deps.kvPut || kvPut;
+  let seen = 0;
+  try {
+    seen = (await get(EXPORTED))?.[name] || 0;
+  } catch {
+    // Never saved before, as far as this can tell. A numbering record that will
+    // not open is not a reason to refuse to save the file.
+  }
+  const n = seen + 1;
+  return {
+    name: numberedName(name, n),
+    commit: async () => {
+      try {
+        const counts = (await get(EXPORTED)) || {};
+        // Never downwards. Two saves running at once would otherwise let the
+        // slower one write back the lower number it read before the other.
+        counts[name] = Math.max(counts[name] || 0, n);
+        await put(EXPORTED, counts);
+      } catch {
+        // The file is saved either way. Losing the count costs one badly
+        // numbered name later, not the transfer.
+      }
+    },
+  };
+}
+
 async function saveTransfer(transferId, meta = null, onPercent = null) {
   const { assembleTransfer } = await import('../receive.js');
   const { transfersActive } = await import('../wake.js');
@@ -263,7 +312,16 @@ async function runSave(transferId, meta, onPercent, assembleTransfer, publish) {
       publish.report(done, total);
     },
   });
-  const rung = await exportFile(file, { preferShare: preferShare(file) });
+  // Numbered before it is offered, so the platform is never the one deciding
+  // where a copy number goes. Re-wrapping costs no memory: a File built from a
+  // File references the same bytes on disk rather than reading them in.
+  const plan = await nextSaveName(file.name);
+  const offered = plan.name === file.name
+    ? file
+    : new File([file], plan.name, { type: file.type });
+
+  const rung = await exportFile(offered, { preferShare: preferShare(offered) });
+  if (handedOver(rung)) await plan.commit();
   // Only where the file actually reached somewhere, which is the same evidence
   // settleAfterSave clears the row on. A cancelled export and a hand-off with
   // no receipt both leave the person still deciding, and a completion sound

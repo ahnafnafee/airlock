@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { contentDisposition } from './naming.js';
+import { contentDisposition, numberedName } from './naming.js';
 
 // Pull the two parameters apart so each is asserted for what it actually is.
 function parts(header) {
@@ -101,4 +101,34 @@ test('a reserved windows device name is carried, not renamed', () => {
 test('every parameter stays on one line', () => {
   const header = contentDisposition('perfectly normal.txt');
   assert.equal(header.split('\n').length, 1);
+});
+
+// A platform that disambiguates for us appends to the whole display name, so
+// "app.apk" becomes "app.apk (2)" and stops being an apk as far as anything
+// reading the extension is concerned. Numbering it ourselves is the only way to
+// keep the extension where it belongs.
+test('a copy number goes before the extension, not after it', () => {
+  assert.equal(numberedName('player2-production.apk', 2), 'player2-production (2).apk');
+  assert.equal(numberedName('player2-production.apk', 11), 'player2-production (11).apk');
+  // The first copy is the name itself. Numbering from one would put "(1)" on
+  // every file anyone ever saved.
+  assert.equal(numberedName('holiday.mp4', 1), 'holiday.mp4');
+  assert.equal(numberedName('holiday.mp4', 0), 'holiday.mp4');
+});
+
+test('names without a normal extension still number sensibly', () => {
+  // Nothing to split on, so the number goes at the end, which is where it would
+  // have gone anyway.
+  assert.equal(numberedName('README', 2), 'README (2)');
+  // A leading dot is the whole name of a hidden file, not an extension.
+  assert.equal(numberedName('.bashrc', 2), '.bashrc (2)');
+  // The conventional split is the last dot, which every file manager uses.
+  assert.equal(numberedName('archive.tar.gz', 2), 'archive.tar (2).gz');
+  // A trailing dot leaves an empty extension rather than losing the number.
+  assert.equal(numberedName('odd.', 2), 'odd (2).');
+});
+
+test('a name that is not a string cannot crash a save', () => {
+  assert.equal(numberedName(undefined, 2), ' (2)');
+  assert.equal(numberedName(null, 1), '');
 });

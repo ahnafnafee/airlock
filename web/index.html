@@ -4,8 +4,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Airlock</title>
+<meta name="description" content="Send files between your own devices, sealed before they leave.">
+<!-- This server is reachable only from one tailnet and holds one person's
+     files. Nothing here should ever be indexed, and a crawler that could reach
+     it has already found something that was not meant to be public. -->
+<meta name="robots" content="noindex, nofollow">
 <link rel="manifest" href="/manifest.webmanifest">
 <meta name="theme-color" content="#14181C">
+<meta name="color-scheme" content="dark">
+<!-- iOS reads these rather than the manifest when the app is added to the Home
+     Screen, and without the title it uses the page title, which is longer than
+     the space an icon label gets. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Airlock">
 <link rel="stylesheet" href="/tokens.css">
 <link rel="stylesheet" href="/app.css">
 </head>

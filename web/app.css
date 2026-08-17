@@ -162,9 +162,12 @@ p { text-wrap: pretty; }
   letter-spacing: var(--track-panel);
 }
 
+/* The line under the headline. It was set in display type, which put two
+   competing headlines in the chamber and read as a layout fault rather than as
+   an instruction and its alternative. */
 #drop > div {
-  font: 700 clamp(1.3rem, 2.5vw, 1.7rem)/1.2 var(--display);
-  letter-spacing: -0.025em;
+  color: var(--vapor);
+  font: 500 var(--prose)/1.5 var(--sans);
 }
 
 #drop button {
@@ -726,6 +729,38 @@ nav button[aria-current="page"] {
   .actions { width: 100%; }
   .actions .ghost { flex: 1 1 auto; }
   [data-view="devices"] .actions { width: auto; }
+
+  /* A filename is what a row is for, and one column is not enough to ellipsise
+     it into: "Screenshot_2026081..." names nothing. It wraps here instead, and
+     is bounded so a pathological name cannot push the row off the screen. */
+  .name {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    font-size: 16.5px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  /* The detail and note lines are monospace, which does not break on its own at
+     a narrow width and would otherwise decide the row's width for it. */
+  .rowtext > .data { overflow-wrap: anywhere; }
+
+  /* Below the point where a thumbnail, a name and a column of buttons all fit
+     side by side, the text takes the row and the buttons take the next one. */
+  .rowtext { flex: 1 1 100%; }
+
+  .thumb {
+    width: 48px;
+    height: 48px;
+  }
+
+  .rows li {
+    align-items: flex-start;
+    gap: 10px 12px;
+    padding: 16px 2px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

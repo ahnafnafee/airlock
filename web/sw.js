@@ -101,22 +101,9 @@ self.addEventListener('notificationclick', (event) => {
   const id = event.notification.data && event.notification.data.id;
 
   event.waitUntil((async () => {
-    // Decline completes entirely in here. No window opens, and the server stops
-    // holding a file nobody wanted.
-    if (event.action === 'decline' && id) {
-      try {
-        await fetch(`/api/transfer/${id}/decline`, { method: 'POST' });
-      } catch {
-        // The tailnet is down. The transfer simply stays in the inbox, which is
-        // the same place it would have been anyway.
-      }
-      return;
-    }
-    // A server-complete held transfer can download in one tap. An incomplete
-    // transfer may instead be arriving directly into this device's stage, so
-    // its Accept opens the inbox where local and server-held chunks are both
-    // considered. Sending every Accept through /dl would ask the server for
-    // chunks the direct path deliberately never uploaded there.
+    // A transfer the server holds every chunk of can download in one tap. One
+    // still arriving has nothing to hand over yet, so its Accept opens the
+    // inbox, where the row says how far along it is.
     if (event.action === 'accept' && id) {
       return self.clients.openWindow(acceptRoute(event.notification.data));
     }
@@ -236,12 +223,15 @@ async function announce(newest) {
     data: { ...base.data, name: meta.name },
   };
   if (RICH) {
-    // Two is the practical maximum Android renders. Dismissing is already a
-    // swipe, so neither button is spent on it.
-    options.actions = [
-      { action: 'accept', title: 'Accept' },
-      { action: 'decline', title: 'Decline' },
-    ];
+    // Accept only. Declining is irreversible and destroys the transfer for
+    // everyone once the last addressee refuses, and a lock screen is the worst
+    // place to put an action like that: the file is a line of text, there is no
+    // confirmation, there is no undo, and the button sits under a thumb that is
+    // trying to dismiss a notification. It lives in the Inbox instead, beside
+    // Delete, where the file is named and the choice is being made deliberately.
+    //
+    // Dismissing is already a swipe, so nothing is spent on it here either.
+    options.actions = [{ action: 'accept', title: 'Accept' }];
     options.requireInteraction = true;
     // The thumbnail is not lost where this is skipped: it moves to the arrival
     // screen, which is where the tap lands and where Accept and Decline live.

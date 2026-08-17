@@ -30,7 +30,12 @@ import (
 //go:embed web/manifest.webmanifest web/icon-192.png web/icon-512.png web/icon-maskable.png web/icon-badge.png
 var webFS embed.FS
 
+// Set at build time with -X main.version. A build made any other way says so
+// rather than claiming a release it is not.
+var version = "dev"
+
 var (
+	showVersion     = flag.Bool("version", false, "print the version and exit")
 	authMode        = flag.String("auth", "tailscale", `authentication mode: "tailscale" or "token"`)
 	dataDir         = flag.String("data", defaultDataDir(), "data directory")
 	hostname        = flag.String("hostname", "airlock", "tsnet node name")
@@ -224,6 +229,10 @@ func isLoopback(remoteAddr string) bool {
 
 func main() {
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("airlock", version)
+		return
+	}
 	if err := run(); err != nil {
 		log.Fatal(err)
 	}

@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The client is embedded into the binary, so the build is the only place
+        # a missing asset shows up. Running it on all three keeps a path
+        # separator or a case-sensitive filename from reaching a release.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          # NOTE: `cache:` intentionally omitted. Its bundled save runs in a
+          # post-step even when the job failed, which is how a partial module
+          # tree gets written to a cache key that later runs restore.
+          cache: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          # Same reason as above.
+
+      - name: Restore the Go module cache
+        id: cache-go
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            go-${{ runner.os }}-
+
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt would change these files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - run: go vet ./...
+
+      - name: Test the server
+        run: go test ./...
+
+      - name: Test the client
+        run: node --test web/*.test.mjs
+
+      - name: Build
+        run: go build ./...
+
+      # Only on a green run, so a job that failed halfway cannot write a partial
+      # module tree under a key the next run restores.
+      - name: Save the Go module cache
+        if: success() && steps.cache-go.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ steps.cache-go.outputs.cache-primary-key }}

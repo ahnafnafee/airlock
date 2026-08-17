@@ -16,6 +16,7 @@ import { api } from './api.js';
 import {
   DOMAIN, MODE_SEALED, modeOf, openRecord, unpackHashes, loadMaster, b64decode,
 } from './crypto.js';
+import { assembledFile } from './assemble.js';
 
 // Checked before either reaches a URL.
 const TRANSFER_ID = /^[0-9a-f]{32}$/;
@@ -46,15 +47,28 @@ const spawnAssembler = () => new Worker(
 // server, so this is an action that can be retried as often as it takes: nothing
 // it reads is consumed, and a failed attempt leaves the transfer exactly as it
 // found it.
-export async function assembleTransfer(transferId, { spawn = spawnAssembler } = {}) {
+export async function assembleTransfer(transferId, { spawn = spawnAssembler, meta: known = null } = {}) {
   if (!TRANSFER_ID.test(transferId || '')) {
     throw new Error('a malformed transfer id has nothing to assemble');
   }
+
+  // Before anything else, and before any network. A save picker and a share
+  // sheet both need the user gesture the click carried, and a gesture does not
+  // survive an unbounded wait: two tailnet round trips and a worker spawn ahead
+  // of the picker is how a second Save on an already-assembled file loses the
+  // very gesture it was supposed to still have. The caller passes the metadata
+  // it already decrypted for the row, so the common case reaches the operating
+  // system having awaited one directory lookup.
+  if (known) {
+    const ready = await assembledFile(transferId, known);
+    if (ready) return ready;
+  }
+
   const mk = await loadMaster();
   if (!mk) throw new Error('Locked. Unlock this device first.');
 
   const info = await api.transfer(transferId);
-  const meta = await openMeta(mk, info);
+  const meta = known || await openMeta(mk, info);
 
   // The chunk list is what keys every chunk to its position, and it is sealed
   // for that reason: an unsealed one would let the server choose which bytes go

@@ -40,9 +40,13 @@ function preferShare(file, nav = navigator, win = window) {
 // implementation would drift on which rung it reaches for and where the file
 // lands. Imported here rather than at the top so the direct-transfer path stays
 // out of the boot path, exactly as the rest of this module loads it.
-async function saveTransfer(transferId) {
+async function saveTransfer(transferId, meta = null) {
   const { assembleTransfer } = await import('../receive.js');
-  const file = await assembleTransfer(transferId);
+  // The row already decrypted this transfer's metadata to draw its name, and
+  // handing it over is what lets an already-assembled file reach the export
+  // with no network in between. A save picker and a share sheet both spend the
+  // click's gesture, and a gesture does not survive two round trips.
+  const file = await assembleTransfer(transferId, { meta });
   return exportFile(file, { preferShare: preferShare(file) });
 }
 
@@ -375,7 +379,7 @@ registerView('inbox', 'Inbox', (panel) => {
         from: name,
         action: {
           label: 'Save',
-          run: () => saveTransfer(id).catch(
+          run: () => saveTransfer(id, meta).catch(
             (err) => toast(`Could not save. ${err.message}`, { from: name })),
         },
       });
@@ -464,7 +468,7 @@ registerView('inbox', 'Inbox', (panel) => {
           // started underneath it would decrypt the same chunks twice.
           save.disabled = true;
           try {
-            const rung = await saveTransfer(t.id);
+            const rung = await saveTransfer(t.id, meta);
             detailNode.textContent = REPORT[rung];
             detailNode.className = 'data muted';
           } catch (err) {

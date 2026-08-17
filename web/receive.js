@@ -97,9 +97,9 @@ export async function assembleTransfer(transferId, {
       // Not a one-shot listener: the worker reports how far it has got before it
       // reports the file, and only the last of those messages settles this.
       worker.addEventListener('message', (event) => {
-        const { file, error, percent } = event.data || {};
+        const { file, error, percent, done, total } = event.data || {};
         if (percent !== undefined) {
-          onPercent?.(percent);
+          onPercent?.(percent, done, total);
           return;
         }
         if (error) reject(new Error(error));

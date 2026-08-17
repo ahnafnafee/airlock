@@ -101,6 +101,22 @@ func (e *Events) Nudge(recipients []string) {
 	e.publish(recipients, "", "inbox:")
 }
 
+// PublishProgress says that one device has moved along with one transfer. It is
+// its own event rather than a nudge because a nudge means "re-read the inbox",
+// and a save ticking a hundred times would have every other device re-reading
+// and re-decrypting the whole list a hundred times to learn one number.
+//
+// What travels is a transfer id and a device name, both of which every receiver
+// can already see. How far along the save is deliberately does not travel: it is
+// read from the endpoint that already scopes it to people entitled to the
+// transfer, so this stays a pointer at what changed rather than a second,
+// unscoped copy of it.
+//
+// The saving device is excluded. It is the one device that already knows.
+func (e *Events) PublishProgress(recipients []string, id, node string) {
+	e.publish(recipients, node, "progress:"+id+":"+node)
+}
+
 func (e *Events) publish(recipients []string, excluded, message string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()

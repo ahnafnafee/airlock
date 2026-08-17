@@ -1,4 +1,4 @@
-import { registerView, state, el, onInbox, notifyStatus, pushCapable, enableNotifications, toast } from '../app.js';
+import { registerView, state, el, onInbox, onProgress, notifyStatus, pushCapable, enableNotifications, toast } from '../app.js';
 import { api } from '../api.js';
 import { renderStrip } from '../strip.js';
 import { RUNG, exportFile } from '../export.js';
@@ -90,13 +90,114 @@ export async function settleAfterSave(t, meta, rung, deps = {}) {
 // full width would overflow by exactly this much.
 const ROW_PADDING = 16;
 
+// One bit per chunk, set for every chunk this device has written. Assembly runs
+// strictly in file order, so the set bits are always a prefix; the shape is a
+// bitmap rather than a count because that is what the endpoint already stores,
+// validates against the chunk list, and scopes to the people entitled to see it.
+//
+// Bit i lives in byte i>>3 at 1<<(i&7). Only this app writes and reads these, so
+// the convention need only be consistent, but a reader counting bits deserves to
+// know which end they start from.
+export function progressBitmap(done, total) {
+  const bytes = new Uint8Array((total + 7) >> 3);
+  for (let i = 0; i < done; i++) bytes[i >> 3] |= 1 << (i & 7);
+  return bytes;
+}
+
+// Publishing progress is a courtesy to the other devices and must never be able
+// to fail a save, so every error here is swallowed. The server refuses updates
+// that arrive too fast; this keeps them from being sent in the first place, so
+// the common case costs no request rather than a refused one.
+function progressPublisher(transferId, put = api.putProgress, now = () => Date.now()) {
+  let last = 0;
+  return (done, total) => {
+    if (!total) return;
+    // The last chunk always reports, whatever the clock says, or the final
+    // state another device is left looking at is whatever the last tick
+    // happened to catch.
+    const finished = done >= total;
+    if (!finished && now() - last < 1000) return;
+    last = now();
+    Promise.resolve()
+      .then(() => put(transferId, progressBitmap(done, total)))
+      .catch(() => {});
+  };
+}
+
+const POPCOUNT = new Uint8Array(256);
+for (let i = 1; i < 256; i++) POPCOUNT[i] = (i & 1) + POPCOUNT[i >> 1];
+
+export const bitsSet = (bytes) => {
+  let n = 0;
+  for (const b of bytes) n += POPCOUNT[b];
+  return n;
+};
+
+// How far other devices have got with a transfer, in whole percents, keyed by
+// transfer and device. It lives outside the rows because this view rebuilds
+// every row on every nudge, and a figure that died with its element would blank
+// itself each time somebody else's save happened to arrive.
+const elsewhere = new Map();
+// The element showing that line, and the chunk count it is measured against,
+// per transfer on screen. Rebuilt with the rows.
+const elsewhereShown = new Map();
+
+const elsewhereKey = (id, node) => `${id}:${node}`;
+
+// One line naming every other device working on this transfer. Reads as a
+// sentence rather than a bar because several devices can be saving the same
+// file at once, and three bars stacked under one row is a chart nobody asked
+// for.
+export function elsewhereText(id, at = elsewhere) {
+  const parts = [];
+  for (const [key, percent] of at) {
+    const cut = key.indexOf(':');
+    if (key.slice(0, cut) !== id) continue;
+    const node = key.slice(cut + 1);
+    parts.push(percent >= 100 ? `${node} saved it` : `${node} saving ${percent}%`);
+  }
+  return parts.join(' · ');
+}
+
+function paintElsewhere(id) {
+  const shown = elsewhereShown.get(id);
+  if (!shown) return;
+  const text = elsewhereText(id);
+  shown.el.textContent = text;
+  shown.el.hidden = text === '';
+}
+
+// Read one device's progress on one transfer. The stream said only that it
+// changed; the figure comes from the endpoint that scopes it to the people
+// entitled to the transfer, so a device that cannot see it learns nothing.
+async function readElsewhere(id, node, get = api.getProgress) {
+  const shown = elsewhereShown.get(id);
+  if (!shown?.chunks) return;
+  try {
+    const bitmap = new Uint8Array(await get(id, node));
+    const percent = Math.min(100, Math.floor((bitsSet(bitmap) * 100) / shown.chunks));
+    elsewhere.set(elsewhereKey(id, node), percent);
+    paintElsewhere(id);
+  } catch {
+    // Another device's progress is a courtesy. Without it the row is exactly the
+    // row it was before, which is why nothing here is reported.
+  }
+}
+
 async function saveTransfer(transferId, meta = null, onPercent = null) {
   const { assembleTransfer } = await import('../receive.js');
+  const publish = progressPublisher(transferId);
   // The row already decrypted this transfer's metadata to draw its name, and
   // handing it over is what lets an already-assembled file reach the export
   // with no network in between. A save picker and a share sheet both spend the
   // click's gesture, and a gesture does not survive two round trips.
-  const file = await assembleTransfer(transferId, { meta, onPercent });
+  const file = await assembleTransfer(transferId, {
+    meta,
+    onPercent: (percent, done, total) => {
+      onPercent?.(percent);
+      publish(done, total);
+    },
+  });
   return exportFile(file, { preferShare: preferShare(file) });
 }
 
@@ -380,6 +481,11 @@ registerView('inbox', 'Inbox', (panel) => {
   // The nudge says only that something changed, so the list is re-read rather
   // than patched from the event.
   onInbox(() => refresh());
+  // Deliberately not a refresh. Another device ticking along with a save changes
+  // one line on one row, and rebuilding the list would re-decrypt every name and
+  // remint every thumbnail several times a second for the duration of somebody
+  // else's download.
+  onProgress((id, node) => readElsewhere(id, node));
 
   async function refresh() {
     // Re-read rather than trusted from mount time. Permission can change in
@@ -419,6 +525,13 @@ registerView('inbox', 'Inbox', (panel) => {
     const minted = [];
     const rows = [];
     const ready = [];
+    // The elements are about to be replaced, and a figure kept for a transfer
+    // that has left the list would otherwise be held for the life of the page.
+    elsewhereShown.clear();
+    const listed = new Set(transfers.map((t) => t.id));
+    for (const key of [...elsewhere.keys()]) {
+      if (!listed.has(key.slice(0, key.indexOf(':')))) elsewhere.delete(key);
+    }
     for (const t of transfers) {
       rows.push(await row(t, minted, ready));
     }
@@ -487,6 +600,14 @@ registerView('inbox', 'Inbox', (panel) => {
 
     const detailNode = el('div', { class: 'data muted' }, detail);
     const noteNode = note ? el('div', { class: 'data muted' }, note) : null;
+    // What the other devices are doing with this same transfer. Its own line
+    // rather than part of the detail, because the detail belongs to this device
+    // and the two change for entirely unrelated reasons.
+    const elsewhereNode = el('div', { class: 'data muted', hidden: true });
+    elsewhereShown.set(t.id, { el: elsewhereNode, chunks: t.chunkCount });
+    // Painted immediately from anything already known, so a row that repaints
+    // mid-save comes back with the figure rather than blank until the next tick.
+    paintElsewhere(t.id);
 
     const actions = el('div', { class: 'actions' });
     // Every row offers the same three words, so a screen reader announces "Save,
@@ -583,7 +704,7 @@ registerView('inbox', 'Inbox', (panel) => {
       // The text block absorbs the row's free space so the thumbnail stays
       // against the name it belongs to rather than drifting to the far side.
       el('div', { class: 'rowtext' },
-        el('div', { class: 'name' }, name), detailNode, noteNode || []),
+        el('div', { class: 'name' }, name), detailNode, elsewhereNode, noteNode || []),
       actions);
     // Only while it has something to say. A transfer whose every chunk is here
     // draws a solid bar, which is the same picture for "complete" as a filled

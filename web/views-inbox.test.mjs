@@ -46,8 +46,8 @@ function stubDocument() {
 
 stubDocument();
 const {
-  cleanLocalTransfer, readRow, reconcileLocalTransfers, rowActions, settleAfterSave,
-  terminateTransfer,
+  bitsSet, cleanLocalTransfer, elsewhereText, progressBitmap, readRow,
+  reconcileLocalTransfers, rowActions, settleAfterSave, terminateTransfer,
 } = await import('./views/inbox.js');
 const { RUNG } = await import('./export.js');
 
@@ -307,4 +307,56 @@ test('a refused clearing keeps the local copy', async () => {
   // it is the server's refusal being tested rather than the outcome check above.
   assert.equal(await settleAfterSave({ id: ID }, {}, RUNG.SAVE_PICKER, deps), false);
   assert.deepEqual(calls, []);
+});
+
+// The bitmap is what one device tells the others about a save in progress. It
+// is read back by a different device than wrote it, so the two halves have to
+// agree on length and on which end the bits start from, and neither half is
+// allowed to round: a percentage computed from a wrong bit count is a bar that
+// is confidently in the wrong place.
+test('a save publishes one bit per written chunk', () => {
+  // Length is the chunk count rounded up to whole bytes, never the count.
+  assert.equal(progressBitmap(0, 8).length, 1);
+  assert.equal(progressBitmap(0, 9).length, 2);
+  assert.equal(progressBitmap(0, 17).length, 3);
+
+  // Nothing written is no bits set, and the whole file is exactly as many bits
+  // as there are chunks, never the spare ones padding the last byte.
+  assert.equal(bitsSet(progressBitmap(0, 20)), 0);
+  assert.equal(bitsSet(progressBitmap(20, 20)), 20);
+
+  // Assembly runs in file order, so the set bits are a prefix of that length.
+  for (const done of [1, 7, 8, 9, 19]) {
+    assert.equal(bitsSet(progressBitmap(done, 20)), done, `${done} chunks written`);
+  }
+
+  // The prefix starts at the low bit of the first byte. Stated as a value
+  // rather than implied, because the reader is a different device.
+  assert.deepEqual([...progressBitmap(3, 8)], [0b00000111]);
+});
+
+test('a percentage from a bitmap never exceeds the file', () => {
+  // The padding bits in the last byte are never set, so a full file reads as
+  // exactly 100 rather than as 106 because the count was rounded to bytes.
+  const chunks = 17;
+  const full = bitsSet(progressBitmap(chunks, chunks));
+  assert.equal(Math.floor((full * 100) / chunks), 100);
+});
+
+test('the elsewhere line names every device and only this transfer', () => {
+  const at = new Map([
+    [`${ID}:pixel-10-pro`, 42],
+    [`${ID}:ipad-pro-11-m4`, 100],
+    ['b'.repeat(32) + ':axiom-laptop', 7],
+  ]);
+  const text = elsewhereText(ID, at);
+  assert.match(text, /pixel-10-pro saving 42%/);
+  // A finished save reads as finished rather than as stuck at 100%.
+  assert.match(text, /ipad-pro-11-m4 saved it/);
+  // Another transfer's progress must never leak onto this row.
+  assert.doesNotMatch(text, /axiom-laptop/);
+});
+
+test('a transfer nobody else is saving has nothing to say', () => {
+  assert.equal(elsewhereText(ID, new Map()), '');
 });

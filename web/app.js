@@ -213,6 +213,7 @@ async function refreshBadge() {
 // unlock has to wait behind.
 const listeners = new Set();
 const deviceListeners = new Set();
+const progressListeners = new Set();
 
 // A view calls this to be told when something arrives. The event carries no
 // detail, so the handler re-reads whatever it needs.
@@ -229,6 +230,13 @@ export function notifyInbox() {
 // a transfer. They have their own event so an idle Send view can repaint the
 // recipient picker without waiting for an unrelated file to arrive.
 export function onDevices(fn) { deviceListeners.add(fn); }
+
+// Another device has moved along with a saving transfer. Its own event, because
+// a save ticks steadily for as long as the file is large, and routing that
+// through the inbox nudge would have every device re-reading and re-decrypting
+// the whole list on every tick to learn one number. The handler is given the
+// transfer and the device and reads the figure itself.
+export function onProgress(fn) { progressListeners.add(fn); }
 
 // A signal is the opposite: it carries the whole payload, because a session
 // description has nowhere else to be read from.
@@ -319,6 +327,19 @@ export function listen() {
 
     source.addEventListener('devices', () => {
       for (const fn of deviceListeners) fn();
+    });
+
+    // "<transfer id>:<device>", naming what moved and who moved it. How far it
+    // has got is deliberately not here: a listener reads that from the endpoint
+    // that scopes it, so the stream stays a pointer at what changed. A device
+    // name is a DNS label and an id is hex, so the first colon is the split.
+    source.addEventListener('progress', (event) => {
+      const at = (event?.data || '').indexOf(':');
+      if (at < 1) return;
+      const id = event.data.slice(0, at);
+      const node = event.data.slice(at + 1);
+      if (!node) return;
+      for (const fn of progressListeners) fn(id, node);
     });
 
     // The payload is base64 because an SSE data field ends at the first newline

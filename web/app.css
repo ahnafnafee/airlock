@@ -1089,6 +1089,12 @@ body > section li { margin-bottom: 8px; }
     left: calc(16px + env(safe-area-inset-left, 0px));
     right: calc(16px + env(safe-area-inset-right, 0px));
     max-width: none;
+    /* Both edges are pinned here, which only spans the screen if the width is
+       free to be worked out from them. The desktop rule sizes this to its
+       content, and a fixed element given a width plus two edges is
+       over-constrained: the browser resolves that by dropping one edge, so the
+       stack sat against the left rather than filling the space between. */
+    width: auto;
   }
 
   #drop { padding: 40px 22px; }

@@ -123,6 +123,13 @@ window, like a normal app.
 Where the browser offers it, an **Install** button also appears on the Send
 screen, which saves hunting through a menu that moves between browser releases.
 
+**Android does not show an install option?** Chrome only offers PWA installation
+when Android's current Home app supports pinned shortcuts. In **Settings → Apps →
+Default apps → Home app**, select Pixel Launcher or another launcher that supports
+pinned shortcuts, then force-stop and reopen Chrome because Chrome caches this
+capability for the life of its process. If every PWA is missing its install option,
+the launcher is the likely cause rather than Airlock's manifest.
+
 **On iPhone and iPad, install it before entering your passphrase.** A browser tab
 and an installed app keep separate data, so a passphrase typed in the tab will not
 be there in the app.

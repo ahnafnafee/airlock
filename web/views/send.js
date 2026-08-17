@@ -141,7 +141,11 @@ registerView('send', 'Send', (panel) => {
     'You can also paste a file into this window.');
   const installNote = el('p', { class: 'data muted', hidden: true });
 
-  const recipient = el('select', { id: 'to' }, el('option', { value: '' }, 'All my devices'));
+  // autocomplete off because a browser restores a select's value across a reload
+  // on its own, and a restored value is a destination nobody picked in this
+  // session. Every device is the default, and it has to survive a refresh.
+  const recipient = el('select', { id: 'to', autocomplete: 'off' },
+    el('option', { value: '' }, 'All my devices'));
   // No visible heading, because the list has to disappear when it is empty. The
   // accessible name carries what the heading would have said.
   const stagedList = el('ul', { class: 'rows staged', 'aria-label': 'Staged files' });

@@ -858,8 +858,9 @@ nav button[aria-current="page"] { color: var(--green); }
     inset: auto auto 0 0;
     width: var(--rail-w);
     height: var(--rail-foot);
+    justify-content: center;
     margin-left: 0;
-    padding: 0 18px 0 calc(18px + env(safe-area-inset-left, 0px));
+    padding: 0 18px;
     border-top: 1px solid var(--line);
     border-right: 1px solid var(--line);
     background: var(--surface);

@@ -146,6 +146,10 @@
   --track-mark: -0.02em;
   --track-label: 0.02em;
 
+  /* A card's inset. The chunk strip spans a row edge to edge by cancelling it,
+     so the two have to be the same value and not two that agree today. */
+  --row-pad: 16px;
+
   --rail-w: 232px;
   /* The rail's head. The nav starts here, so it is one value and not two that
      have to be kept in agreement by hand. */

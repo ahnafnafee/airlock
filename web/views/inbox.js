@@ -551,7 +551,11 @@ registerView('inbox', 'Inbox', (panel) => {
       el('div', { class: 'rowtext' },
         el('div', { class: 'name' }, name), detailNode, noteNode || []),
       actions);
-    if (total > 0) {
+    // Only while it has something to say. A transfer whose every chunk is here
+    // draws a solid bar, which is the same picture for "complete" as a filled
+    // progress bar and sits under a line that already says so. The strip earns
+    // its place when it shows what is still missing and where.
+    if (total > 0 && (reach ?? 0) < total) {
       const strip = renderStrip(li, total, {
         seam: true,
         label: `${reach} of ${total} chunks here`,

@@ -1516,7 +1516,7 @@ func TestProgressRationingForgetsOldEntries(t *testing.T) {
 	s := &Server{progressSeen: map[string]time.Time{}}
 	base := time.Now()
 	for i := 0; i < 1100; i++ {
-		s.tooSoon("t" + strconv.Itoa(i), "pixel", base)
+		s.tooSoon("t"+strconv.Itoa(i), "pixel", base)
 	}
 	// A later write sweeps whatever has gone stale rather than growing forever.
 	s.tooSoon("fresh", "pixel", base.Add(2*time.Hour))

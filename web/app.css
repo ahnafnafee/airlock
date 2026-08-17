@@ -1013,7 +1013,10 @@ body > section li { margin-bottom: 8px; }
     gap: 4px;
     min-width: 0;
     padding: 8px 4px;
-    border-radius: var(--r-md);
+    /* Concentric with the track: an inner radius has to be the outer one less
+       the padding between them, or the corner curves at two different rates and
+       leaves a wedge of track showing. The track is a stadium, so this is too. */
+    border-radius: var(--r-pill);
     font-size: 11.5px;
     white-space: nowrap;
   }

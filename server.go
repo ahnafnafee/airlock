@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -695,6 +696,12 @@ func (s *Server) signal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "device is not connected", http.StatusServiceUnavailable)
 		return
 	}
+	// The direct path either works or leaves a transfer sitting at zero chunks
+	// with nothing anywhere to say how far it got. This counts the handshake
+	// without reading it: a run with offers and no answers failed in one place, a
+	// run with both and no chunks failed in another, and the two are otherwise
+	// indistinguishable from the outside.
+	log.Printf("signal %s -> %s (%d bytes)", who(r).Node, req.To, len(req.Payload))
 	w.WriteHeader(http.StatusNoContent)
 }
 

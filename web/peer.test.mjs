@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { WIRE, FRAGMENT, LINK_COUNT, linkCountFor, negotiate, receive } from './peer.js';
+import { WIRE, FRAGMENT, LINK_COUNT, linkCountFor, negotiate, receive,
+  peerToPeerAvailable,
+  newConnection,
+} from './peer.js';
 
 // The transport refuses a message larger than the connection's negotiated
 // maximum, and 64 KiB is the safe interop figure. The fake enforces it by
@@ -494,4 +497,21 @@ test('a phone opens one connection where a desktop opens several', async () => {
   assert.equal(linkCountFor({ userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', maxTouchPoints: 5 }), 1);
   assert.equal(linkCountFor({ userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', maxTouchPoints: 0 }), LINK_COUNT);
   assert.equal(linkCountFor({ userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }), LINK_COUNT);
+});
+
+// WebRTC is the first thing a VPN client or privacy extension turns off, because
+// a peer connection is what reveals a local address. Turning it off removes the
+// constructor from the global scope rather than making it fail, so the direct
+// path died on a bare ReferenceError several frames from anything that could
+// explain it, and the transfer sat at zero chunks with nothing anywhere saying
+// why. This is the question that has to be asked before the handshake starts.
+test('a browser with WebRTC turned off is recognized, not discovered mid-handshake', () => {
+  assert.equal(peerToPeerAvailable({ RTCPeerConnection: function () {} }), true);
+  assert.equal(peerToPeerAvailable({}), false);
+  // Present but not constructible is the same answer: something replaced it.
+  assert.equal(peerToPeerAvailable({ RTCPeerConnection: undefined }), false);
+  assert.equal(peerToPeerAvailable({ RTCPeerConnection: {} }), false);
+
+  // And the failure names itself rather than arriving as a ReferenceError.
+  assert.throws(() => newConnection({}), /WebRTC turned off/);
 });

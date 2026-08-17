@@ -7,6 +7,7 @@ import { openStage } from '../staging.js';
 import { renderStrip } from '../strip.js';
 import { MODE_SEALED } from '../crypto.js';
 import { capabilities, onCapabilities, installCard, filesFromDrop } from '../inbound.js';
+import { peerToPeerAvailable } from '../peer.js';
 
 let sendImpl = {
   server: uploadThroughServer,
@@ -153,6 +154,13 @@ registerView('send', 'Send', (panel) => {
   // server cannot read, which is the cheaper of the two prices. Untick it and
   // the sealed chunks never leave this device.
   const hold = el('input', { type: 'checkbox', id: 'hold', checked: true });
+  // A browser with WebRTC turned off cannot open a peer connection at all, so
+  // the direct path is not a choice here, it is a way to queue a transfer that
+  // will never move. The control stays visible rather than being hidden, because
+  // the decision it represents still exists and why it is unavailable is worth
+  // reading.
+  const canGoDirect = peerToPeerAvailable();
+  if (!canGoDirect) hold.disabled = true;
 
   const recipient = el('select', { id: 'to' }, el('option', { value: '' }, 'All my devices'));
   // No visible heading, because the list has to disappear when it is empty. The
@@ -186,11 +194,15 @@ registerView('send', 'Send', (panel) => {
       hold,
       el('span', {},
         el('span', {}, 'Finish sending even if I close the app'),
-        el('span', { class: 'data muted' },
-          'Your files wait on the server, still sealed, until the other device'
-          + ' picks them up. The server never has the key. Turn this off to send'
-          + ' straight between devices, which needs both awake at the same'
-          + ' time.')))),
+        el('span', { class: 'data muted' }, canGoDirect
+          ? 'Your files wait on the server, still sealed, until the other device'
+            + ' picks them up. The server never has the key. Turn this off to'
+            + ' send straight between devices, which needs both awake at the'
+            + ' same time.'
+          : 'Your files wait on the server, still sealed, until the other device'
+            + ' picks them up. The server never has the key. Sending straight'
+            + ' between devices needs WebRTC, which is turned off in this'
+            + ' browser, so it is not available here.')))),
     el('p', { class: 'label' }, el('label', { for: 'to' }, 'To')),
     recipient,
     stagedList,

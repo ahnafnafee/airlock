@@ -3,6 +3,7 @@ import { api } from '../api.js';
 import { openStage } from '../staging.js';
 import { renderStrip } from '../strip.js';
 import { RUNG, exportFile } from '../export.js';
+import { peerToPeerAvailable } from '../peer.js';
 import { DOMAIN, MODE_SEALED, openRecord, modeOf, b64decode } from '../crypto.js';
 import { isStandalone } from '../ios.js';
 
@@ -127,7 +128,7 @@ async function heldHere(transferId, open) {
 // reachable when either one holds it. The server's completeness flag speaks for
 // the server alone, and on the direct path the server is handed no chunk at all:
 // a row that asked only that would refuse to open a file already on this disk.
-export async function readRow(t, mk, open = openStage, viewer = null) {
+export async function readRow(t, mk, open = openStage, viewer = null, direct = true) {
   const outbound = Boolean(viewer && t.sender === viewer);
   const when = ago(t.createdAt);
   const from = outbound ? `sent ${when}` : `from ${t.sender} · ${when}`;
@@ -192,7 +193,15 @@ export async function readRow(t, mk, open = openStage, viewer = null) {
     // What the row is waiting for, in the one sentence it takes to say it. The
     // count is the honest part: it is positions this device could assemble from
     // right now, whichever side holds them.
-    note: `Still arriving. ${reach} of ${cids.length} chunks so far.`,
+    // A transfer the server was never given can only come over a peer
+    // connection, so a browser with WebRTC turned off will wait for it forever.
+    // Saying which of the two is happening is the difference between a transfer
+    // that is slow and one that is never going to arrive.
+    note: direct
+      ? `Still arriving. ${reach} of ${cids.length} chunks so far.`
+      : `Waiting on a direct transfer, and this browser has WebRTC turned off,`
+        + ` so it cannot arrive here. A VPN or privacy extension is the usual`
+        + ` cause. ${reach} of ${cids.length} chunks so far.`,
     reach,
     total: cids.length,
     heldAt,
@@ -471,7 +480,7 @@ registerView('inbox', 'Inbox', (panel) => {
   }
 
   async function row(t, shortfallFor = () => 0, minted = [], ready = []) {
-    const presentation = await readRow(t, state.mk, openStage, state.me?.node);
+    const presentation = await readRow(t, state.mk, openStage, state.me?.node, peerToPeerAvailable());
     const { name, detail, meta, saveable, note, reach, total, heldAt } = presentation;
     const allowedActions = new Set(rowActions(presentation));
     // Recorded where the decision is already made, so the arrival notice and the

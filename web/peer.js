@@ -359,9 +359,26 @@ export function receive(links, { onOffer, has, onChunk }) {
   });
 }
 
+// Whether this browser will make a peer connection at all. WebRTC is the first
+// thing a VPN client or a privacy extension turns off, because a peer connection
+// is what reveals a local address, and turning it off removes the constructor
+// from the global scope rather than making it fail. Asked as a capability
+// question, like everything else here, and never as a question about which
+// browser this is.
+export function peerToPeerAvailable(scope = globalThis) {
+  return typeof scope.RTCPeerConnection === 'function';
+}
+
 // On a tailnet ICE finds the 100.x addresses as host candidates, so there is no
 // STUN and no TURN to configure. An empty server list is correct here rather
 // than an oversight.
-export function newConnection() {
-  return new RTCPeerConnection({ iceServers: [] });
+export function newConnection(scope = globalThis) {
+  // Without this the missing constructor surfaces as a bare ReferenceError from
+  // inside a handshake, several frames from anything that could explain it, and
+  // the transfer simply sits at zero chunks forever.
+  if (!peerToPeerAvailable(scope)) {
+    throw new Error('this browser has WebRTC turned off, so a direct transfer'
+      + ' cannot be sent or received here');
+  }
+  return new scope.RTCPeerConnection({ iceServers: [] });
 }

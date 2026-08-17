@@ -812,8 +812,16 @@ export function makeSessions(deps) {
       // Two claims the relay cannot vouch for, checked against the server's own
       // record: the offering peer has to be this transfer's sender, and this
       // device has to be one of its recipients.
-      if (info.sender !== msg.from || info.sender === me) return;
-      if (info.to.length > 0 && !info.to.includes(me)) return;
+      if (info.sender !== msg.from || info.sender === me) {
+        console.warn(`refusing an offer for ${transferId}: the server records`
+          + ` ${info.sender} as its sender and the offer claims ${msg.from}`);
+        return;
+      }
+      if (info.to.length > 0 && !info.to.includes(me)) {
+        console.warn(`refusing an offer for ${transferId}: it is addressed to`
+          + ` ${info.to.join(', ')} and this device is ${me}`);
+        return;
+      }
       if (cancelledReceives.has(transferId)) return;
 
       entry.join = true;
@@ -946,23 +954,41 @@ export function makeSessions(deps) {
     }
   }
 
+  // Naming the check that refused a signal, because the alternative is a device
+  // that answers nothing with no way to tell which rule stopped it.
+  function refuse(why) {
+    console.warn(`a signalling message was refused: ${why}`);
+    return null;
+  }
+
   function decode(payload) {
     let msg;
     try {
       msg = JSON.parse(new TextDecoder().decode(b64decode(payload)));
     } catch {
-      return null;
+      return refuse('it is not the base64 of a JSON object');
     }
-    if (!msg || typeof msg.from !== 'string' || msg.from === '') return null;
+    if (!msg || typeof msg.from !== 'string' || msg.from === '') {
+      return refuse('it names no sending device');
+    }
     // A transfer runs over several connections, so a handshake carries a list.
     // The length is bounded here rather than at the point of use, because this
     // is the last place the payload is anything but trusted: without the bound
     // a peer could name a thousand descriptions and have this device try to
     // open a thousand connections.
-    if (!Array.isArray(msg.sdps) || msg.sdps.length === 0) return null;
-    if (msg.sdps.length > LINK_COUNT) return null;
-    if (!msg.sdps.every((sdp) => typeof sdp === 'string')) return null;
-    if (!TRANSFER_ID.test(msg.transfer || '')) return null;
+    if (!Array.isArray(msg.sdps) || msg.sdps.length === 0) {
+      return refuse('it carries no session description');
+    }
+    if (msg.sdps.length > LINK_COUNT) {
+      return refuse(`it carries ${msg.sdps.length} session descriptions and this`
+        + ` device accepts ${LINK_COUNT}`);
+    }
+    if (!msg.sdps.every((sdp) => typeof sdp === 'string')) {
+      return refuse('a session description in it is not a string');
+    }
+    if (!TRANSFER_ID.test(msg.transfer || '')) {
+      return refuse('it names no well formed transfer');
+    }
     return msg;
   }
 
@@ -979,7 +1005,11 @@ export function makeSessions(deps) {
     // It offers again on its own next drain, which is a shorter wait than
     // tearing down a transfer that is already moving.
     const session = claim(msg.from, () => acceptFrom(msg));
-    if (!session) return;
+    if (!session) {
+      console.warn(`ignoring an offer from ${msg.from}: a session against that`
+        + ' device is already running');
+      return;
+    }
     try {
       await session;
     } catch (err) {

@@ -383,7 +383,10 @@ nav button[aria-current="page"] {
 /* Chunk state is the visual signature. It reports real transfer state only. */
 .strip {
   display: flex;
-  gap: 2px;
+  /* strip.js sets this, because it computes the segment count from it. A second
+     copy here is a copy that drifts, and the drift renders as a strip wider than
+     the panel holding it. */
+  gap: var(--seg-gap, 1px);
   height: var(--strip);
   margin: 18px 0 8px;
   padding: 4px;
@@ -398,7 +401,7 @@ nav button[aria-current="page"] {
    defined chunks are not equal and drawing them equal is a small lie about
    where a file's boundaries fall. */
 .seg {
-  min-width: 4px;
+  min-width: var(--seg-min, 3px);
   flex: 1 1 0;
   background: var(--seam);
 }

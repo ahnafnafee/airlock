@@ -202,7 +202,19 @@ async function refreshBadge() {
 // whole direct-transfer path stay out of the boot path, which is the one an
 // unlock has to wait behind.
 async function startSessions() {
-  const loading = import('./session.js');
+  // ICE is configured inside the same promise everything else here awaits, so a
+  // peer that offers the instant this stream opens cannot build a connection
+  // before the STUN address is set. Doing it after the import resolved would
+  // leave exactly that window, and a connection built without STUN gathers only
+  // obfuscated host candidates that nothing on a tailnet can resolve.
+  //
+  // The host is whatever this page was opened at, so the address needs no
+  // configuration to agree with the one that already reached this server.
+  const loading = import('./session.js').then(async (session) => {
+    const { useStun } = await import('./peer.js');
+    useStun(state.config?.stunPort || 0, location.hostname);
+    return session;
+  });
   // Registered before anything is awaited, so a peer that offers the moment this
   // stream opens is answered rather than missed.
   onSignal(async (payload) => {

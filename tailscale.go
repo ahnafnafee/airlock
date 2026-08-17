@@ -28,14 +28,16 @@ type whoIser interface {
 	Status(ctx context.Context) (*ipnstate.Status, error)
 }
 
-func tailscaleListener() (net.Listener, IdentityFunc, error) {
+// The third result is the set of addresses STUN should answer on, which is the
+// same set the HTTPS listener bound. Empty means this mode does not serve it.
+func tailscaleListener() (net.Listener, IdentityFunc, []string, error) {
 	switch *tailscaleMode {
 	case "host":
 		return hostListener()
 	case "embedded":
 		return embeddedListener()
 	default:
-		return nil, nil, fmt.Errorf("unknown --tailscale-mode %q, want host or embedded", *tailscaleMode)
+		return nil, nil, nil, fmt.Errorf("unknown --tailscale-mode %q, want host or embedded", *tailscaleMode)
 	}
 }
 
@@ -43,26 +45,26 @@ func tailscaleListener() (net.Listener, IdentityFunc, error) {
 // the kernel TUN path and Tailscale's TSO, GRO, GSO and mmsg throughput work.
 // The embedded netstack in tsnet has none of it, which is why this is the
 // default for a tool whose product is throughput.
-func hostListener() (net.Listener, IdentityFunc, error) {
+func hostListener() (net.Listener, IdentityFunc, []string, error) {
 	lc := newLocalClient()
 	ctx := context.Background()
 
 	st, err := lc.Status(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf(
+		return nil, nil, nil, fmt.Errorf(
 			"tailscaled status failed, is the daemon running and may this process reach its socket: %w", err)
 	}
 	if len(st.TailscaleIPs) == 0 {
-		return nil, nil, errors.New("tailscaled reports no tailnet address")
+		return nil, nil, nil, errors.New("tailscaled reports no tailnet address")
 	}
 	url, err := tailnetHTTPSURL(st.CertDomains, *port)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	users, err := resolveAllowedUsers(ctx, lc)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	log.Printf("host mode, allowing tailnet users %v", sortedKeys(users))
 
@@ -74,9 +76,10 @@ func hostListener() (net.Listener, IdentityFunc, error) {
 	for _, ip := range st.TailscaleIPs {
 		ips = append(ips, ip.String())
 	}
-	raw, err := listenAll(listenAddrs(ips, *port), *port)
+	stunAddrs := listenAddrs(ips, *port)
+	raw, err := listenAll(stunAddrs, *port)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// GetCertificate fetches and renews the tailnet certificate through the
 	// daemon, so there is no rotation to schedule here.
@@ -86,12 +89,12 @@ func hostListener() (net.Listener, IdentityFunc, error) {
 	// certificate for an IP literal, so reaching the same listener by address
 	// fails during the handshake.
 	log.Printf("open %s on any device on your tailnet", url)
-	return ln, identityFromWhoIs(lc, users), nil
+	return ln, identityFromWhoIs(lc, users), stunAddrs, nil
 }
 
 // embeddedListener joins the tailnet as its own node, needing nothing installed
 // on the host. Slower than host mode, and kept for exactly that portability.
-func embeddedListener() (net.Listener, IdentityFunc, error) {
+func embeddedListener() (net.Listener, IdentityFunc, []string, error) {
 	ts := &tsnet.Server{
 		Hostname: *hostname,
 		Dir:      filepath.Join(*dataDir, "tsnet"),
@@ -99,24 +102,24 @@ func embeddedListener() (net.Listener, IdentityFunc, error) {
 	}
 	ctx := context.Background()
 	if _, err := ts.Up(ctx); err != nil {
-		return nil, nil, fmt.Errorf("tsnet up: %w", err)
+		return nil, nil, nil, fmt.Errorf("tsnet up: %w", err)
 	}
 	lc, err := ts.LocalClient()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	st, err := lc.Status(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("tsnet status: %w", err)
+		return nil, nil, nil, fmt.Errorf("tsnet status: %w", err)
 	}
 	url, err := tailnetHTTPSURL(st.CertDomains, *port)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	users, err := resolveAllowedUsers(ctx, lc)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	log.Printf("embedded mode, allowing tailnet users %v", sortedKeys(users))
 
@@ -125,10 +128,10 @@ func embeddedListener() (net.Listener, IdentityFunc, error) {
 	// that the browser has no secure context and the client design collapses.
 	ln, err := ts.ListenTLS("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
-		return nil, nil, fmt.Errorf("listen tls on port %d: %w", *port, err)
+		return nil, nil, nil, fmt.Errorf("listen tls on port %d: %w", *port, err)
 	}
 	log.Printf("open %s on any device on your tailnet", url)
-	return ln, identityFromWhoIs(lc, users), nil
+	return ln, identityFromWhoIs(lc, users), nil, nil
 }
 
 // tailnetHTTPSURL turns the certificate name Tailscale assigned this node into

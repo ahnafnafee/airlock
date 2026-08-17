@@ -369,9 +369,27 @@ export function peerToPeerAvailable(scope = globalThis) {
   return typeof scope.RTCPeerConnection === 'function';
 }
 
-// On a tailnet ICE finds the 100.x addresses as host candidates, so there is no
-// STUN and no TURN to configure. An empty server list is correct here rather
-// than an oversight.
+// The ICE servers a connection is built with. Airlock answers STUN itself, on
+// the address the client already reached it at, because of what a browser does
+// to host candidates: a private one is replaced by a random .local name so a
+// page cannot read the local network layout, and resolving that needs multicast
+// DNS on a shared link. A tailnet is a routed tunnel with no multicast, so two
+// devices on one exchange candidates neither can resolve and no pair is ever
+// checked. A server-reflexive candidate is not obfuscated, so asking a server
+// both devices can already reach is what turns the tailnet address into a
+// candidate the other side can use.
+//
+// No public STUN server is contacted. The one host in the path is the one the
+// product already depends on.
+let iceServers = [];
+
+export function useStun(port, host) {
+  iceServers = port > 0 && host
+    ? [{ urls: `stun:${host}:${port}` }]
+    : [];
+  return iceServers;
+}
+
 export function newConnection(scope = globalThis) {
   // Without this the missing constructor surfaces as a bare ReferenceError from
   // inside a handshake, several frames from anything that could explain it, and
@@ -380,5 +398,5 @@ export function newConnection(scope = globalThis) {
     throw new Error('this browser has WebRTC turned off, so a direct transfer'
       + ' cannot be sent or received here');
   }
-  return new scope.RTCPeerConnection({ iceServers: [] });
+  return new scope.RTCPeerConnection({ iceServers });
 }

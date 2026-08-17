@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { WIRE, FRAGMENT, LINK_COUNT, linkCountFor, negotiate, receive,
   peerToPeerAvailable,
   newConnection,
+  useStun,
 } from './peer.js';
 
 // The transport refuses a message larger than the connection's negotiated
@@ -514,4 +515,25 @@ test('a browser with WebRTC turned off is recognized, not discovered mid-handsha
 
   // And the failure names itself rather than arriving as a ReferenceError.
   assert.throws(() => newConnection({}), /WebRTC turned off/);
+});
+
+// A tailnet gives ICE only host candidates, and every engine replaces a private
+// one with a random .local name that needs multicast DNS to resolve. A routed
+// tunnel has no multicast, so those candidates are useless to the other side and
+// no pair is ever checked. A server-reflexive candidate is not obfuscated, which
+// is why the server answers STUN at all.
+test('a connection is offered the server as its own STUN, or nothing at all', () => {
+  const RTCPeerConnection = function (config) { this.config = config; };
+
+  assert.deepEqual(useStun(9443, 'axiom-pc.tailc577fe.ts.net'),
+    [{ urls: 'stun:axiom-pc.tailc577fe.ts.net:9443' }]);
+  assert.equal(newConnection({ RTCPeerConnection }).config.iceServers[0].urls,
+    'stun:axiom-pc.tailc577fe.ts.net:9443');
+
+  // A server that does not answer STUN must not leave a URL pointing at a port
+  // nothing is listening on: gathering would stall there for its whole timeout
+  // on every connection, which is worse than gathering nothing.
+  assert.deepEqual(useStun(0, 'axiom-pc.tailc577fe.ts.net'), []);
+  assert.deepEqual(useStun(9443, ''), []);
+  assert.deepEqual(newConnection({ RTCPeerConnection }).config.iceServers, []);
 });

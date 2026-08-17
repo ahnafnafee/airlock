@@ -56,6 +56,10 @@ type ServerConfig struct {
 	TTLHours  int
 	Salt      string
 	Static    fs.FS
+	// The UDP port this server answers STUN on, or zero when it does not. The
+	// client pairs it with the host it already reached to build the ICE server
+	// URL, so nothing here has to know what name that was.
+	StunPort int
 	// Auth names what proves a caller: "tailscale" or "token". The client says
 	// different things about who a device belongs to depending on the answer,
 	// and a claim about Tailscale on a server not using it is simply false.
@@ -270,6 +274,7 @@ func (s *Server) config(w http.ResponseWriter, r *http.Request) {
 		"cdc":      s.cfg.CDC,
 		"ttlHours": s.cfg.TTLHours,
 		"vapidKey": s.cfg.Push.PublicKey(),
+		"stunPort": s.cfg.StunPort,
 		"check":    nil,
 	}
 	if b, err := os.ReadFile(filepath.Join(s.cfg.DataDir, "check.bin")); err == nil {

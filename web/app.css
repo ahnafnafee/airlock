@@ -769,16 +769,20 @@ nav button[aria-current="page"] { color: var(--green); }
     background: var(--surface);
   }
 
+  /* The rail's head, and the nav below it starts exactly where this ends. The
+     two heights are the same declared value rather than a measurement and a
+     number that happen to agree: they did not, once a control was added here,
+     and the first view in the nav spent that difference hidden underneath. */
   header {
     position: fixed;
     z-index: 21;
     inset: 0 auto auto 0;
     width: var(--rail-w);
-    min-height: 82px;
+    height: var(--rail-head);
     flex-direction: column;
     align-items: flex-start;
     justify-content: center;
-    gap: 8px;
+    gap: 6px;
     padding: 18px 18px 18px calc(18px + env(safe-area-inset-left, 0px));
     border-right: 1px solid var(--line);
     border-bottom: 0;
@@ -793,10 +797,16 @@ nav button[aria-current="page"] { color: var(--green); }
   #app,
   body > section { margin-left: var(--rail-w); }
 
-  #views { padding: clamp(34px, 3.4vw, 42px) clamp(24px, 3vw, 40px) 72px; }
+  /* Left aligned against the rail rather than centered in what is left over.
+     Centering put a wide screen's whole surplus into a gap between the rail and
+     the content, which reads as two unrelated columns. */
+  #views {
+    margin-inline: 0;
+    padding: clamp(34px, 3.4vw, 42px) clamp(24px, 3vw, 40px) 72px;
+  }
 
   nav {
-    inset: 82px auto 0 0;
+    inset: var(--rail-head) auto 0 0;
     width: var(--rail-w);
     flex-direction: column;
     justify-content: flex-start;
@@ -819,6 +829,14 @@ nav button[aria-current="page"] { color: var(--green); }
   }
 
   nav button:hover { background: var(--raised); }
+
+  /* The foot of the rail, which is where a setting belongs: available from every
+     screen and never in the way of the thing the screen is for. */
+  #theme {
+    position: fixed;
+    z-index: 21;
+    inset: auto auto 18px calc(18px + env(safe-area-inset-left, 0px));
+  }
 
   /* The active view is a filled pill rather than a marked edge, which is what
      lets it read as the place you are rather than as a decorated list item. */

@@ -145,6 +145,9 @@
   --track-label: 0.02em;
 
   --rail-w: 232px;
+  /* The rail's head. The nav starts here, so it is one value and not two that
+     have to be kept in agreement by hand. */
+  --rail-head: 86px;
   --content: 1120px;
   --strip: clamp(44px, 5.5vw, 64px);
   --strip-seam: 3px;

@@ -35,6 +35,12 @@ type Devices struct {
 	// allowlist on disk is what survives a restart, so a silent write failure
 	// would readmit a revoked device the next time the process starts.
 	lastSaveErr error
+	// How many times the registry has been written. A test asserting that a
+	// repeated sighting costs no write cannot read that off the file: a rewrite
+	// and no rewrite are indistinguishable by modification time when both land
+	// inside one filesystem timestamp tick, which is the ordinary case on Linux
+	// and is why this is counted rather than stat'ed.
+	writes int
 }
 
 func NewDevices(dir string, defaultAllow bool) (*Devices, error) {
@@ -177,6 +183,14 @@ func (d *Devices) saveLocked() error {
 	if err == nil {
 		err = atomicWrite(d.path, b)
 	}
+	d.writes++
 	d.lastSaveErr = err
 	return err
+}
+
+// saveCount reports how many times the registry has been written. Test seam.
+func (d *Devices) saveCount() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.writes
 }

@@ -162,32 +162,29 @@ func TestRepeatSightingsDoNotRewriteTheRegistry(t *testing.T) {
 	// The first sighting is a registration and must reach disk, or a restart
 	// bootstraps the next node straight in.
 	d.Seen("pixel", "owner@example.com", "100.64.0.1")
-	first, err := os.Stat(path)
-	if err != nil {
+	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("a registration did not reach disk: %v", err)
+	}
+	registered := d.saveCount()
+	if registered == 0 {
+		t.Fatal("a registration wrote nothing")
 	}
 
 	// Repeat sightings of an unchanged device change nothing that has to last.
+	// Counted rather than read off the file's modification time, which cannot
+	// tell a rewrite from no rewrite when both happen inside one timestamp tick.
 	for i := 0; i < 20; i++ {
 		d.Seen("pixel", "owner@example.com", "100.64.0.1")
 	}
-	again, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !again.ModTime().Equal(first.ModTime()) {
-		t.Fatal("repeat sightings rewrote the registry")
+	if got := d.saveCount(); got != registered {
+		t.Fatalf("20 repeat sightings cost %d writes, want 0", got-registered)
 	}
 
 	// Anything that has to survive still does. A device that changes address is
 	// a different device to reach.
 	d.Seen("pixel", "owner@example.com", "100.64.0.9")
-	moved, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if moved.ModTime().Equal(first.ModTime()) {
-		t.Fatal("a changed address was not persisted")
+	if got := d.saveCount(); got != registered+1 {
+		t.Fatalf("a changed address cost %d writes, want 1", got-registered)
 	}
 
 	// And it is the new value that survives a reload, not the old one.

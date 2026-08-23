@@ -422,28 +422,104 @@ function urlBase64ToUint8Array(base64) {
   return Uint8Array.from(raw, (c) => c.charCodeAt(0));
 }
 
+function sameBytes(left, right) {
+  const a = left instanceof Uint8Array ? left : new Uint8Array(left);
+  const b = right instanceof Uint8Array ? right : new Uint8Array(right);
+  return a.length === b.length && a.every((byte, i) => byte === b[i]);
+}
+
+const nativePush = {
+  ready: (scope) => scope.navigator.serviceWorker.ready,
+  save: (sub) => api.subscribePush(sub),
+};
+let pushImpl = nativePush;
+let pushAttempt = null;
+
+// Permission, capability and registration are separate facts. The first two
+// can be true while PushManager or the server refuses the actual subscription,
+// which used to make the Inbox hide its warning on a device that could never be
+// woken. Only "on" means the server accepted the endpoint.
+let pushSubscription = 'unknown';
+let subscribed = false;
+const pushStatusListeners = new Set();
+
+function setPushSubscription(next) {
+  if (pushSubscription === next) return;
+  pushSubscription = next;
+  for (const fn of pushStatusListeners) fn(next);
+}
+
+export function pushSubscriptionStatus() { return pushSubscription; }
+export function onPushStatus(fn) {
+  pushStatusListeners.add(fn);
+  return () => pushStatusListeners.delete(fn);
+}
+
+// Test seam. Production never calls this.
+export function __setPushImpl(impl = nativePush) {
+  pushImpl = impl;
+  pushAttempt = null;
+  subscribed = false;
+  setPushSubscription('unknown');
+}
+
 // Push is an enhancement, never a gate: every failure here is logged and the app
 // carries on unnotified rather than refusing to open.
-async function subscribePush() {
-  if (!state.config.vapidKey || !('Notification' in window)) return;
+export async function subscribePush(scope = globalThis) {
+  if (!state.config?.vapidKey || !('Notification' in scope) || !pushCapable(scope)) {
+    subscribed = false;
+    setPushSubscription('unavailable');
+    return false;
+  }
   // Never asks. Boot has no user gesture to spend, and iOS refuses the prompt
   // without one and records that refusal as the answer, which would burn the
-  // only chance this device gets. enablePush owns the asking.
-  if (Notification.permission !== 'granted') return;
-  try {
-    const reg = await navigator.serviceWorker.ready;
-    const sub = await reg.pushManager.getSubscription()
-      || await reg.pushManager.subscribe({
+  // only chance this device gets. enableNotifications owns the asking.
+  if (scope.Notification.permission !== 'granted') {
+    subscribed = false;
+    setPushSubscription('idle');
+    return false;
+  }
+  if (pushAttempt) return pushAttempt;
+
+  setPushSubscription('checking');
+  const attempt = (async () => {
+    try {
+      const reg = await pushImpl.ready(scope);
+      const applicationServerKey = urlBase64ToUint8Array(state.config.vapidKey);
+      let sub = await reg.pushManager.getSubscription();
+      // A restored or wiped server can have a new VAPID identity while Chrome
+      // still holds the endpoint made for the old one. Re-posting that endpoint
+      // looks successful locally but every later send is refused by the push
+      // service. Where the browser exposes the bound key, replace a stale
+      // subscription now instead of making "Register again" repeat the fault.
+      const bound = sub?.options?.applicationServerKey;
+      if (sub && bound && !sameBytes(bound, applicationServerKey)) {
+        await sub.unsubscribe();
+        sub = null;
+      }
+      sub ||= await reg.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(state.config.vapidKey),
+        applicationServerKey,
       });
-    await api.subscribePush(sub);
-    // Recorded because an arrival has to pick one announcer. Only a subscription
-    // the server actually accepted means the worker will be woken, and assuming
-    // it either doubles every notice or loses it.
-    subscribed = true;
-  } catch (err) {
-    console.warn('push subscription failed', err);
+      await pushImpl.save(sub);
+      // Recorded because an arrival has to pick one announcer. Only a
+      // subscription the server actually accepted means the worker will be
+      // woken, and assuming it either doubles every notice or loses it.
+      subscribed = true;
+      setPushSubscription('on');
+      return true;
+    } catch (err) {
+      subscribed = false;
+      setPushSubscription('failed');
+      console.warn('push subscription failed', err);
+      return false;
+    }
+  })();
+  pushAttempt = attempt;
+  try {
+    return await attempt;
+  } finally {
+    if (pushAttempt === attempt) pushAttempt = null;
   }
 }
 
@@ -530,11 +606,6 @@ function wireTheme() {
 // How long a notice stays up. Long enough to read a filename without looking for
 // it, short enough that a run of arrivals does not build a wall.
 export const TOAST_MS = 6000;
-
-// Whether the server holds a push subscription this device registered. False
-// until one is accepted, which is the honest default: an engine without push,
-// and one whose subscribe failed, both need the page to speak for itself.
-let subscribed = false;
 
 // An arrival the operating system will not announce, shown inside the page.
 // Returns the node so a caller can remove it early; a no-op outside a document,
@@ -629,7 +700,8 @@ export function notifyStatus(scope = globalThis) {
 // required: the server must have a key to sign with, and the engine must have
 // somewhere to receive.
 export function pushCapable(scope = globalThis) {
-  return Boolean(state.config?.vapidKey && 'PushManager' in scope);
+  return Boolean(state.config?.vapidKey && 'PushManager' in scope
+    && scope.navigator && 'serviceWorker' in scope.navigator);
 }
 
 // The ask, which must be called from inside a click. Permission is the whole
@@ -637,16 +709,32 @@ export function pushCapable(scope = globalThis) {
 // cannot take it still gets notifications while the app is running. Returns
 // whether this device will now be notified, so the caller can say what happened
 // rather than leaving a button that looks like it did nothing.
-export async function enableNotifications() {
-  if (!('Notification' in globalThis)) return false;
+export async function enableNotifications(scope = globalThis) {
+  if (!('Notification' in scope)) return false;
   try {
-    if (await Notification.requestPermission() !== 'granted') return false;
+    if (await scope.Notification.requestPermission() !== 'granted') return false;
   } catch (err) {
     console.warn('notification permission request failed', err);
     return false;
   }
-  await subscribePush();
-  return true;
+  if (!pushCapable(scope)) return true;
+  return subscribePush(scope);
+}
+
+// A push service accepting the server's test request is the strongest result a
+// page can observe. The system notification that follows is the final check; if
+// the request itself fails, put the registration back into a visible retryable
+// state instead of continuing to claim background delivery is on.
+export async function testPush() {
+  try {
+    await api.testPush();
+    return true;
+  } catch (err) {
+    subscribed = false;
+    setPushSubscription('failed');
+    console.warn('test push failed', err);
+    return false;
+  }
 }
 
 // Announce an arrival through the operating system from the page itself. This is

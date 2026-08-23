@@ -1,4 +1,7 @@
-import { registerView, state, el, onInbox, onProgress, notifyStatus, pushCapable, enableNotifications, toast } from '../app.js';
+import {
+  registerView, state, el, onInbox, onProgress, notifyStatus, pushCapable,
+  pushSubscriptionStatus, onPushStatus, enableNotifications, testPush, toast,
+} from '../app.js';
 import { api } from '../api.js';
 import { renderStrip } from '../strip.js';
 import { RUNG, exportFile } from '../export.js';
@@ -533,11 +536,42 @@ export async function terminateTransfer(t, meta, outbound, mutate, deps = {}) {
 function renderPushOffer(host) {
   const status = notifyStatus();
   const pushes = pushCapable();
+  const delivery = pushSubscriptionStatus();
 
-  // The only silent case, and it earns it: this device is fully set up.
+  // Permission and browser support are not proof that a subscription reached
+  // the server. Keep the state visible until that last step has succeeded, and
+  // leave a test beside the successful state so Android delivery can be checked
+  // without waiting for a real file.
   if (status === 'on' && pushes) {
-    host.hidden = true;
-    host.replaceChildren();
+    host.hidden = false;
+    if (delivery === 'on') {
+      const test = el('button', { class: 'ghost', type: 'button' }, 'Test notification');
+      test.addEventListener('click', async () => {
+        test.disabled = true;
+        test.textContent = 'Sending';
+        if (await testPush()) {
+          test.textContent = 'Sent';
+          toast('Test notification sent. Android should show it now.');
+        } else {
+          toast('The test notification was not accepted. Register push again.');
+          renderPushOffer(host);
+        }
+      });
+      host.replaceChildren('Background notifications are on. ', test);
+      return;
+    }
+    if (delivery === 'checking' || delivery === 'unknown') {
+      host.replaceChildren('Checking background notifications…');
+      return;
+    }
+    const retry = el('button', { class: 'ghost', type: 'button' }, 'Register again');
+    retry.addEventListener('click', async () => {
+      retry.disabled = true;
+      await enableNotifications();
+      renderPushOffer(host);
+    });
+    host.replaceChildren('Notifications are allowed, but this device is not registered'
+      + ' for background delivery. ', retry);
     return;
   }
   host.hidden = false;
@@ -588,6 +622,7 @@ registerView('inbox', 'Inbox', (panel) => {
     ask,
     list);
   renderPushOffer(ask);
+  onPushStatus(() => renderPushOffer(ask));
 
   // Which refresh owns the list. Rows are built before anything on screen is
   // touched, and a run that is overtaken while awaiting drops its work rather

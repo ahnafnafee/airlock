@@ -4,8 +4,11 @@ import (
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -168,6 +171,117 @@ func TestTargetsExcludeTheSenderAndRespectAddressing(t *testing.T) {
 	}
 }
 
+func TestArrivalPushCarriesRoutingAndBoundedSealedMetadata(t *testing.T) {
+	created := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	info := &TransferInfo{
+		Transfer: Transfer{
+			ID:        "0123456789abcdef0123456789abcdef",
+			Sender:    "desktop",
+			To:        []string{"pixel"},
+			CreatedAt: created,
+		},
+		Complete: true,
+		Meta:     "sealed-metadata",
+	}
+	body, err := marshalArrivalPush(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got pushMessage
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != pushPayloadVersion || got.Kind != pushKindArrival {
+		t.Fatalf("envelope = v%d %q, want v%d %q",
+			got.Version, got.Kind, pushPayloadVersion, pushKindArrival)
+	}
+	if got.ID != info.ID || got.Sender != info.Sender ||
+		got.CreatedAt != created.Format(time.RFC3339Nano) {
+		t.Fatalf("routing fields = %#v, want transfer %#v", got, info.Transfer)
+	}
+	if !got.Complete || got.Meta != info.Meta {
+		t.Fatalf("arrival state = complete %t meta %q", got.Complete, got.Meta)
+	}
+	info.Complete = false
+	body, err = marshalArrivalPush(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if complete, present := raw["complete"]; !present || complete != false {
+		t.Fatalf("incomplete arrival encoded complete = %v, present=%t", complete, present)
+	}
+
+	info.Meta = strings.Repeat("x", maxPushPayloadBytes*2)
+	body, err = marshalArrivalPush(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) > maxPushPayloadBytes {
+		t.Fatalf("fallback payload is %d bytes, limit is %d", len(body), maxPushPayloadBytes)
+	}
+	got = pushMessage{}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Meta != "" {
+		t.Fatal("oversized sealed metadata should be omitted from the wake-up")
+	}
+	if got.ID != info.ID || got.Sender != info.Sender {
+		t.Fatal("the generic fallback lost the fields needed for an immediate notification")
+	}
+}
+
+func TestArrivalPushIsHighUrgencyAndCollapsesPerTransfer(t *testing.T) {
+	p, err := NewPusher(t.TempDir(), "mailto:test@invalid", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := make(chan http.Header, 1)
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers <- r.Header.Clone()
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(endpoint.Close)
+	p.subs = []subscription{testSubscription(t, "pixel", endpoint.URL)}
+
+	info := &TransferInfo{Transfer: Transfer{
+		ID:        "0123456789abcdef0123456789abcdef",
+		Sender:    "desktop",
+		To:        []string{"pixel"},
+		CreatedAt: time.Now().UTC(),
+	}}
+	p.Notify(info)
+
+	select {
+	case got := <-headers:
+		if got.Get("Urgency") != string(webpush.UrgencyHigh) {
+			t.Fatalf("Urgency = %q, want %q", got.Get("Urgency"), webpush.UrgencyHigh)
+		}
+		if got.Get("Topic") != info.ID {
+			t.Fatalf("Topic = %q, want transfer id %q", got.Get("Topic"), info.ID)
+		}
+		if got.Get("TTL") != "3600" {
+			t.Fatalf("TTL = %q, want 3600", got.Get("TTL"))
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the push service never received the arrival")
+	}
+}
+
+func TestPushTestRequiresARegisteredDevice(t *testing.T) {
+	p, err := NewPusher(t.TempDir(), "mailto:test@invalid", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Test("pixel"); !errors.Is(err, errNoPushSubscription) {
+		t.Fatalf("Test without a subscription = %v, want %v", err, errNoPushSubscription)
+	}
+}
+
 // A push service that accepts the connection and never answers must cost one
 // device its notification, not the whole tailnet its notifications. Without a
 // deadline on the request the send never returns, and without concurrent sends
@@ -206,7 +320,11 @@ func TestNotifySurvivesAnEndpointThatNeverAnswers(t *testing.T) {
 
 	returned := make(chan struct{})
 	go func() {
-		p.Notify(nil, "sender")
+		p.Notify(&TransferInfo{Transfer: Transfer{
+			ID:        "0123456789abcdef0123456789abcdef",
+			Sender:    "sender",
+			CreatedAt: time.Now().UTC(),
+		}})
 		close(returned)
 	}()
 

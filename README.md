@@ -338,6 +338,11 @@ For notifications while the app is closed, **Chrome is the more reliable choice 
 Android**. Firefox on Android only receives notifications while Firefox itself is
 running.
 
+Open the Inbox and press **Test notification** to verify the subscription and
+Android delivery without waiting for a file. Swiping Airlock away normally still
+allows push; using Android's **Force stop** prevents notifications until the app
+is opened again.
+
 </details>
 
 <details>

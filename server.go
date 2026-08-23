@@ -156,6 +156,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/queue", g(s.queue))
 	s.mux.HandleFunc("GET /api/history", g(s.history))
 	s.mux.HandleFunc("POST /api/push/subscribe", g(s.subscribe))
+	s.mux.HandleFunc("POST /api/push/test", g(s.testPush))
 	s.mux.HandleFunc("GET /api/events", g(s.events))
 	s.mux.HandleFunc("GET /api/presence", g(s.presence))
 
@@ -693,7 +694,7 @@ func (s *Server) announce(id, sender string) {
 	// The open stream is the fast path and reaches a running app immediately.
 	// Push covers the case the stream cannot: an app that is not running at all.
 	s.cfg.Events.Publish(info.To, sender)
-	go s.cfg.Push.Notify(info.To, sender)
+	go s.cfg.Push.Notify(info)
 }
 
 // events streams to one device for as long as it stays connected. It carries
@@ -802,6 +803,22 @@ func (s *Server) subscribe(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.cfg.Push.Subscribe(node, raw); err != nil {
 		http.Error(w, "bad subscription", http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// testPush makes background delivery observable from the device that owns the
+// subscription. A 204 means a browser push service accepted at least one send;
+// the notification appearing is the end-to-end confirmation Android alone can
+// provide.
+func (s *Server) testPush(w http.ResponseWriter, r *http.Request) {
+	if err := s.cfg.Push.Test(who(r).Node); err != nil {
+		if errors.Is(err, errNoPushSubscription) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		http.Error(w, "the push service did not accept the test notification", http.StatusBadGateway)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

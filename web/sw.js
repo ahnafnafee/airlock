@@ -5,7 +5,7 @@ import {
 import { contentDisposition } from './naming.js';
 import { markCapability } from './inbound.js';
 import { inboundTo, setBadge } from './ios.js';
-import { acceptRoute, createArrivalQueue } from './notification.js';
+import { acceptRoute, createArrivalHandler, decodePushMessage } from './notification.js';
 
 // Registered with {type:'module'} so these imports work.
 
@@ -18,6 +18,7 @@ const RICH = typeof Notification !== 'undefined' && 'actions' in Notification.pr
 
 const TRANSFER_ID = /^[0-9a-f]{32}$/;
 const CHUNK_ID = /^[0-9a-f]{64}$/;
+const PUSH_REFRESH_TIMEOUT_MS = 5000;
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
@@ -84,16 +85,40 @@ async function stashShare(request) {
   return Response.redirect('/?share=1', 303);
 }
 
-const announcePush = createArrivalQueue({
-  list: notificationInbox,
-  visible: () => self.registration.getNotifications(),
-  onList: (inbox) => setBadge(inbox.length),
+const announcePush = createArrivalHandler({
   notify: announce,
-  fallback: () => self.registration.showNotification('Airlock', genericOptions()),
+  enrich: async (arrival) => {
+    const inbox = await notificationInbox();
+    await setBadge(inbox.length).catch(() => {});
+    if (arrival?.kind === 'arrival') {
+      return inbox.find((transfer) => transfer.id === arrival.id) || null;
+    }
+    // Compatibility for a push queued by an older Airlock server, before the
+    // payload identified its transfer. The generic notification is already on
+    // screen, so this lookup can improve it but can never delay it. Close that
+    // differently tagged placeholder before the named replacement lands.
+    try {
+      const placeholders = await self.registration.getNotifications({ tag: 'airlock-generic' });
+      for (const notification of placeholders) notification.close();
+    } catch {
+      // The richer notification is still worth showing if enumeration fails.
+    }
+    return inbox[0] || null;
+  },
 });
 
 self.addEventListener('push', (event) => {
-  event.waitUntil(announcePush());
+  const message = decodePushMessage(event.data);
+  if (message?.kind === 'test') {
+    event.waitUntil(self.registration.showNotification('Airlock', {
+      icon: '/icon-192.png',
+      badge: '/icon-badge.png',
+      tag: 'airlock-test',
+      body: 'Background notifications are working.',
+    }));
+    return;
+  }
+  event.waitUntil(announcePush(message));
 });
 
 self.addEventListener('notificationclick', (event) => {
@@ -121,8 +146,8 @@ self.addEventListener('notificationclick', (event) => {
 // getOk stops a refused request from arriving as a parse failure two lines
 // later, where the message would name JSON rather than the status that actually
 // ended the download.
-async function getOk(path) {
-  const res = await fetch(path);
+async function getOk(path, init = {}) {
+  const res = await fetch(path, init);
   if (!res.ok) throw new Error(`the server answered ${res.status}`);
   return res;
 }
@@ -166,17 +191,30 @@ function genericOptions(transfer, body = 'A file is waiting') {
 // those apart. Announcing a file this phone sent, or badging it, would be an
 // arrival that never happened.
 async function notificationInbox() {
-  const [inboxRes, whoRes] = await Promise.all([getOk('/api/inbox'), getOk('/api/whoami')]);
-  return inboundTo(await inboxRes.json(), (await whoRes.json()).node);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PUSH_REFRESH_TIMEOUT_MS);
+  try {
+    const init = { signal: controller.signal };
+    const [inboxRes, whoRes] = await Promise.all([
+      getOk('/api/inbox', init), getOk('/api/whoami', init),
+    ]);
+    return inboundTo(await inboxRes.json(), (await whoRes.json()).node);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-// The push that woke us says nothing, by design. Everything below is read from
-// the inbox and decrypted on this device, which is the only place a filename
-// exists in the clear. An unsealed meta record is refused for the same reason a
-// download refuses one: its name would be whatever the writer chose, and a
-// notification is a very good place to put a name nobody can vouch for.
+// The push carries routing fields and, when it fits, the sealed metadata record.
+// The first call for an arrival deliberately has no Meta and stops here, before
+// IndexedDB or the private origin can stall a sleeping phone. A second call can
+// decrypt the record on this device, which is still the only place a filename
+// exists in the clear. An unsealed record is refused for the same reason a
+// download refuses one: its name would be whatever the writer chose.
 async function announce(newest) {
   const base = genericOptions(newest);
+  if (!newest?.meta) {
+    return self.registration.showNotification(newest?.sender || 'Airlock', base);
+  }
   let mk = null;
   try {
     mk = await loadMaster();
@@ -197,10 +235,6 @@ async function announce(newest) {
   // itself, and every notification for the product's default would read as the
   // same anonymous nudge. The record is sealed and this device has the key, so
   // the filename is opened here and never learned by the server.
-  if (!newest.meta) {
-    return self.registration.showNotification('Airlock', base);
-  }
-
   let meta;
   try {
     meta = JSON.parse(new TextDecoder().decode(

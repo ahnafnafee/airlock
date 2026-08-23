@@ -82,4 +82,5 @@ export const api = {
   // The node this endpoint belongs to comes from the connection, not from here,
   // so the body is only the browser's own PushSubscription.
   subscribePush: (sub) => postJSON('/api/push/subscribe', sub),
+  testPush: () => postJSON('/api/push/test', {}),
 };

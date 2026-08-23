@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyTheme, arrivalChannel, ensurePaired, listen, nextTheme, notifyStatus, onDevices,
-  onInbox, pushCapable, retryDelay, secureEnough, state, storedTheme,
-  __setStreamImpl, RETRY_BASE_MS, RETRY_CAP_MS,
+  onInbox, onPushStatus, pushCapable, pushSubscriptionStatus, retryDelay,
+  secureEnough, state, storedTheme, subscribePush, __setPushImpl, __setStreamImpl,
+  RETRY_BASE_MS, RETRY_CAP_MS,
 } from './app.js';
 
 // EventSource readyState, per the HTML standard. Restated here rather than
@@ -300,7 +301,10 @@ test('an origin without web crypto is refused rather than half-run', () => {
 test('what this device can do about notifications is two facts, not one', () => {
   const config = state.config;
   const scope = (permission, push = true) => (push
-    ? { Notification: { permission }, PushManager: function () {} }
+    ? {
+      Notification: { permission }, PushManager: function () {},
+      navigator: { serviceWorker: {} },
+    }
     : { Notification: { permission } });
   try {
     state.config = { vapidKey: 'k' };
@@ -328,6 +332,104 @@ test('what this device can do about notifications is two facts, not one', () => 
     state.config = null;
     assert.equal(pushCapable(scope('granted', true)), false);
   } finally {
+    state.config = config;
+  }
+});
+
+// Permission and an implemented PushManager only say that registration can be
+// attempted. The old status hid the warning on those two facts even when the
+// POST that gives the server its endpoint failed, leaving a closed app silent
+// while its Inbox claimed everything was on.
+test('background delivery is on only after the server accepts the subscription', async () => {
+  const config = state.config;
+  const subscription = { endpoint: 'https://push.example/device' };
+  const scope = {
+    Notification: { permission: 'granted' },
+    PushManager: function () {},
+    navigator: { serviceWorker: {} },
+  };
+  const statuses = [];
+  const stop = onPushStatus((status) => statuses.push(status));
+  const warn = console.warn;
+  try {
+    state.config = { vapidKey: 'unused-for-an-existing-subscription' };
+    let saved = 0;
+    __setPushImpl({
+      ready: async () => ({
+        pushManager: {
+          getSubscription: async () => subscription,
+          subscribe: async () => { throw new Error('must reuse the existing subscription'); },
+        },
+      }),
+      save: async (got) => {
+        assert.equal(got, subscription);
+        saved++;
+      },
+    });
+
+    assert.equal(await subscribePush(scope), true);
+    assert.equal(saved, 1);
+    assert.equal(pushSubscriptionStatus(), 'on');
+
+    __setPushImpl({
+      ready: async () => ({
+        pushManager: {
+          getSubscription: async () => subscription,
+          subscribe: async () => subscription,
+        },
+      }),
+      save: async () => { throw new Error('server unavailable'); },
+    });
+    console.warn = () => {};
+    assert.equal(await subscribePush(scope), false);
+    assert.equal(pushSubscriptionStatus(), 'failed');
+    assert.ok(statuses.includes('checking'));
+    assert.ok(statuses.includes('on'));
+    assert.equal(statuses.at(-1), 'failed');
+  } finally {
+    console.warn = warn;
+    stop();
+    __setPushImpl();
+    state.config = config;
+  }
+});
+
+test('a subscription bound to an old VAPID key is replaced', async () => {
+  const config = state.config;
+  const scope = {
+    Notification: { permission: 'granted' },
+    PushManager: function () {},
+    navigator: { serviceWorker: {} },
+  };
+  let unsubscribed = 0;
+  let subscribedWith;
+  const replacement = { endpoint: 'https://push.example/new' };
+  try {
+    // AQID is the base64url form of [1, 2, 3]. The fake existing subscription
+    // says it was minted for a different application server key.
+    state.config = { vapidKey: 'AQID' };
+    __setPushImpl({
+      ready: async () => ({
+        pushManager: {
+          getSubscription: async () => ({
+            options: { applicationServerKey: new Uint8Array([9, 9, 9]).buffer },
+            unsubscribe: async () => { unsubscribed++; },
+          }),
+          subscribe: async (options) => {
+            subscribedWith = options.applicationServerKey;
+            return replacement;
+          },
+        },
+      }),
+      save: async (sub) => assert.equal(sub, replacement),
+    });
+
+    assert.equal(await subscribePush(scope), true);
+    assert.equal(unsubscribed, 1);
+    assert.deepEqual([...subscribedWith], [1, 2, 3]);
+    assert.equal(pushSubscriptionStatus(), 'on');
+  } finally {
+    __setPushImpl();
     state.config = config;
   }
 });

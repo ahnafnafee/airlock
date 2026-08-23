@@ -307,6 +307,42 @@ func TestRevocationRemovesTheTargetsPushSubscriptions(t *testing.T) {
 	}
 }
 
+func TestPushTestReportsRegistrationAndAcceptedDelivery(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	pusher, err := NewPusher(t.TempDir(), "mailto:test@invalid", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.cfg.Push = pusher
+
+	if got := do(t, s, "POST", "/api/push/test", "{}"); got.Code != http.StatusConflict {
+		t.Fatalf("test without a subscription = %d, want 409", got.Code)
+	}
+
+	received := make(chan http.Header, 1)
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- r.Header.Clone()
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(endpoint.Close)
+	pusher.subs = []subscription{testSubscription(t, "pixel", endpoint.URL)}
+
+	if got := do(t, s, "POST", "/api/push/test", "{}"); got.Code != http.StatusNoContent {
+		t.Fatalf("accepted test push = %d: %s", got.Code, got.Body.String())
+	}
+	select {
+	case headers := <-received:
+		if headers.Get("Topic") != "airlock-test" {
+			t.Fatalf("test Topic = %q, want airlock-test", headers.Get("Topic"))
+		}
+		if headers.Get("TTL") != "60" {
+			t.Fatalf("test TTL = %q, want 60", headers.Get("TTL"))
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the test push never reached the push service")
+	}
+}
+
 type delayedSubscriptionBody struct {
 	started chan struct{}
 	release chan struct{}

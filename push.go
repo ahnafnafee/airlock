@@ -28,9 +28,24 @@ const pushTimeout = 10 * time.Second
 // two kilobytes on such a subscription, which is silent unless the status is
 // read, and means a phone is the one device that never hears about an arrival.
 //
-// Padding buys nothing here in any case. The body is a fixed two bytes carrying
-// no information, so there is no length for a record size to hide.
+// A small record also keeps the encrypted routing payload from being padded to
+// several kilobytes when its sealed metadata is only a filename and size.
 const pushRecordBytes = 1024
+
+// Keep the useful part of a push comfortably below the payload ceilings of the
+// browser push services. Metadata is already a compact sealed record in normal
+// use, but the record endpoint is configurable and can admit much larger input;
+// a pathological filename must not turn the wake-up itself into an oversized
+// request. When the rich form does not fit, the routing fields still do and the
+// worker can show a generic notification immediately.
+const maxPushPayloadBytes = 2048
+
+const (
+	pushPayloadVersion = 1
+	pushKindArrival    = "arrival"
+	pushKindTest       = "test"
+	testPushTTL        = 60 * time.Second
+)
 
 // The ceiling a push service will honor regardless of what is asked for. Four
 // weeks is the documented maximum for both Mozilla's autopush and FCM.
@@ -45,6 +60,28 @@ type vapidKeys struct {
 	Private string `json:"private"`
 	Public  string `json:"public"`
 }
+
+// pushMessage is deliberately enough to notify without calling Airlock back.
+// Web Push encrypts this body to one browser subscription, and Meta is still
+// independently sealed with the household key, so the push provider learns no
+// filename. It does see the ordinary delivery metadata: endpoint, timing,
+// urgency, payload length and the opaque Topic header.
+type pushMessage struct {
+	Version   int    `json:"v"`
+	Kind      string `json:"kind"`
+	ID        string `json:"id,omitempty"`
+	Sender    string `json:"sender,omitempty"`
+	CreatedAt string `json:"createdAt,omitempty"`
+	Complete  bool   `json:"complete"`
+	Meta      string `json:"meta,omitempty"`
+}
+
+type pushDelivery struct {
+	Attempted int
+	Accepted  int
+}
+
+var errNoPushSubscription = errors.New("this device has no push subscription")
 
 // Pusher owns the VAPID identity and the device subscription list. Both persist
 // in the data directory, because regenerating the keys would silently invalidate
@@ -206,36 +243,110 @@ func (p *Pusher) targets(recipients []string, sender string) []subscription {
 	return out
 }
 
-// Notify wakes the relevant devices. The push deliberately carries no useful
-// payload: the filename lives behind the encryption boundary and this message
-// travels through a third-party push service, so the worker fetches and
-// decrypts the name locally instead.
+func (p *Pusher) targetsForNode(node string) []subscription {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]subscription, 0, len(p.subs))
+	for _, s := range p.subs {
+		if s.Node == node {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func marshalArrivalPush(info *TransferInfo) ([]byte, error) {
+	if info == nil {
+		return nil, errors.New("cannot notify about a nil transfer")
+	}
+	message := pushMessage{
+		Version:   pushPayloadVersion,
+		Kind:      pushKindArrival,
+		ID:        info.ID,
+		Sender:    info.Sender,
+		CreatedAt: info.CreatedAt.Format(time.RFC3339Nano),
+		Complete:  info.Complete,
+		Meta:      info.Meta,
+	}
+	body, err := json.Marshal(message)
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxPushPayloadBytes && message.Meta != "" {
+		message.Meta = ""
+		body, err = json.Marshal(message)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(body) > maxPushPayloadBytes {
+		return nil, fmt.Errorf("push payload is %d bytes; limit is %d", len(body), maxPushPayloadBytes)
+	}
+	return body, nil
+}
+
+// Notify wakes the relevant devices with enough encrypted payload to announce
+// the transfer without another network request. The filename remains sealed in
+// Meta, but the id and sender let a worker that has no key yet show a useful
+// generic notification immediately.
 //
 // The sends run concurrently because they are independent, and because a device
 // must not have its wake-up delayed by whatever another device's push service is
 // doing. Each one carries its own deadline, so a silent endpoint costs one
 // bounded wait on its own goroutine rather than everybody else's notification.
-func (p *Pusher) Notify(recipients []string, sender string) {
+func (p *Pusher) Notify(info *TransferInfo) {
+	body, err := marshalArrivalPush(info)
+	if err != nil {
+		log.Printf("push payload: %v", err)
+		return
+	}
+	p.send(p.targets(info.To, info.Sender), body, info.ID, p.ttl)
+}
+
+// Test sends one short-lived notification to every current subscription for a
+// device. Acceptance proves the whole server-side path through the browser's
+// push service; the notification itself is the only honest proof that Android
+// displayed it.
+func (p *Pusher) Test(node string) error {
+	targets := p.targetsForNode(node)
+	if len(targets) == 0 {
+		return errNoPushSubscription
+	}
+	body, err := json.Marshal(pushMessage{Version: pushPayloadVersion, Kind: pushKindTest})
+	if err != nil {
+		return err
+	}
+	delivery := p.send(targets, body, "airlock-test", uint32(testPushTTL/time.Second))
+	if delivery.Accepted == 0 {
+		return fmt.Errorf("no push service accepted the test notification")
+	}
+	return nil
+}
+
+func (p *Pusher) send(targets []subscription, body []byte, topic string, ttl uint32) pushDelivery {
 	var (
-		wg   sync.WaitGroup
-		mu   sync.Mutex
-		dead []string
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		dead     []string
+		accepted int
 	)
 	// ponytail: one goroutine per subscribed device, unbounded. A tailnet holds a
 	// handful of personal devices, so the fan-out is a handful of stalled requests
 	// at worst. If the device list ever grows past that, feed the sends through a
 	// worker pool instead of spawning per target.
-	for _, s := range p.targets(recipients, sender) {
+	for _, s := range targets {
 		wg.Add(1)
 		go func(s subscription) {
 			defer wg.Done()
 			sub := s.Sub
-			res, err := webpush.SendNotification([]byte("{}"), &sub, &webpush.Options{
+			res, err := webpush.SendNotification(body, &sub, &webpush.Options{
 				HTTPClient:      p.client,
 				Subscriber:      p.subject,
 				VAPIDPublicKey:  p.keys.Public,
 				VAPIDPrivateKey: p.keys.Private,
-				TTL:             int(p.ttl),
+				TTL:             int(ttl),
+				Topic:           topic,
+				Urgency:         webpush.UrgencyHigh,
 				RecordSize:      pushRecordBytes,
 			})
 			if err != nil {
@@ -249,6 +360,10 @@ func (p *Pusher) Notify(recipients []string, sender string) {
 			// has nowhere to be diagnosed from.
 			if res.StatusCode >= 300 {
 				log.Printf("push to %s refused: %s", s.Node, res.Status)
+			} else {
+				mu.Lock()
+				accepted++
+				mu.Unlock()
 			}
 			// The push service is the authority on whether an endpoint still
 			// exists. These two codes mean it is gone for good, as opposed to a
@@ -265,6 +380,7 @@ func (p *Pusher) Notify(recipients []string, sender string) {
 	if len(dead) > 0 {
 		p.prune(dead)
 	}
+	return pushDelivery{Attempted: len(targets), Accepted: accepted}
 }
 
 func (p *Pusher) prune(endpoints []string) {

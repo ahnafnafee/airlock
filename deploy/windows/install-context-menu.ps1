@@ -3,35 +3,23 @@
     Adds "Send with Airlock" to the Windows right-click menu.
 
 .DESCRIPTION
-    A browser-only product cannot install a shell extension and should not try.
-    What it can do is register a per-user context-menu command that invokes the
-    launcher Chrome or Edge already creates when the PWA is installed, the same
-    way those browsers invoke it for the Open with menu. The file is then handed
-    to the app's launchQueue, staged in the Send view, and waits for a
-    destination when its filename suffix is declared in Airlock's manifest.
-
-    The registry entry is visible for every file, but Chromium only forwards a
-    declared suffix to an installed app that is already running. Other files
-    still work through Airlock's picker or drag and drop.
-
-    Invoked the same way, exactly: the launcher must be given the profile, the
-    app id, and --single-argument. Handed a bare path it opens the browser on it
-    as though the path were a URL, which puts the file in a tab and never
-    reaches the app at all.
-
-    Nothing is shipped but a registry key. A helper that uploaded straight from
-    the shell would need the passphrase, and it would become a second
-    implementation of the encryption, which is the same reason there is no
-    native client.
+    Registers a per-user context-menu command and installs a small PowerShell
+    handoff helper. Chromium filters undeclared filename suffixes before a PWA's
+    launchQueue sees them, so the helper streams the selected file once over a
+    random 127.0.0.1 address instead. Airlock stages the resulting File and its
+    existing browser code performs all encryption and upload after Send.
 
     HKCU only: no administrator, and it uninstalls cleanly. Re-running points an
-    existing entry at the launcher that is current now.
+    existing entry at the launcher and Airlock origin that are current now.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\install-context-menu.ps1
 #>
 [CmdletBinding()]
-param()
+param(
+    [Parameter(Mandatory = $false)]
+    [string]$Origin
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -80,14 +68,87 @@ $path = 'Software\Classes\*\shell\Airlock'
 # there rather than asked for, so the entry cannot end up addressing a different
 # profile's copy of the same app.
 #
-# Every argument here is load-bearing. Without --app-id the launcher opens the
-# browser rather than the app; without --single-argument a path holding a space
-# or an ampersand is split into several arguments and none of them is the file.
-# This is the same command line the browser writes for its own Open with
-# handlers, which is the point: one way in, already known to work.
+# The app id and profile are read from the launcher path rather than accepted as
+# installer input. The context-menu helper later gives both back to the launcher
+# with an in-scope URL; the selected filesystem path never appears on that
+# browser command line.
 $appId = $launcher.Directory.Name -replace '^_crx_', ''
 $profile = $launcher.Directory.Parent.Parent.Name
-$command = "`"$($launcher.FullName)`" --profile-directory=$profile --app-id=$appId --single-argument %1"
+
+# Chromium derives a PWA id by hashing the resolved manifest id twice and
+# mapping the first 16 bytes to a-p. Airlock's manifest id is '/', so this lets
+# the profile's own installed-site metrics identify the exact origin belonging
+# to the launcher without guessing from a Tailscale hostname or port.
+function Get-AirlockAppId([string]$ManifestId) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $first = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($ManifestId))
+        $second = $sha.ComputeHash($first)
+    } finally {
+        $sha.Dispose()
+    }
+    $alphabet = 'abcdefghijklmnop'
+    $id = New-Object Text.StringBuilder
+    foreach ($byte in $second[0..15]) {
+        [void]$id.Append($alphabet[$byte -shr 4])
+        [void]$id.Append($alphabet[$byte -band 15])
+    }
+    return $id.ToString()
+}
+
+function Normalize-AirlockOrigin([string]$Value) {
+    try { $uri = [Uri]$Value } catch { throw "Airlock origin is not a valid URL: $Value" }
+    if (-not $uri.IsAbsoluteUri) { throw "Airlock origin is not absolute: $Value" }
+    $authority = $uri.GetLeftPart([UriPartial]::Authority)
+    if ($uri.AbsoluteUri -ne "$authority/") {
+        throw 'Airlock origin must contain only a scheme, host, and optional port.'
+    }
+    if ($uri.Scheme -ne 'https' -and -not ($uri.Scheme -eq 'http' -and $uri.IsLoopback)) {
+        throw 'Airlock origin must use HTTPS, except on loopback.'
+    }
+    return "$authority/"
+}
+
+if ($Origin) {
+    $airlockOrigin = Normalize-AirlockOrigin $Origin
+    if ((Get-AirlockAppId $airlockOrigin) -ne $appId) {
+        throw "The origin $airlockOrigin does not belong to the installed Airlock launcher $appId."
+    }
+} else {
+    $preferences = Join-Path $launcher.Directory.Parent.Parent.FullName 'Preferences'
+    $matches = @()
+    if (Test-Path -LiteralPath $preferences) {
+        try {
+            $prefs = Get-Content -LiteralPath $preferences -Raw | ConvertFrom-Json
+            foreach ($candidate in $prefs.web_apps.daily_metrics.PSObject.Properties) {
+                if ($candidate.Value.installed -and
+                    (Get-AirlockAppId $candidate.Name) -eq $appId) {
+                    $matches += Normalize-AirlockOrigin $candidate.Name
+                }
+            }
+        } catch {
+            # The explicit -Origin path below is the recovery for a locked,
+            # older, or otherwise unreadable browser preference file.
+        }
+    }
+    $matches = @($matches | Select-Object -Unique)
+    if ($matches.Count -ne 1) {
+        throw 'Could not identify this installed app''s origin. Re-run with -Origin https://your-airlock-host:port'
+    }
+    $airlockOrigin = $matches[0]
+}
+
+$sourceBridge = Join-Path $PSScriptRoot 'context-menu-bridge.ps1'
+if (-not (Test-Path -LiteralPath $sourceBridge -PathType Leaf)) {
+    throw "The handoff helper is missing beside this installer: $sourceBridge"
+}
+$installDir = Join-Path $env:LOCALAPPDATA 'Airlock\Shell'
+$installedBridge = Join-Path $installDir 'context-menu-bridge.ps1'
+New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+Copy-Item -LiteralPath $sourceBridge -Destination $installedBridge -Force
+
+$powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$command = "`"$powershell`" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$installedBridge`" -Launcher `"$($launcher.FullName)`" -Profile `"$profile`" -AppId $appId -Origin `"$airlockOrigin`" -FilePath `"%1`""
 
 # The launcher is a stub the browser copies for every installed app, so its own
 # first icon is the browser's, not Airlock's. Beside it the browser writes an
@@ -116,7 +177,10 @@ Write-Host ""
 Write-Host "Installed. Right-click any file and choose 'Send with Airlock'."
 Write-Host "  key    : HKCU\$path"
 Write-Host "  runs   : $command"
-Write-Host "  note   : undeclared file suffixes must use Choose files or drag and drop"
+Write-Host "  origin : $airlockOrigin"
+Write-Host ""
+Write-Host "The first right-click may ask whether Airlock can access devices on your"
+Write-Host "local network. Choose Allow; the one-shot helper listens only on 127.0.0.1."
 Write-Host ""
 Write-Host "On Windows 11 the classic menu is behind 'Show more options', so that is"
 Write-Host "where the entry appears. Shift+F10 opens it directly."

@@ -40,6 +40,9 @@
       "files": [{ "name": "files", "accept": ["*/*"] }]
     }
   },
+  "launch_handler": {
+    "client_mode": "focus-existing"
+  },
   "file_handlers": [
     {
       "action": "/open",

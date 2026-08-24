@@ -37,6 +37,9 @@ type webManifest struct {
 		Action string              `json:"action"`
 		Accept map[string][]string `json:"accept"`
 	} `json:"file_handlers"`
+	LaunchHandler struct {
+		ClientMode string `json:"client_mode"`
+	} `json:"launch_handler"`
 }
 
 func readManifest(t *testing.T) webManifest {
@@ -128,6 +131,17 @@ func TestManifestLaunchTargetsHaveHandlers(t *testing.T) {
 	}
 	if man.ShareTarget.Method != "POST" {
 		t.Errorf("share_target method = %q, want POST; a GET share would put the payload in a URL", man.ShareTarget.Method)
+	}
+}
+
+// A context-menu helper launches an in-scope URL rather than asking Chromium
+// to forward the selected path. The URL has to reach the already open Airlock
+// window: navigating a second client leaves the first staging list visible and
+// makes the right-click look like it did nothing.
+func TestManifestDeliversLaunchesToTheExistingWindow(t *testing.T) {
+	man := readManifest(t)
+	if man.LaunchHandler.ClientMode != "focus-existing" {
+		t.Fatalf("launch_handler.client_mode = %q, want focus-existing", man.LaunchHandler.ClientMode)
 	}
 }
 

@@ -15,10 +15,17 @@ import {
 // nobody answered as permission to send to everything.
 export const EVERY_DEVICE = '*';
 
-let sendImpl = { server: uploadThroughServer };
+const nativeSendImpl = {
+  server: uploadThroughServer,
+  active: async (delta) => {
+    const { transfersActive } = await import('../wake.js');
+    return transfersActive(delta);
+  },
+};
+let sendImpl = nativeSendImpl;
 
 // Test seam. Production never calls this.
-export function __setSendImpl(impl) { sendImpl = impl; }
+export function __setSendImpl(impl = {}) { sendImpl = { ...nativeSendImpl, ...impl }; }
 
 function humanSize(bytes) {
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -278,7 +285,20 @@ registerView('send', 'Send', (panel) => {
     // the next press.
     const files = staged.splice(0, staged.length);
     renderStaged();
-    const failed = await sendNow(files);
+    const { failed, setupError } = await sendNow(files);
+    if (setupError) {
+      // No upload began, so every file is still safe to offer again. Put the
+      // original batch before anything picked while setup was pending, which
+      // preserves the order the owner chose.
+      staged.unshift(...failed);
+      renderStaged();
+      const noun = files.length === 1 ? 'file is' : 'files are';
+      const why = setupError?.message || String(setupError);
+      status.className = 'data bad';
+      status.textContent = `Send could not start. ${why} The ${noun} still ready to retry.`;
+      announcement.textContent = status.textContent;
+      return;
+    }
     if (failed.length) {
       staged.push(...failed);
       renderStaged();
@@ -545,12 +565,15 @@ async function sendNow(files) {
   // radio, and the connection does not recover to full speed when it wakes.
   // Held across the whole batch rather than per file, so it is not dropped and
   // retaken between two files of a ten-file send.
-  const { transfersActive } = await import('../wake.js');
-  await transfersActive(1);
   try {
-    return await sendBatch(files);
+    await sendImpl.active(1);
+  } catch (err) {
+    return { failed: files, setupError: err };
+  }
+  try {
+    return { failed: await sendBatch(files), setupError: null };
   } finally {
-    await transfersActive(-1);
+    await sendImpl.active(-1);
   }
 }
 

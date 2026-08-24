@@ -5,6 +5,7 @@ import {
 import { api, ApiError } from './api.js';
 import { observeCapabilities } from './inbound.js';
 import { inboundTo, needsInstallGate, setBadge } from './ios.js';
+import { handoffURL, launchFiles } from './handoff.js';
 
 export const state = { mk: null, config: null, me: null };
 
@@ -388,6 +389,51 @@ async function handleLaunch() {
     return import('./views/send.js');
   };
 
+  // Register before awaiting a cold-start handoff. A second shell launch can
+  // arrive while the first file is crossing loopback, and launchQueue does not
+  // replay an event nobody was listening for.
+  const stagedHandoffs = new Set();
+  const consume = async (params) => {
+    const bridge = handoffURL(params?.targetURL, location.origin);
+    if (!bridge && !params?.files?.length) return;
+    if (bridge && stagedHandoffs.has(bridge)) return;
+    if (bridge) stagedHandoffs.add(bridge);
+    await staging();
+    try {
+      const files = await launchFiles(params, { origin: location.origin });
+      if (files.length) (await staging()).stageFiles(files);
+    } catch (err) {
+      if (bridge) {
+        stagedHandoffs.delete(bridge);
+        toast('The right-clicked file could not be added. Allow local network access for Airlock, then try again.', {
+          action: {
+            label: 'Try again',
+            run: async (button) => {
+              button.textContent = 'Trying';
+              await consume(params);
+            },
+          },
+        });
+      } else {
+        toast(`That file could not be added. ${err.message}`);
+      }
+      console.warn('launch payload could not be staged', err);
+    }
+  };
+
+  if ('launchQueue' in window) window.launchQueue.setConsumer(consume);
+
+  // A helper that starts a closed app puts the handoff in the page's initial
+  // URL. Remove the one-time token from browser history before reading it; a
+  // focused existing app receives the same URL through launchQueue instead.
+  const initial = new URL(location.href);
+  if (initial.searchParams.has('handoff')) {
+    const targetURL = initial.href;
+    initial.searchParams.delete('handoff');
+    history.replaceState(null, '', `${initial.pathname}${initial.search}${initial.hash}`);
+    await consume({ targetURL });
+  }
+
   // Android share sheet: the worker stashed the payload before redirecting here,
   // because the plaintext POST could not be allowed to reach the server. The
   // stash is cleared first, so the plaintext is not left at rest and a share is
@@ -400,17 +446,9 @@ async function handleLaunch() {
     else if (pending?.text) (await staging()).stageText(pending.text);
   }
 
-  // Windows: Chrome hands the app the files it was launched on, whether that was
-  // Open with for a type the manifest names or the context-menu entry for
-  // everything else. The shell says which files, and never which device they are
-  // for, so they stage like anything else.
-  if ('launchQueue' in window) {
-    window.launchQueue.setConsumer(async (params) => {
-      if (!params.files?.length) return;
-      const files = await Promise.all(params.files.map((h) => h.getFile()));
-      (await staging()).stageFiles(files);
-    });
-  }
+  // A declared Windows suffix still arrives as native file handles. An
+  // arbitrary suffix arrives as the helper's target URL. Both were registered
+  // above and both stop at the same staging list.
 }
 
 // The VAPID public key is base64url with the padding stripped, and

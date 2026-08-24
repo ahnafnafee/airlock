@@ -146,7 +146,7 @@ export function observeCapabilities({ doc = document, win = window } = {}) {
 export function installCard(caps = {}) {
   if (!caps.installable) return null;
   const opens = caps.fileHandlerApi
-    ? 'Install Airlock and every file gets an Open with Airlock entry.'
+    ? 'Install Airlock and supported files get an Open with Airlock entry.'
     : 'Install Airlock and it gets its own icon and window.';
   // Until a share has actually arrived, this says may. Chromium implements
   // share targets on Android and ChromeOS and not on Windows or macOS, and

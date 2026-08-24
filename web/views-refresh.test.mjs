@@ -91,7 +91,7 @@ class Stub {
   }
 
   fire(type, event = {}) {
-    for (const fn of this.handlers.get(type) || []) fn(event);
+    return (this.handlers.get(type) || []).map((fn) => fn(event));
   }
 
   // A real observer reports only what happened after observe(), and it batches:
@@ -436,6 +436,126 @@ test('a successful send refreshes an already-mounted sender inbox locally', asyn
   await settle();
 
   assert.equal(refreshes, 1);
+});
+
+test('the file picker stages another file after a completed send', async () => {
+  showView('send');
+  await settle();
+  sendView.__setSendImpl({
+    server: async () => ({ total: 0, held: 0, sent: 0, inflight: 0 }),
+  });
+
+  const input = find(sendPanel, (n) => n.tagName === 'INPUT'
+    && n.getAttribute('type') === 'file'
+    && n.getAttribute('webkitdirectory') === null);
+  const button = find(sendPanel, (n) => n.className === 'primary');
+  const list = find(sendPanel, (n) => n.getAttribute('aria-label') === 'Staged files');
+
+  picker().value = '*';
+  input.files = [new File(['first'], 'first.txt', { type: 'text/plain' })];
+  input.value = 'C:\\fakepath\\first.txt';
+  input.fire('change', { target: input });
+  assert.equal(list.children.length, 1);
+
+  button.fire('click');
+  await settle();
+  await settle();
+  assert.equal(list.children.length, 0, 'the completed file left the staging list');
+
+  input.files = [new File(['second'], 'second.txt', { type: 'text/plain' })];
+  input.value = 'C:\\fakepath\\second.txt';
+  input.fire('change', { target: input });
+
+  assert.equal(input.value, '', 'the picker is reset for a later selection');
+  assert.equal(list.children.length, 1, 'the later file was not staged');
+  assert.equal(
+    find(list.children[0], (n) => n.getAttribute('aria-label')?.startsWith('Name for')).value,
+    'second.txt',
+  );
+  find(list.children[0], (n) => n.getAttribute('aria-label')?.startsWith('Remove '))
+    .fire('click');
+});
+
+test('a file picked while the previous send finishes stays staged', async () => {
+  showView('send');
+  await settle();
+  let releaseFirst;
+  let reportStarted;
+  const firstStarted = new Promise((resolve) => { reportStarted = resolve; });
+  const firstFinished = new Promise((resolve) => { releaseFirst = resolve; });
+  sendView.__setSendImpl({
+    server: async (file) => {
+      if (file.name === 'first.txt') {
+        reportStarted();
+        await firstFinished;
+      }
+      return { total: 0, held: 0, sent: 0, inflight: 0 };
+    },
+  });
+
+  const input = find(sendPanel, (n) => n.tagName === 'INPUT'
+    && n.getAttribute('type') === 'file'
+    && n.getAttribute('webkitdirectory') === null);
+  const button = find(sendPanel, (n) => n.className === 'primary');
+  const list = find(sendPanel, (n) => n.getAttribute('aria-label') === 'Staged files');
+  picker().value = '*';
+  input.files = [new File(['first'], 'first.txt', { type: 'text/plain' })];
+  input.fire('change', { target: input });
+
+  const [sending] = button.fire('click');
+  await firstStarted;
+  input.files = [new File(['second'], 'second.txt', { type: 'text/plain' })];
+  input.fire('change', { target: input });
+
+  assert.equal(list.children.length, 1, 'the later pick did not appear while sending');
+  assert.equal(
+    find(list.children[0], (n) => n.getAttribute('aria-label')?.startsWith('Name for')).value,
+    'second.txt',
+  );
+
+  releaseFirst();
+  await sending;
+  assert.equal(list.children.length, 1, 'finishing the earlier send cleared the later pick');
+  find(list.children[0], (n) => n.getAttribute('aria-label')?.startsWith('Remove '))
+    .fire('click');
+});
+
+test('a transfer setup failure leaves the picked file ready to retry', async () => {
+  showView('send');
+  await settle();
+  let uploads = 0;
+  sendView.__setSendImpl({
+    active: async (delta) => {
+      if (delta > 0) throw new Error('the transfer support module did not load');
+    },
+    server: async () => {
+      uploads++;
+      return { total: 0, held: 0, sent: 0, inflight: 0 };
+    },
+  });
+
+  const input = find(sendPanel, (n) => n.tagName === 'INPUT'
+    && n.getAttribute('type') === 'file'
+    && n.getAttribute('webkitdirectory') === null);
+  const button = find(sendPanel, (n) => n.className === 'primary');
+  const list = find(sendPanel, (n) => n.getAttribute('aria-label') === 'Staged files');
+  picker().value = '*';
+  input.files = [new File(['retry'], 'retry.txt', { type: 'text/plain' })];
+  input.fire('change', { target: input });
+
+  const [attempt] = button.fire('click');
+  await attempt.catch(() => {});
+
+  assert.equal(uploads, 0, 'uploading began despite transfer setup failing');
+  assert.equal(list.children.length, 1, 'the picked file disappeared');
+  assert.equal(
+    find(list.children[0], (n) => n.getAttribute('aria-label')?.startsWith('Name for')).value,
+    'retry.txt',
+  );
+  assert.match(sendStatus().textContent, /still ready to retry/i);
+  assert.equal(sendStatus().className, 'data bad');
+  find(list.children[0], (n) => n.getAttribute('aria-label')?.startsWith('Remove '))
+    .fire('click');
 });
 
 test('a failed file stays staged and the batch reports it after later files succeed', async () => {

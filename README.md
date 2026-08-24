@@ -141,9 +141,10 @@ be there in the app.
 
 <br/>
 
-Adds **Send with Airlock** to the right-click menu for every file, with the
-Airlock icon. Choosing it opens the app with that file staged and waiting for
-you to pick a destination.
+Adds **Send with Airlock** to the right-click menu, with the Airlock icon.
+Choosing it opens the app with that file staged and waiting for you to pick a
+destination. It works for arbitrary extensions—including `.mpp` and files with
+no extension—not just the concrete suffixes Chromium allows a PWA to declare.
 
 **Install Airlock as an app in Chrome or Edge first.** The menu entry points at
 the launcher the browser creates when you install it, so there is nothing to
@@ -153,19 +154,33 @@ point at until you have. Then, from the repository:
 powershell -ExecutionPolicy Bypass -File .\deploy\windows\install-context-menu.ps1
 ```
 
+The installer normally identifies the app's address from the browser profile.
+If that profile is unavailable, provide it explicitly:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\windows\install-context-menu.ps1 -Origin https://your-airlock-host:8443
+```
+
 Remove it the same way with `uninstall-context-menu.ps1`.
 
-It writes one per-user registry key and needs no administrator. Nothing is
-installed but that key: the shell hands the file path to the app, which does the
-encrypting, because a helper that uploaded on its own would need your passphrase.
+It needs no administrator. The installer writes one per-user registry key and
+copies a small PowerShell handoff script under `%LOCALAPPDATA%\Airlock\Shell`.
+The helper listens on a random `127.0.0.1` port, serves the selected file once
+only to your Airlock origin, then exits. It never receives your passphrase and
+never uploads; the file lands on the normal staging list, and the browser does
+the existing encryption only after you press **Send**.
+
+Chrome may ask once whether Airlock can access devices on the local network.
+Choose **Allow**. The handoff is loopback-only—it cannot accept a connection
+from another machine—and denying it prevents the right-clicked file from being
+added. Airlock offers **Try again** if the prompt was missed.
 
 On Windows 11 the entry appears under **Show more options**, which is where
 classic menu entries live. Shift+F10 opens that menu directly.
 
-There is no ready-made `.reg` file to double-click, and there cannot be a
-shareable one: the launcher path contains a per-profile identifier that differs
-on every machine. Finding it is the only thing the script does that a `.reg`
-cannot.
+There is no ready-made `.reg` file to double-click: both the browser launcher
+path and the installed app identifier differ by profile, and the helper also
+needs the matching Airlock origin.
 
 </details>
 

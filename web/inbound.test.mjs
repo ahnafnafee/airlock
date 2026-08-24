@@ -109,6 +109,8 @@ test('the install card never claims a share menu before a share has landed', asy
 
   const desktop = { installable: true, fileHandlerApi: true };
   assert.ok(installCard(desktop).includes('Open with'));
+  assert.ok(installCard(desktop).includes('supported files'));
+  assert.ok(!installCard(desktop).includes('every file'));
   assert.ok(installCard(desktop).includes('may also appear'));
 
   const proven = { installable: true, fileHandlerApi: true, shareTarget: true };

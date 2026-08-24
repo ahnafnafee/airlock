@@ -118,7 +118,12 @@ try {
     # appears only when the browser asks the loopback endpoint for its bytes.
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = $Launcher
-    $start.Arguments = "--profile-directory=`"$Profile`" --app-id=$AppId `"$launchURL`""
+    # Chromium's shortcut-menu override is what makes an already-open app
+    # receive this URL immediately. A positional URL is honored on a cold
+    # launch but can be discarded by an existing installation until Chrome's
+    # periodic manifest refresh has learned launch_handler.
+    $start.Arguments = "--profile-directory=`"$Profile`" --app-id=$AppId " +
+        "--app-launch-url-for-shortcuts-menu-item=`"$launchURL`""
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $process = [Diagnostics.Process]::Start($start)

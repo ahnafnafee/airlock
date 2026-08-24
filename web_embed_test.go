@@ -34,7 +34,8 @@ type webManifest struct {
 		Method string `json:"method"`
 	} `json:"share_target"`
 	FileHandlers []struct {
-		Action string `json:"action"`
+		Action string              `json:"action"`
+		Accept map[string][]string `json:"accept"`
 	} `json:"file_handlers"`
 }
 
@@ -127,6 +128,31 @@ func TestManifestLaunchTargetsHaveHandlers(t *testing.T) {
 	}
 	if man.ShareTarget.Method != "POST" {
 		t.Errorf("share_target method = %q, want POST; a GET share would put the payload in a URL", man.ShareTarget.Method)
+	}
+}
+
+// Chrome will pass an undeclared suffix to a newly opened PWA window, but drops
+// it when the installed app is already running. That made the Explorer entry
+// appear to work once and then silently ignore the next Android package until
+// Airlock was closed. Keep the package and bundle suffixes people move between
+// Android devices in the installed file handler, so every launch reaches the
+// launchQueue consumer instead of stopping inside Chrome.
+func TestManifestHandlesAndroidPackageBundles(t *testing.T) {
+	man := readManifest(t)
+	if len(man.FileHandlers) != 1 {
+		t.Fatalf("want exactly one file handler, got %d", len(man.FileHandlers))
+	}
+
+	accepted := make(map[string]bool)
+	for _, extensions := range man.FileHandlers[0].Accept {
+		for _, extension := range extensions {
+			accepted[strings.ToLower(extension)] = true
+		}
+	}
+	for _, extension := range []string{".apk", ".apkm", ".apks", ".xapk", ".aab"} {
+		if !accepted[extension] {
+			t.Errorf("the Windows context-menu launch drops %s files after the first app launch", extension)
+		}
 	}
 }
 

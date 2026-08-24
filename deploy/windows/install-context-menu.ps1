@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Adds "Send with Airlock" to the right-click menu for every file type.
+    Adds "Send with Airlock" to the Windows right-click menu.
 
 .DESCRIPTION
     A browser-only product cannot install a shell extension and should not try.
@@ -8,7 +8,11 @@
     launcher Chrome or Edge already creates when the PWA is installed, the same
     way those browsers invoke it for the Open with menu. The file is then handed
     to the app's launchQueue, staged in the Send view, and waits for a
-    destination.
+    destination when its filename suffix is declared in Airlock's manifest.
+
+    The registry entry is visible for every file, but Chromium only forwards a
+    declared suffix to an installed app that is already running. Other files
+    still work through Airlock's picker or drag and drop.
 
     Invoked the same way, exactly: the launcher must be given the profile, the
     app id, and --single-argument. Handed a bare path it opens the browser on it
@@ -112,6 +116,7 @@ Write-Host ""
 Write-Host "Installed. Right-click any file and choose 'Send with Airlock'."
 Write-Host "  key    : HKCU\$path"
 Write-Host "  runs   : $command"
+Write-Host "  note   : undeclared file suffixes must use Choose files or drag and drop"
 Write-Host ""
 Write-Host "On Windows 11 the classic menu is behind 'Show more options', so that is"
 Write-Host "where the entry appears. Shift+F10 opens it directly."

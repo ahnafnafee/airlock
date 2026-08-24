@@ -44,7 +44,10 @@
     {
       "action": "/open",
       "accept": {
-        "application/octet-stream": [".bin", ".iso", ".img", ".dmg", ".apk"],
+        "application/octet-stream": [
+          ".bin", ".iso", ".img", ".dmg",
+          ".apk", ".apkm", ".apks", ".xapk", ".aab"
+        ],
         "application/pdf": [".pdf"],
         "application/zip": [".zip"],
         "application/x-7z-compressed": [".7z"],

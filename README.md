@@ -141,9 +141,15 @@ be there in the app.
 
 <br/>
 
-Adds **Send with Airlock** to the right-click menu for every file, with the
-Airlock icon. Choosing it opens the app with that file staged and waiting for
-you to pick a destination.
+Adds **Send with Airlock** to the right-click menu, with the Airlock icon.
+Choosing it opens the app with that file staged and waiting for you to pick a
+destination. Airlock declares common documents, archives, media, disk images,
+and Android package formats including `.apk`, `.apkm`, `.apks`, `.xapk`, and
+`.aab` to Chromium.
+
+Chromium only forwards declared filename suffixes to an installed app that is
+already open. For an unlisted suffix, use **Choose files** or drag the file into
+Airlock; those paths accept anything.
 
 **Install Airlock as an app in Chrome or Edge first.** The menu entry points at
 the launcher the browser creates when you install it, so there is nothing to
